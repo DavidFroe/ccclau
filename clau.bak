@@ -14,11 +14,6 @@ MAX_TURNS=""
 MAX_BUDGET_USD=""
 DANGEROUS_SKIP=0
 CLI_MODEL_OVERRIDE=""
-INTERACTION_LEVEL=""  # wird aus Config geladen; CLI --interaction überschreibt
-
-# Git-Aktionstypen
-GIT_ACTION=""
-GIT_REPO_NAME=""
 
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -27,16 +22,12 @@ load_config() {
   fi
   : "${CLAU_MODEL:=}"
   : "${CLAU_SESSION_ID:=}"
-  : "${CLAU_INTERACTION_LEVEL:=2}"
-  # CLI --interaction überschreibt später; hier nur den Config-Wert laden
-  INTERACTION_LEVEL="$CLAU_INTERACTION_LEVEL"
 }
 
 save_config() {
   cat > "$CONFIG_FILE" <<CONF_EOF
 CLAU_MODEL="${CLAU_MODEL}"
 CLAU_SESSION_ID="${CLAU_SESSION_ID}"
-CLAU_INTERACTION_LEVEL="${CLAU_INTERACTION_LEVEL}"
 CONF_EOF
 }
 
@@ -56,7 +47,7 @@ Verwendung (interaktiv wie bisher):
   clau.sh --install               Installiert "clau" nach ~/.local/bin
   clau.sh --uninstall             Entfernt "clau" aus ~/.local/bin
 
-Headless / Projekt-Modus:
+Headless / Projekt-Modus (neu):
   clau.sh --headless -p "Prompt"
   clau.sh --headless -p "Prompt" --effort high --max-turns 8 --max-budget-usd 1.5
   clau.sh --new -f /pfad          Neues Projektverzeichnis anlegen und dort interaktiv starten
@@ -72,19 +63,11 @@ Headless-/Projekt-Optionen:
       --max-budget-usd USD        Kostenlimit im print mode
       --dangerously-skip-permissions
                                   Alle Permission-Prompts überspringen (Vorsicht!)
-      --interaction N             0 = keine Nachfragen, alle Rechte (dangerously-skip)
-                                  1 = halbautomatisch (fragt nur bei Shellbefehlen)
-                                  2 = Standard (fragt bei Planung & Architektur)
-                                  Wird per-Verzeichnis in .clau.conf gespeichert.
 
-Git-Helfer (lokales Repo):
-  clau.sh --git-up                Lokale Änderungen committen & zu origin pushen
-  clau.sh --git-down              Änderungen von origin holen (mit Warnung bei lokalen Changes)
-
-Git-Helfer (Repo aus GitHub holen, per SSH):
-  clau.sh --git-down NAME         Holt git@github.com:DavidFroe/NAME.git in das aktuelle Verzeichnis
-                                  z.B. NAME=owlAPI -> git@github.com:DavidFroe/owlAPI.git
-                                  Fragt vorher, ob bestehender Inhalt überschrieben werden darf.
+Hinweise:
+  - Wenn kein Modell gesetzt ist, fragt clau.sh im interaktiven Modus nach einem Modell.
+  - Wenn keine feste Session-ID gesetzt ist, öffnet clau.sh im interaktiven Modus den Resume-Picker.
+  - Im headless mode (mit --headless) wird kein TUI gestartet, sondern direkt der Prompt ausgeführt.
 
 Model-Mappings:
   1 = haiku
@@ -99,7 +82,7 @@ model_from_number() {
     2) CLAU_MODEL="sonnet" ;;
     3) CLAU_MODEL="opus" ;;
     *)
-      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1=haiku,2=sonnet,3=opus)" >&2
+      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1=haiku, 2=sonnet, 3=opus)" >&2
       exit 1
       ;;
   esac
@@ -161,35 +144,6 @@ ensure_model() {
   fi
 }
 
-interaction_label() {
-  case "${INTERACTION_LEVEL:-2}" in
-    0) echo "0 – vollautomatisch (keine Nachfragen, alle Rechte)" ;;
-    1) echo "1 – halbautomatisch (fragt nur bei Shellbefehlen)" ;;
-    2) echo "2 – Standard (fragt bei Planung & Architektur)" ;;
-    *) echo "${INTERACTION_LEVEL}" ;;
-  esac
-}
-
-choose_interaction_interactive() {
-  while true; do
-    echo
-    echo "Autonomie-Level wählen:"
-    echo "  0) Vollautomatisch – keine Nachfragen, alle Rechte, läuft stundenlang durch"
-    echo "  1) Halbautomatisch – fragt nur bei wesentlichen Dingen (Shellbefehle etc.)"
-    echo "  2) Standard        – fragt bei Planung & architektonischen Änderungen"
-    printf "Auswahl [0-2, Enter=2]: "
-    read -r choice
-    case "${choice:-2}" in
-      0) CLAU_INTERACTION_LEVEL=0; INTERACTION_LEVEL=0; break ;;
-      1) CLAU_INTERACTION_LEVEL=1; INTERACTION_LEVEL=1; break ;;
-      2) CLAU_INTERACTION_LEVEL=2; INTERACTION_LEVEL=2; break ;;
-      *) echo "Ungültige Auswahl. Bitte 0, 1 oder 2 eingeben." ;;
-    esac
-  done
-  save_config
-  echo "Autonomie-Level gesetzt auf: $(interaction_label)"
-}
-
 install_self() {
   local script_path target_path
   script_path="$(readlink -f "$0")"
@@ -226,14 +180,6 @@ uninstall_self() {
   fi
 }
 
-_interaction_args() {
-  # Gibt die Flags für das aktuelle Interaction-Level als Array-Elemente aus
-  case "${INTERACTION_LEVEL:-2}" in
-    0) echo "--dangerously-skip-permissions" ;;
-    1|2) ;;
-  esac
-}
-
 run_resume_picker() {
   local mdl
   mdl="$(effective_model)"
@@ -241,10 +187,8 @@ run_resume_picker() {
     ensure_model
     mdl="$(effective_model)"
   fi
-  echo "Öffne Session-Auswahl (Modell: $mdl, Autonomie: $(interaction_label)) ..."
-  local extra; extra="$(_interaction_args)"
-  # shellcheck disable=SC2086
-  exec claude --resume --model "$mdl" $extra
+  echo "Öffne Session-Auswahl für dieses Verzeichnis mit Modell $mdl ..."
+  exec claude --resume --model "$mdl"
 }
 
 run_saved_session() {
@@ -254,10 +198,8 @@ run_saved_session() {
     ensure_model
     mdl="$(effective_model)"
   fi
-  echo "Starte feste Session $CLAU_SESSION_ID (Modell: $mdl, Autonomie: $(interaction_label)) ..."
-  local extra; extra="$(_interaction_args)"
-  # shellcheck disable=SC2086
-  exec claude --resume "$CLAU_SESSION_ID" --model "$mdl" $extra
+  echo "Starte feste Session $CLAU_SESSION_ID mit Modell $mdl ..."
+  exec claude --resume "$CLAU_SESSION_ID" --model "$mdl"
 }
 
 run_new_session() {
@@ -267,10 +209,8 @@ run_new_session() {
     ensure_model
     mdl="$(effective_model)"
   fi
-  echo "Starte neue Session (Modell: $mdl, Autonomie: $(interaction_label)) ..."
-  local extra; extra="$(_interaction_args)"
-  # shellcheck disable=SC2086
-  exec claude --model "$mdl" $extra
+  echo "Starte neue Session mit Modell $mdl ..."
+  exec claude --model "$mdl"
 }
 
 build_headless_cmd() {
@@ -287,24 +227,11 @@ build_headless_cmd() {
     CLAUDE_CMD+=(--effort "$EFFORT_LEVEL")
   fi
 
-  case "$INTERACTION_LEVEL" in
-    0)
-      CLAUDE_CMD+=(--dangerously-skip-permissions)
-      ;;
-    1)
-      ;;
-    2)
-      ;;
-    *)
-      echo "--interaction erwartet 0, 1 oder 2" >&2
-      exit 1
-      ;;
-  esac
-
   if [[ "$DANGEROUS_SKIP" -eq 1 ]]; then
     CLAUDE_CMD+=(--dangerously-skip-permissions)
   fi
 
+  # headless/print mode
   CLAUDE_CMD+=(-p)
 
   if [[ -z "${PROMPT_TEXT:-}" ]]; then
@@ -347,6 +274,7 @@ run_new_project_interactive() {
   echo "Projektverzeichnis bereit: $dir"
   (
     cd "$dir"
+    # eigene .clau.conf pro Projekt
     if [[ -f "$CONFIG_FILE" ]]; then
       source "$CONFIG_FILE"
       : "${CLAU_MODEL:=}"
@@ -390,12 +318,10 @@ interactive_start() {
   if [[ -n "${CLAU_SESSION_ID:-}" ]]; then
     echo "  3) Feste gespeicherte Session starten ($CLAU_SESSION_ID)"
     echo "  4) Modell ändern (aktuell: $mdl)"
-    echo "  5) Autonomie-Level ändern (aktuell: $(interaction_label))"
-    printf "Auswahl [1-5, Enter=1]: "
+    printf "Auswahl [1-4, Enter=1]: "
   else
     echo "  3) Modell ändern (aktuell: $mdl)"
-    echo "  4) Autonomie-Level ändern (aktuell: $(interaction_label))"
-    printf "Auswahl [1-4, Enter=1]: "
+    printf "Auswahl [1-3, Enter=1]: "
   fi
 
   read -r start_choice
@@ -407,10 +333,6 @@ interactive_start() {
       3) run_saved_session ;;
       4)
         choose_model_interactive
-        interactive_start
-        ;;
-      5)
-        choose_interaction_interactive
         interactive_start
         ;;
       *)
@@ -426,10 +348,6 @@ interactive_start() {
         choose_model_interactive
         interactive_start
         ;;
-      4)
-        choose_interaction_interactive
-        interactive_start
-        ;;
       *)
         echo "Ungültige Auswahl."
         exit 1
@@ -438,161 +356,7 @@ interactive_start() {
   fi
 }
 
-# --- Git-Helfer (lokales Repo) ---
-
-ensure_git_repo() {
-  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    echo "Dieses Verzeichnis ist kein Git-Repository." >&2
-    exit 1
-  fi
-}
-
-git_has_changes() {
-  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-    return 0
-  else
-    return 1
-  fi
-}
-
-ask_yes_no() {
-  local prompt="$1"
-  local answer
-  while true; do
-    printf "%s [j/n]: " "$prompt"
-    read -r answer
-    case "${answer,,}" in
-      j|ja|y|yes) return 0 ;;
-      n|nein|no) return 1 ;;
-      *) echo "Bitte j oder n eingeben." ;;
-    esac
-  done
-}
-
-run_git_up() {
-  ensure_git_repo
-
-  echo "Git-Status:"
-  git status --short || true
-  echo
-
-  if git_has_changes; then
-    if ask_yes_no "Uncommitted Änderungen vorhanden. Commit & Push?"; then
-      printf "Commit-Message: "
-      read -r msg
-      if [[ -z "$msg" ]]; then
-        msg="Update via clau --git-up"
-      fi
-      git add -A
-      git commit -m "$msg"
-    else
-      echo "Abgebrochen, da Änderungen nicht committet werden sollen."
-      exit 1
-    fi
-  else
-    echo "Keine lokalen Änderungen zu committen."
-  fi
-
-  local branch
-  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")"
-
-  echo
-  echo "Hole aktuellen Stand von origin/$branch (git pull --rebase)..."
-  git pull --rebase || echo "Hinweis: git pull --rebase ist fehlgeschlagen, bitte ggf. manuell prüfen."
-
-  echo
-  echo "Push zu origin/$branch..."
-  if git push; then
-    echo "Push erfolgreich."
-  else
-    echo "Normaler Push fehlgeschlagen."
-    if ask_yes_no "Soll ein 'git push --force-with-lease' versucht werden? (vorsichtig benutzen)"; then
-      git push --force-with-lease
-      echo "Force-Push (mit lease) ausgeführt."
-    else
-      echo "Kein Force-Push durchgeführt."
-      exit 1
-    fi
-  fi
-}
-
-run_git_down_local() {
-  ensure_git_repo
-
-  if git_has_changes; then
-    echo "WARNUNG: Es gibt lokale uncommitted Änderungen:"
-    git status --short || true
-    if ! ask_yes_no "Trotzdem von origin holen (git pull --rebase)?"; then
-      echo "Abgebrochen."
-      exit 1
-    fi
-  fi
-
-  local branch
-  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")"
-
-  echo "Hole aktuellen Stand von origin/$branch (git pull --rebase)..."
-  git pull --rebase
-}
-
-# --- Git-Helfer: Repo aus GitHub (SSH) in aktuelles Verzeichnis holen ---
-
-run_git_down_repo() {
-  local repo_name="$1"
-
-  if [[ -z "$repo_name" ]]; then
-    echo "--git-down NAME erwartet einen Repository-Namen (z.B. owlAPI)" >&2
-    exit 1
-  fi
-
-  local github_user="DavidFroe"
-  local repo_url="git@github.com:${github_user}/${repo_name}.git"
-
-  echo "Ziel-Repository (SSH): $repo_url"
-  echo
-
-  if [[ -d ".git" ]]; then
-    echo "Hinweis: Dieses Verzeichnis ist bereits ein Git-Repository:"
-    git status --short 2>/dev/null || true
-    if ! ask_yes_no "Bestehendes Repository HIER komplett durch $repo_url ersetzen? (inkl. .git)"; then
-      echo "Abgebrochen."
-      exit 1
-    fi
-  fi
-
-  echo "Aktueller Inhalt von $(pwd):"
-  ls -A
-
-  if ! ask_yes_no "Alle bestehenden Dateien/Ordner in diesem Verzeichnis entfernen und $repo_url hierher klonen?"; then
-    echo "Abgebrochen."
-    exit 1
-  fi
-
-  local ts backup_name
-  ts="$(date +%Y%m%d_%H%M%S)"
-  backup_name="../backup_$(basename "$(pwd)")_${ts}.tar.gz"
-
-  echo "Erstelle Backup des aktuellen Inhalts in: $backup_name"
-  tar -czf "$backup_name" . || echo "Hinweis: Backup konnte nicht vollständig erstellt werden. Prüfe $backup_name."
-
-  echo "Lösche aktuellen Inhalt..."
-  find . -mindepth 1 -maxdepth 1 -exec rm -rf {} \; 2>/dev/null
-
-  echo "Initialisiere Git-Repository in $(pwd)..."
-  git init -b main
-
-  git remote add origin "$repo_url"
-
-  echo "Hole Daten von origin..."
-  git fetch origin
-
-  echo "Checkout von origin/main..."
-  git checkout -t origin/main 2>/dev/null || git checkout main || git checkout -b main origin/main
-
-  echo "Fertig: Repository $repo_url ist jetzt in $(pwd) ausgecheckt."
-  echo "Backup des alten Inhalts liegt in: $backup_name"
-}
-
+# Argumente parsen (erweitert um headless / folder / prompt / -m)
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -653,6 +417,7 @@ parse_args() {
         exit 0
         ;;
       --list)
+        # später ausgeführt
         ACTION="list"
         shift
         ;;
@@ -705,29 +470,8 @@ parse_args() {
         DANGEROUS_SKIP=1
         shift
         ;;
-      --interaction)
-        INTERACTION_LEVEL="${2:-}"
-        case "$INTERACTION_LEVEL" in
-          0|1|2) ;;
-          *) echo "--interaction erwartet 0, 1 oder 2" >&2; exit 1 ;;
-        esac
-        shift 2
-        ;;
-      --git-up)
-        ACTION="git-up"
-        shift
-        ;;
-      --git-down)
-        if [[ -n "${2:-}" && "${2:0:1}" != "-" ]]; then
-          GIT_ACTION="remote-down"
-          GIT_REPO_NAME="$2"
-          shift 2
-        else
-          ACTION="git-down-local"
-          shift
-        fi
-        ;;
       *)
+        # Unbekannt -> Fehler + Hilfe
         echo "Unbekannte Option: $1" >&2
         echo
         print_help
@@ -762,16 +506,8 @@ case "${ACTION}" in
       fi
     fi
     ;;
-  git-up)
-    run_git_up
-    ;;
-  git-down-local)
-    run_git_down_local
-    ;;
   interactive)
-    if [[ "$GIT_ACTION" == "remote-down" ]]; then
-      run_git_down_repo "$GIT_REPO_NAME"
-    elif [[ "$HEADLESS" -eq 1 ]]; then
+    if [[ "$HEADLESS" -eq 1 ]]; then
       if [[ -n "${TARGET_DIR:-}" ]]; then
         run_headless_in_dir "$TARGET_DIR"
       else
