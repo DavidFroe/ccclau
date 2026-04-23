@@ -28,7 +28,6 @@ load_config() {
   : "${CLAU_MODEL:=}"
   : "${CLAU_SESSION_ID:=}"
   : "${CLAU_INTERACTION_LEVEL:=2}"
-  # CLI --interaction überschreibt später; hier nur den Config-Wert laden
   INTERACTION_LEVEL="$CLAU_INTERACTION_LEVEL"
 }
 
@@ -44,52 +43,49 @@ print_help() {
   cat <<'HELP_EOF'
 clau.sh - Interaktiver & Headless-Wrapper für Claude Code mit per-Ordner-Config
 
-Verwendung (interaktiv wie bisher):
-  clau.sh                         Interaktiver Start: Session/Modell auswählen
-  clau.sh --list                  Öffnet den Claude-Resume-Picker
-  clau.sh --new                   Startet eine neue Session
-  clau.sh --model N               Setzt das Standardmodell (1=haiku, 2=sonnet, 3=opus)
-  clau.sh --take ID               Merkt sich eine feste Session-ID für dieses Verzeichnis
-  clau.sh --forget                Entfernt die gemerkte Session-ID
-  clau.sh --current               Zeigt aktuelle Session/Model-Config
-  clau.sh --clear-model           Entfernt das gespeicherte Modell
-  clau.sh --install               Installiert "clau" nach ~/.local/bin
-  clau.sh --uninstall             Entfernt "clau" aus ~/.local/bin
+Verwendung (interaktiv):
+  clau                            Interaktiver Start: Session/Modell auswählen
+  clau --list                     Öffnet den Claude-Resume-Picker
+  clau --new                      Startet eine neue Session
+  clau --model N                  Setzt das Standardmodell (1=haiku, 2=sonnet, 3=opus)
+  clau --take ID                  Merkt sich eine feste Session-ID für dieses Verzeichnis
+  clau --forget                   Entfernt die gemerkte Session-ID
+  clau --current                  Zeigt aktuelle Session/Model-Config
+  clau --clear-model              Entfernt das gespeicherte Modell
+  clau --install                  Installiert "clau" nach ~/.local/bin
+  clau --uninstall                Entfernt "clau" aus ~/.local/bin
+  clau --self-update              Aktualisiert clau auf die neueste Version aus dem Git-Repo
 
 Headless / Projekt-Modus:
-  clau.sh --headless -p "Prompt"
-  clau.sh --headless -p "Prompt" --effort high --max-turns 8 --max-budget-usd 1.5
-  clau.sh --new -f /pfad          Neues Projektverzeichnis anlegen und dort interaktiv starten
-  clau.sh --new --headless -f /pfad -p "Prompt" -m haiku --effort high --max-turns 8
+  clau --headless -p "Prompt"
+  clau --headless -p "Prompt" --effort high --max-turns 8 --max-budget-usd 1.5
+  clau --new -f /pfad             Neues Projektverzeichnis anlegen und dort interaktiv starten
+  clau --new --headless -f /pfad -p "Prompt" -m haiku --effort high --max-turns 8
 
-Headless-/Projekt-Optionen:
+Headless-Optionen:
   --headless                      Claude im print/headless mode (nicht interaktiv)
   -p, --prompt TEXT               Prompt-Text für headless mode (erforderlich bei --headless)
-  -f, --folder PATH               Zielverzeichnis für --new (wird angelegt, falls nicht vorhanden)
-  -m, --mdl MODEL                 Modell für diesen Aufruf: haiku | sonnet | opus
+  -f, --folder PATH               Zielverzeichnis für --new
+  -m, --mdl MODEL                 Modell: haiku | sonnet | opus
       --effort LEVEL              low | medium | high | max
-      --max-turns N               Max. agentische Schritte im print mode
-      --max-budget-usd USD        Kostenlimit im print mode
+      --max-turns N               Max. agentische Schritte
+      --max-budget-usd USD        Kostenlimit
       --dangerously-skip-permissions
-                                  Alle Permission-Prompts überspringen (Vorsicht!)
-      --interaction N             0 = keine Nachfragen, alle Rechte (dangerously-skip)
+                                  Alle Permission-Prompts überspringen
+      --interaction N             0 = vollautomatisch (keine Nachfragen, alle Rechte)
                                   1 = halbautomatisch (fragt nur bei Shellbefehlen)
                                   2 = Standard (fragt bei Planung & Architektur)
                                   Wird per-Verzeichnis in .clau.conf gespeichert.
 
-Git-Helfer (lokales Repo):
-  clau.sh --git-up                Lokale Änderungen committen & zu origin pushen
-  clau.sh --git-down              Änderungen von origin holen (mit Warnung bei lokalen Changes)
+Git-Helfer (aktuelles Repo):
+  clau --git-up                   Lokale Änderungen committen & pushen
+  clau --git-down                 Änderungen von origin holen (git pull --rebase)
 
-Git-Helfer (Repo aus GitHub holen, per SSH):
-  clau.sh --git-down NAME         Holt git@github.com:DavidFroe/NAME.git in das aktuelle Verzeichnis
-                                  z.B. NAME=owlAPI -> git@github.com:DavidFroe/owlAPI.git
-                                  Fragt vorher, ob bestehender Inhalt überschrieben werden darf.
+Git-Helfer (Repo aus GitHub via SSH):
+  clau --git-down NAME            Klont git@github.com:DavidFroe/NAME.git ins aktuelle Verzeichnis
 
 Model-Mappings:
-  1 = haiku
-  2 = sonnet
-  3 = opus
+  1 = haiku   2 = sonnet   3 = opus
 HELP_EOF
 }
 
@@ -128,9 +124,10 @@ effective_model() {
 }
 
 show_current() {
-  echo "Aktuelles Verzeichnis: $(pwd)"
+  echo "Aktuelles Verzeichnis : $(pwd)"
   echo "Konfiguriertes Modell : ${CLAU_MODEL:-<nicht gesetzt>}"
   echo "Feste Session-ID      : ${CLAU_SESSION_ID:-<keine>}"
+  echo "Autonomie-Level       : $(interaction_label)"
 }
 
 choose_model_interactive() {
@@ -226,12 +223,35 @@ uninstall_self() {
   fi
 }
 
+self_update() {
+  local script_path repo_dir
+  script_path="$(readlink -f "$0")"
+  repo_dir="$(dirname "$script_path")"
+
+  if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Das clau-Verzeichnis ($repo_dir) ist kein Git-Repository." >&2
+    exit 1
+  fi
+
+  echo "Aktualisiere clau aus $(git -C "$repo_dir" remote get-url origin 2>/dev/null || echo 'origin') ..."
+  git -C "$repo_dir" pull --rebase
+
+  chmod +x "$script_path"
+  echo "clau wurde aktualisiert."
+
+  # Symlink neu setzen falls vorhanden
+  local target_path="${INSTALL_DIR}/${INSTALL_NAME}"
+  if [[ -L "$target_path" ]]; then
+    ln -sfn "$script_path" "$target_path"
+    echo "Symlink aktualisiert: $target_path -> $script_path"
+  fi
+}
+
 _interaction_args() {
-  # Gibt die Flags für das aktuelle Interaction-Level als Array-Elemente aus
-  case "${INTERACTION_LEVEL:-2}" in
-    0) echo "--dangerously-skip-permissions" ;;
-    1|2) ;;
-  esac
+  # --dangerously-skip-permissions ist von Claude CLI als root verboten
+  if [[ "${INTERACTION_LEVEL:-2}" -eq 0 ]] && [[ "$(id -u)" -ne 0 ]]; then
+    echo "--dangerously-skip-permissions"
+  fi
 }
 
 run_resume_picker() {
@@ -289,19 +309,18 @@ build_headless_cmd() {
 
   case "$INTERACTION_LEVEL" in
     0)
-      CLAUDE_CMD+=(--dangerously-skip-permissions)
+      if [[ "$(id -u)" -ne 0 ]]; then
+        CLAUDE_CMD+=(--dangerously-skip-permissions)
+      fi
       ;;
-    1)
-      ;;
-    2)
-      ;;
+    1|2) ;;
     *)
       echo "--interaction erwartet 0, 1 oder 2" >&2
       exit 1
       ;;
   esac
 
-  if [[ "$DANGEROUS_SKIP" -eq 1 ]]; then
+  if [[ "$DANGEROUS_SKIP" -eq 1 ]] && [[ "$(id -u)" -ne 0 ]]; then
     CLAUDE_CMD+=(--dangerously-skip-permissions)
   fi
 
@@ -370,6 +389,7 @@ run_new_project_interactive() {
       cat > "$CONFIG_FILE" <<EOF
 CLAU_MODEL="${CLAU_MODEL}"
 CLAU_SESSION_ID=""
+CLAU_INTERACTION_LEVEL="${CLAU_INTERACTION_LEVEL:-2}"
 EOF
     fi
     echo "Starte neue Session im Projekt mit Modell ${CLAU_MODEL} ..."
@@ -405,40 +425,22 @@ interactive_start() {
       1) run_resume_picker ;;
       2) run_new_session ;;
       3) run_saved_session ;;
-      4)
-        choose_model_interactive
-        interactive_start
-        ;;
-      5)
-        choose_interaction_interactive
-        interactive_start
-        ;;
-      *)
-        echo "Ungültige Auswahl."
-        exit 1
-        ;;
+      4) choose_model_interactive; interactive_start ;;
+      5) choose_interaction_interactive; interactive_start ;;
+      *) echo "Ungültige Auswahl."; exit 1 ;;
     esac
   else
     case "${start_choice:-1}" in
       1) run_resume_picker ;;
       2) run_new_session ;;
-      3)
-        choose_model_interactive
-        interactive_start
-        ;;
-      4)
-        choose_interaction_interactive
-        interactive_start
-        ;;
-      *)
-        echo "Ungültige Auswahl."
-        exit 1
-        ;;
+      3) choose_model_interactive; interactive_start ;;
+      4) choose_interaction_interactive; interactive_start ;;
+      *) echo "Ungültige Auswahl."; exit 1 ;;
     esac
   fi
 }
 
-# --- Git-Helfer (lokales Repo) ---
+# --- Git-Helfer ---
 
 ensure_git_repo() {
   if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -448,15 +450,16 @@ ensure_git_repo() {
 }
 
 git_has_changes() {
-  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-    return 0
-  else
-    return 1
-  fi
+  [[ -n "$(git status --porcelain 2>/dev/null)" ]]
 }
 
 ask_yes_no() {
   local prompt="$1"
+  # Bei Autonomie-Level 0: immer automatisch ja
+  if [[ "${INTERACTION_LEVEL:-2}" -eq 0 ]]; then
+    echo "${prompt} [auto-ja bei Level 0]"
+    return 0
+  fi
   local answer
   while true; do
     printf "%s [j/n]: " "$prompt"
@@ -478,15 +481,20 @@ run_git_up() {
 
   if git_has_changes; then
     if ask_yes_no "Uncommitted Änderungen vorhanden. Commit & Push?"; then
-      printf "Commit-Message: "
-      read -r msg
-      if [[ -z "$msg" ]]; then
+      local msg
+      if [[ "${INTERACTION_LEVEL:-2}" -eq 0 ]]; then
         msg="Update via clau --git-up"
+      else
+        printf "Commit-Message: "
+        read -r msg
+        if [[ -z "$msg" ]]; then
+          msg="Update via clau --git-up"
+        fi
       fi
       git add -A
       git commit -m "$msg"
     else
-      echo "Abgebrochen, da Änderungen nicht committet werden sollen."
+      echo "Abgebrochen."
       exit 1
     fi
   else
@@ -498,7 +506,7 @@ run_git_up() {
 
   echo
   echo "Hole aktuellen Stand von origin/$branch (git pull --rebase)..."
-  git pull --rebase || echo "Hinweis: git pull --rebase ist fehlgeschlagen, bitte ggf. manuell prüfen."
+  git pull --rebase || echo "Hinweis: git pull --rebase fehlgeschlagen, bitte manuell prüfen."
 
   echo
   echo "Push zu origin/$branch..."
@@ -506,7 +514,7 @@ run_git_up() {
     echo "Push erfolgreich."
   else
     echo "Normaler Push fehlgeschlagen."
-    if ask_yes_no "Soll ein 'git push --force-with-lease' versucht werden? (vorsichtig benutzen)"; then
+    if ask_yes_no "Soll 'git push --force-with-lease' versucht werden?"; then
       git push --force-with-lease
       echo "Force-Push (mit lease) ausgeführt."
     else
@@ -535,8 +543,6 @@ run_git_down_local() {
   git pull --rebase
 }
 
-# --- Git-Helfer: Repo aus GitHub (SSH) in aktuelles Verzeichnis holen ---
-
 run_git_down_repo() {
   local repo_name="$1"
 
@@ -554,7 +560,7 @@ run_git_down_repo() {
   if [[ -d ".git" ]]; then
     echo "Hinweis: Dieses Verzeichnis ist bereits ein Git-Repository:"
     git status --short 2>/dev/null || true
-    if ! ask_yes_no "Bestehendes Repository HIER komplett durch $repo_url ersetzen? (inkl. .git)"; then
+    if ! ask_yes_no "Bestehendes Repository durch $repo_url ersetzen?"; then
       echo "Abgebrochen."
       exit 1
     fi
@@ -563,7 +569,7 @@ run_git_down_repo() {
   echo "Aktueller Inhalt von $(pwd):"
   ls -A
 
-  if ! ask_yes_no "Alle bestehenden Dateien/Ordner in diesem Verzeichnis entfernen und $repo_url hierher klonen?"; then
+  if ! ask_yes_no "Alle bestehenden Dateien entfernen und $repo_url hierher klonen?"; then
     echo "Abgebrochen."
     exit 1
   fi
@@ -572,13 +578,13 @@ run_git_down_repo() {
   ts="$(date +%Y%m%d_%H%M%S)"
   backup_name="../backup_$(basename "$(pwd)")_${ts}.tar.gz"
 
-  echo "Erstelle Backup des aktuellen Inhalts in: $backup_name"
-  tar -czf "$backup_name" . || echo "Hinweis: Backup konnte nicht vollständig erstellt werden. Prüfe $backup_name."
+  echo "Erstelle Backup in: $backup_name"
+  tar -czf "$backup_name" . || echo "Hinweis: Backup möglicherweise unvollständig."
 
   echo "Lösche aktuellen Inhalt..."
   find . -mindepth 1 -maxdepth 1 -exec rm -rf {} \; 2>/dev/null
 
-  echo "Initialisiere Git-Repository in $(pwd)..."
+  echo "Initialisiere Git-Repository..."
   git init -b main
 
   git remote add origin "$repo_url"
@@ -589,7 +595,7 @@ run_git_down_repo() {
   echo "Checkout von origin/main..."
   git checkout -t origin/main 2>/dev/null || git checkout main || git checkout -b main origin/main
 
-  echo "Fertig: Repository $repo_url ist jetzt in $(pwd) ausgecheckt."
+  echo "Fertig: $repo_url ist jetzt in $(pwd) ausgecheckt."
   echo "Backup des alten Inhalts liegt in: $backup_name"
 }
 
@@ -608,6 +614,10 @@ parse_args() {
         uninstall_self
         exit 0
         ;;
+      --self-update)
+        self_update
+        exit 0
+        ;;
       --model)
         if [[ -z "${2:-}" ]]; then
           echo "--model erwartet eine Zahl (1=haiku, 2=sonnet, 3=opus)" >&2
@@ -615,7 +625,7 @@ parse_args() {
         fi
         model_from_number "$2"
         save_config
-        echo "Standardmodell für dieses Verzeichnis gesetzt auf: $CLAU_MODEL"
+        echo "Standardmodell gesetzt auf: $CLAU_MODEL"
         exit 0
         ;;
       -m|--mdl)
@@ -633,19 +643,19 @@ parse_args() {
         fi
         CLAU_SESSION_ID="$2"
         save_config
-        echo "Feste Session-ID für dieses Verzeichnis gesetzt auf: $CLAU_SESSION_ID"
+        echo "Feste Session-ID gesetzt auf: $CLAU_SESSION_ID"
         exit 0
         ;;
       --forget)
         CLAU_SESSION_ID=""
         save_config
-        echo "Feste Session-ID für dieses Verzeichnis entfernt."
+        echo "Feste Session-ID entfernt."
         exit 0
         ;;
       --clear-model)
         CLAU_MODEL=""
         save_config
-        echo "Gespeichertes Modell entfernt. Beim nächsten Start wird gefragt."
+        echo "Gespeichertes Modell entfernt."
         exit 0
         ;;
       --current)
@@ -708,7 +718,7 @@ parse_args() {
       --interaction)
         INTERACTION_LEVEL="${2:-}"
         case "$INTERACTION_LEVEL" in
-          0|1|2) ;;
+          0|1|2) CLAU_INTERACTION_LEVEL="$INTERACTION_LEVEL" ;;
           *) echo "--interaction erwartet 0, 1 oder 2" >&2; exit 1 ;;
         esac
         shift 2
