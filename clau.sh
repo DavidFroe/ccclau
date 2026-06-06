@@ -63,6 +63,8 @@ _kill_owl_proxy() {
     rm -f "$_OWL_PID_FILE"
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
   fi
+  # Claude CLI aktiviert Mouse-Tracking — bei Exit sauber deaktivieren
+  printf '\e[?1000l\e[?1002l\e[?1003l\e[?1006l\e[?1015l' 2>/dev/null || true
 }
 
 # claude über owlAPI-Proxy starten (interaktiv)
@@ -434,7 +436,7 @@ run_resume_picker() {
     mdl="$(effective_model)"
   fi
   if is_owl_model "$mdl"; then
-    run_owl_via_claude "$(owl_model_id "$mdl")"
+    run_owl_via_claude "$(owl_model_id "$mdl")" --resume
     return
   fi
   echo "Öffne Session-Auswahl (Modell: $mdl, Autonomie: $(interaction_label)) ..."
