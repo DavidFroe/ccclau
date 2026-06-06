@@ -6,7 +6,7 @@ INSTALL_DIR="${HOME}/.local/bin"
 INSTALL_NAME="clau"
 
 # owlAPI-Proxy: claude CLI spricht Anthropic-Format, Proxy übersetzt → owlAPI
-OWL_PROXY_SCRIPT="/usr/local/lib/ccclau/owl_proxy.py"
+OWL_PROXY_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/owl_proxy.py"
 OWL_BASE_URL="http://11.0.0.1:4040"
 
 is_owl_model() {
