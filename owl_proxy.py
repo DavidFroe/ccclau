@@ -15,6 +15,12 @@ import requests
 OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.1:4040/v1")
 OWL_MODEL = os.environ.get("OWL_MODEL", "120")
 PORT = int(os.environ.get("OWL_PROXY_PORT", "8325"))
+DEBUG_LOG = os.environ.get("OWL_DEBUG_LOG", "")  # Pfad z.B. /tmp/owl_debug.log
+
+def _dbg(msg):
+    if DEBUG_LOG:
+        with open(DEBUG_LOG, "a") as f:
+            f.write(msg + "\n")
 
 
 # ── Format-Konvertierung ───────────────────────────────────────────────────────
@@ -102,7 +108,7 @@ def oai_resp_to_ant(oai_resp, model_name):
     message = choice.get("message", {})
     content = []
 
-    text = message.get("content") or ""
+    text = message.get("content") or message.get("reasoning_content") or ""
     if text:
         content.append({"type": "text", "text": text})
 
@@ -179,8 +185,8 @@ class StreamTranslator:
         delta = choice.get("delta", {})
         finish_reason = choice.get("finish_reason")
 
-        # Text
-        text = delta.get("content") or ""
+        # Text — some models (DeepSeek reasoning variants) put output in reasoning_content
+        text = delta.get("content") or delta.get("reasoning_content") or ""
         if text:
             if not self.text_started:
                 self.text_started = True
@@ -294,6 +300,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if stream:
             oai_payload["stream_options"] = {"include_usage": True}
 
+        _dbg(f"→ model={OWL_MODEL} stream={stream} tools={bool(tools)} msgs={len(oai_payload['messages'])}")
         try:
             resp = requests.post(
                 f"{OWL_BASE}/chat/completions",
@@ -303,6 +310,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 timeout=120
             )
             resp.raise_for_status()
+            _dbg(f"← status={resp.status_code}")
         except requests.exceptions.RequestException as e:
             self.send_error(502, f"owlAPI error: {e}")
             return
@@ -336,7 +344,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if data == b"[DONE]":
                     break
                 try:
-                    out = tr.chunk(json.loads(data))
+                    parsed = json.loads(data)
+                    _dbg(f"  chunk: {json.dumps(parsed)[:200]}")
+                    out = tr.chunk(parsed)
                     if out:
                         self.wfile.write(out.encode())
                         self.wfile.flush()
