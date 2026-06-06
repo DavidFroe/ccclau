@@ -4,6 +4,28 @@ set -euo pipefail
 CONFIG_FILE=".clau.conf"
 INSTALL_DIR="${HOME}/.local/bin"
 INSTALL_NAME="clau"
+SUDO_FILE="/etc/sudoers.d/clau-$(whoami)"
+
+sudo_is_enabled() {
+  [[ -f "$SUDO_FILE" ]]
+}
+
+toggle_sudo() {
+  local user; user="$(whoami)"
+  if sudo_is_enabled; then
+    sudo rm -f "$SUDO_FILE"
+    echo "sudo: AUS — ${SUDO_FILE} entfernt"
+  else
+    printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$user" | sudo tee "$SUDO_FILE" > /dev/null
+    sudo chmod 440 "$SUDO_FILE"
+    if sudo visudo -c &>/dev/null; then
+      echo "sudo: AN — ${user} hat jetzt NOPASSWD sudo"
+    else
+      sudo rm -f "$SUDO_FILE" 2>/dev/null || true
+      echo "Fehler: sudoers ungültig, rückgängig gemacht" >&2
+    fi
+  fi
+}
 
 # owlAPI-Proxy: claude CLI spricht Anthropic-Format, Proxy übersetzt → owlAPI
 OWL_PROXY_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/owl_proxy.py"
@@ -61,7 +83,7 @@ run_owl_via_claude() {
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
-  ANTHROPIC_API_KEY="" \
+  ANTHROPIC_API_KEY="sk-ant-api03-owl-dummy-key-not-real" \
   claude --model "claude-sonnet-4-6" $extra "$@" || true
 
   _kill_owl_proxy
@@ -235,6 +257,7 @@ show_current() {
   echo "Backend               : $backend"
   echo "Feste Session-ID      : ${CLAU_SESSION_ID:-<keine>}"
   echo "Autonomie-Level       : $(interaction_label)"
+  echo "sudo NOPASSWD         : $(sudo_is_enabled && echo "AN  ($SUDO_FILE)" || echo "AUS")"
 }
 
 choose_model_interactive() {
@@ -262,7 +285,8 @@ choose_model_interactive() {
     echo "  d) owl:84    GPT-5              OAI    tools            \$1.25/\$10.00"
     echo "  e) owl:501   Gemini-2.5-Pro     Goog   tools            \$1.25/\$10.00"
     echo "  o) ID direkt eingeben  (alle ~150 Modelle via owlAPI)"
-    printf "Auswahl [1-9, a-e, o, Enter=2]: "
+    echo "  s) sudo NOPASSWD      $(sudo_is_enabled && echo "[AN]  → ausschalten" || echo "[AUS] → einschalten")"
+    printf "Auswahl [1-9, a-e, o, s, Enter=2]: "
     read -r choice
 
     case "${choice:-2}" in
@@ -288,6 +312,9 @@ choose_model_interactive() {
           break
         fi
         echo "Abgebrochen."
+        ;;
+      s|S)
+        toggle_sudo
         ;;
       *) echo "Ungültige Auswahl." ;;
     esac
@@ -835,6 +862,10 @@ parse_args() {
         ;;
       --current)
         show_current
+        exit 0
+        ;;
+      --sudo)
+        toggle_sudo
         exit 0
         ;;
       --list)

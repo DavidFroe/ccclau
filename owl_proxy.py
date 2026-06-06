@@ -119,7 +119,8 @@ def oai_resp_to_ant(oai_resp, model_name):
         })
 
     usage = oai_resp.get("usage", {})
-    stop_reason = "tool_use" if choice.get("finish_reason") == "tool_calls" else "end_turn"
+    has_tool_calls = bool(message.get("tool_calls"))
+    stop_reason = "tool_use" if (choice.get("finish_reason") == "tool_calls" or has_tool_calls) else "end_turn"
 
     return {
         "id": "msg_" + uuid.uuid4().hex[:24],
@@ -230,7 +231,7 @@ class StreamTranslator:
                 out.append(self._evt("content_block_stop", {
                     "type": "content_block_stop", "index": buf["bidx"]
                 }))
-            stop_reason = "tool_use" if finish_reason == "tool_calls" else "end_turn"
+            stop_reason = "tool_use" if (finish_reason == "tool_calls" or self.tool_buffers) else "end_turn"
             out.append(self._evt("message_delta", {
                 "type": "message_delta",
                 "delta": {"stop_reason": stop_reason, "stop_sequence": None},
