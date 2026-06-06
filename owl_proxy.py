@@ -300,7 +300,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if stream:
             oai_payload["stream_options"] = {"include_usage": True}
 
-        _dbg(f"→ model={OWL_MODEL} stream={stream} tools={bool(tools)} msgs={len(oai_payload['messages'])}")
+        last_msg = oai_payload['messages'][-1] if oai_payload['messages'] else {}
+        _dbg(f"→ model={OWL_MODEL} stream={stream} tools={bool(tools)} msgs={len(oai_payload['messages'])} last_role={last_msg.get('role')} last_content={str(last_msg.get('content',''))[:80]}")
         try:
             resp = requests.post(
                 f"{OWL_BASE}/chat/completions",
@@ -345,7 +346,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     break
                 try:
                     parsed = json.loads(data)
-                    _dbg(f"  chunk: {json.dumps(parsed)[:200]}")
+                    choice = (parsed.get("choices") or [{}])[0]
+                    delta = choice.get("delta", {})
+                    fr = choice.get("finish_reason")
+                    has_content = bool(delta.get("content") or delta.get("tool_calls"))
+                    if fr or not has_content:
+                        _dbg(f"  chunk finish_reason={fr!r} delta_keys={list(delta.keys())} content={str(delta.get('content',''))[:100]}")
+                    else:
+                        _dbg(f"  chunk: content={str(delta.get('content',''))[:120]}")
                     out = tr.chunk(parsed)
                     if out:
                         self.wfile.write(out.encode())
