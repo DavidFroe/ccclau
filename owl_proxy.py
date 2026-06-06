@@ -51,7 +51,7 @@ def messages_ant_to_oai(messages, system=None):
     if system:
         if isinstance(system, list):
             system = "\n".join(b.get("text", "") for b in system if b.get("type") == "text")
-        result.append({"role": "system", "content": system})
+        result.append({"role": "system", "content": _neutralize_brand(system)})
 
     for msg in messages:
         role = msg["role"]
