@@ -5,6 +5,90 @@ CONFIG_FILE=".clau.conf"
 INSTALL_DIR="${HOME}/.local/bin"
 INSTALL_NAME="clau"
 
+# owlAPI-Proxy: claude CLI spricht Anthropic-Format, Proxy übersetzt → owlAPI
+OWL_PROXY_SCRIPT="/usr/local/lib/ccclau/owl_proxy.py"
+OWL_BASE_URL="http://11.0.0.1:4040"
+
+is_owl_model() {
+  [[ "${1:-}" == owl:* ]]
+}
+
+owl_model_id() {
+  echo "${1#owl:}"
+}
+
+# Freien TCP-Port finden
+_free_port() {
+  python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()"
+}
+
+# Proxy starten: port + pid in Temp-Datei, gibt Port zurück
+_OWL_PID_FILE="/tmp/.clau_owl_proxy_$$.pid"
+
+_start_owl_proxy() {
+  local owl_id="$1"
+  local port
+  port="$(_free_port)"
+  OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" \
+    python3 "$OWL_PROXY_SCRIPT" "$port" >/dev/null 2>&1 &
+  echo "$!" > "$_OWL_PID_FILE"
+  echo "$port"
+}
+
+_kill_owl_proxy() {
+  if [[ -f "$_OWL_PID_FILE" ]]; then
+    local pid; pid="$(cat "$_OWL_PID_FILE" 2>/dev/null || true)"
+    rm -f "$_OWL_PID_FILE"
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+  fi
+}
+
+# claude über owlAPI-Proxy starten (interaktiv)
+run_owl_via_claude() {
+  local owl_id="$1"
+  shift
+  if [[ ! -f "$OWL_PROXY_SCRIPT" ]]; then
+    echo "Fehler: owl_proxy.py nicht gefunden: $OWL_PROXY_SCRIPT" >&2
+    exit 1
+  fi
+  echo "Starte owlAPI-Proxy für Modell $owl_id ..."
+  local port
+  port="$(_start_owl_proxy "$owl_id")"
+  trap '_kill_owl_proxy' EXIT INT TERM
+  sleep 0.6
+
+  echo "Claude Code → Proxy :${port} → owlAPI (Modell $owl_id)"
+  local extra; extra="$(_interaction_args)"
+  # shellcheck disable=SC2086
+  ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
+  ANTHROPIC_API_KEY="sk-owl" \
+  claude --model "claude-sonnet-4-6" $extra "$@" || true
+
+  _kill_owl_proxy
+  trap - EXIT INT TERM
+}
+
+# claude headless über owlAPI-Proxy
+run_owl_headless_via_claude() {
+  local owl_id="$1"
+  local prompt="$2"
+  if [[ ! -f "$OWL_PROXY_SCRIPT" ]]; then
+    echo "Fehler: owl_proxy.py nicht gefunden: $OWL_PROXY_SCRIPT" >&2
+    exit 1
+  fi
+  local port
+  port="$(_start_owl_proxy "$owl_id")"
+  trap '_kill_owl_proxy' EXIT INT TERM
+  sleep 0.6
+
+  ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
+  ANTHROPIC_API_KEY="sk-owl" \
+  claude -p "$prompt" --model "claude-sonnet-4-6" || true
+
+  _kill_owl_proxy
+  trap - EXIT INT TERM
+}
+
 # Headless-/Projekt-Optionen
 HEADLESS=0
 TARGET_DIR=""
@@ -85,7 +169,10 @@ Git-Helfer (Repo aus GitHub via SSH):
   clau --git-down NAME            Klont git@github.com:DavidFroe/NAME.git ins aktuelle Verzeichnis
 
 Model-Mappings:
-  1 = haiku   2 = sonnet   3 = opus
+  Claude Code (agentisch):  1=haiku  2=sonnet  3=opus
+  owlAPI Chat:              4=owl:120(Qwen-lokal)  5=owl:38(QwQ-gratis)
+                            6=owl:35(Qwen-Flash)   7=owl:21(Claude-Sonnet)  8=owl:501(Gemini-Pro)
+  owlAPI direkt:            --model owl:35  oder  -m 35  (bare ID → owl: Prefix auto)
 HELP_EOF
 }
 
@@ -94,8 +181,13 @@ model_from_number() {
     1) CLAU_MODEL="haiku" ;;
     2) CLAU_MODEL="sonnet" ;;
     3) CLAU_MODEL="opus" ;;
+    4) CLAU_MODEL="owl:120" ;;   # Qwen3.6-27B lokal
+    5) CLAU_MODEL="owl:38" ;;    # QwQ-Plus gratis
+    6) CLAU_MODEL="owl:35" ;;    # Qwen3.5-Flash günstig
+    7) CLAU_MODEL="owl:21" ;;    # Claude-Sonnet via owl
+    8) CLAU_MODEL="owl:501" ;;   # Gemini-2.5-Pro
     *)
-      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1=haiku,2=sonnet,3=opus)" >&2
+      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-3=Claude CLI, 4-8=owlAPI)" >&2
       exit 1
       ;;
   esac
@@ -106,9 +198,17 @@ normalize_model_name() {
     haiku|sonnet|opus)
       CLI_MODEL_OVERRIDE="$1"
       ;;
+    owl:*)
+      CLI_MODEL_OVERRIDE="$1"
+      ;;
     *)
-      echo "Ungültiges Modell: $1 (erlaubt: haiku, sonnet, opus)" >&2
-      exit 1
+      # Bare Zahl oder ID → als owl-Modell interpretieren
+      if [[ "$1" =~ ^[0-9]+$ ]] || [[ "$1" =~ ^[a-z] ]]; then
+        CLI_MODEL_OVERRIDE="owl:$1"
+      else
+        echo "Ungültiges Modell: $1 (erlaubt: haiku|sonnet|opus oder owl:<ID>)" >&2
+        exit 1
+      fi
       ;;
   esac
 }
@@ -124,8 +224,14 @@ effective_model() {
 }
 
 show_current() {
+  local mdl="${CLAU_MODEL:-<nicht gesetzt>}"
+  local backend="Claude Code (agentisch)"
+  if is_owl_model "${CLAU_MODEL:-}"; then
+    backend="owlAPI Chat (${OWL_BASE_URL}, Modell $(owl_model_id "${CLAU_MODEL}"))"
+  fi
   echo "Aktuelles Verzeichnis : $(pwd)"
-  echo "Konfiguriertes Modell : ${CLAU_MODEL:-<nicht gesetzt>}"
+  echo "Konfiguriertes Modell : $mdl"
+  echo "Backend               : $backend"
   echo "Feste Session-ID      : ${CLAU_SESSION_ID:-<keine>}"
   echo "Autonomie-Level       : $(interaction_label)"
 }
@@ -134,17 +240,39 @@ choose_model_interactive() {
   while true; do
     echo
     echo "Bitte Modell wählen:"
-    echo "  1) haiku   - schnell, günstig"
-    echo "  2) sonnet  - Standard"
-    echo "  3) opus    - stärker, teurer"
-    printf "Auswahl [1-3, Enter=2]: "
+    echo "  --- Claude Code (agentisch – Datei-Editing, Shell, Tools) ---"
+    echo "  1) haiku              schnell, günstig"
+    echo "  2) sonnet             Standard                             [Enter]"
+    echo "  3) opus               stärker, teurer"
+    echo "  --- owlAPI Chat (${OWL_BASE_URL}) ---"
+    echo "  4) owl:120            Qwen3.6-27B  lokal  Coding+Vision   GRATIS"
+    echo "  5) owl:38             QwQ-Plus     cloud  Reasoning       GRATIS"
+    echo "  6) owl:35             Qwen3.5-Flash cloud  günstig        \$0.05/\$0.15"
+    echo "  7) owl:21             Claude-Sonnet cloud  via owlAPI     \$3/\$15"
+    echo "  8) owl:501            Gemini-2.5-Pro cloud  stark         \$1.25/\$10"
+    echo "  o) owlAPI-Vollmenü   alle ~150 Modelle wählen"
+    printf "Auswahl [1-8, o, Enter=2]: "
     read -r choice
 
     case "${choice:-2}" in
       1) CLAU_MODEL="haiku"; break ;;
       2) CLAU_MODEL="sonnet"; break ;;
       3) CLAU_MODEL="opus"; break ;;
-      *) echo "Ungültige Auswahl. Bitte 1, 2 oder 3 eingeben." ;;
+      4) CLAU_MODEL="owl:120"; break ;;
+      5) CLAU_MODEL="owl:38"; break ;;
+      6) CLAU_MODEL="owl:35"; break ;;
+      7) CLAU_MODEL="owl:21"; break ;;
+      8) CLAU_MODEL="owl:501"; break ;;
+      o|O)
+        printf "owlAPI Modell-ID (z.B. 35, 120, 38, 501): "
+        read -r tmp_id
+        if [[ -n "$tmp_id" ]]; then
+          CLAU_MODEL="owl:${tmp_id}"
+          break
+        fi
+        echo "Abgebrochen."
+        ;;
+      *) echo "Ungültige Auswahl." ;;
     esac
   done
 
@@ -261,6 +389,10 @@ run_resume_picker() {
     ensure_model
     mdl="$(effective_model)"
   fi
+  if is_owl_model "$mdl"; then
+    run_owl_via_claude "$(owl_model_id "$mdl")"
+    return
+  fi
   echo "Öffne Session-Auswahl (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
@@ -274,6 +406,10 @@ run_saved_session() {
     ensure_model
     mdl="$(effective_model)"
   fi
+  if is_owl_model "$mdl"; then
+    run_owl_via_claude "$(owl_model_id "$mdl")"
+    return
+  fi
   echo "Starte feste Session $CLAU_SESSION_ID (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
@@ -286,6 +422,10 @@ run_new_session() {
   if [[ -z "$mdl" ]]; then
     ensure_model
     mdl="$(effective_model)"
+  fi
+  if is_owl_model "$mdl"; then
+    run_owl_via_claude "$(owl_model_id "$mdl")"
+    return
   fi
   echo "Starte neue Session (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   local extra; extra="$(_interaction_args)"
@@ -343,6 +483,15 @@ build_headless_cmd() {
 }
 
 run_headless_here() {
+  local mdl; mdl="$(effective_model)"
+  if is_owl_model "$mdl"; then
+    if [[ -z "${PROMPT_TEXT:-}" ]]; then
+      echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
+      exit 1
+    fi
+    run_owl_headless_via_claude "$(owl_model_id "$mdl")" "$PROMPT_TEXT"
+    return
+  fi
   build_headless_cmd
   echo "Starte headless im Verzeichnis: $(pwd)"
   exec "${CLAUDE_CMD[@]}"
@@ -351,6 +500,15 @@ run_headless_here() {
 run_headless_in_dir() {
   local dir="$1"
   mkdir -p "$dir"
+  local mdl; mdl="$(effective_model)"
+  if is_owl_model "$mdl"; then
+    if [[ -z "${PROMPT_TEXT:-}" ]]; then
+      echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
+      exit 1
+    fi
+    (cd "$dir"; run_owl_headless_via_claude "$(owl_model_id "$mdl")" "$PROMPT_TEXT")
+    return
+  fi
   echo "Projektverzeichnis bereit für headless: $dir"
   (
     cd "$dir"
