@@ -6,6 +6,7 @@ Lauscht auf localhost:PORT, übersetzt /v1/messages für claude CLI.
 
 import json
 import os
+import re
 import sys
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -31,6 +32,18 @@ def content_to_str(content):
     if isinstance(content, list):
         return "\n".join(b.get("text", "") for b in content if b.get("type") == "text")
     return str(content)
+
+
+# Pattern: strip Anthropic/Claude brand from assistant history to avoid
+# third-party model brand-protection filters (e.g. DeepSeek refuses to
+# continue after seeing "Ich bin Claude Sonnet / made by Anthropic").
+_BRAND_RE = re.compile(
+    r'\b(Claude(?:\s+(?:Sonnet|Haiku|Opus|Code|3|4|[\d.]+))*|Anthropic)\b',
+    re.IGNORECASE
+)
+
+def _neutralize_brand(text: str) -> str:
+    return _BRAND_RE.sub("the AI assistant", text)
 
 
 def messages_ant_to_oai(messages, system=None):
@@ -66,10 +79,10 @@ def messages_ant_to_oai(messages, system=None):
                     })
                 out = {"role": "assistant", "tool_calls": tool_calls}
                 if text_blocks:
-                    out["content"] = content_to_str(text_blocks)
+                    out["content"] = _neutralize_brand(content_to_str(text_blocks))
                 result.append(out)
             else:
-                result.append({"role": "assistant", "content": content_to_str(content)})
+                result.append({"role": "assistant", "content": _neutralize_brand(content_to_str(content))})
 
         elif role == "user":
             if tool_result_blocks:
