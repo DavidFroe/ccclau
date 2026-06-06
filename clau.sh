@@ -170,9 +170,9 @@ Git-Helfer (Repo aus GitHub via SSH):
 
 Model-Mappings:
   Claude Code (agentisch):  1=haiku  2=sonnet  3=opus
-  owlAPI Chat:              4=owl:120(Qwen-lokal)  5=owl:38(QwQ-gratis)
-                            6=owl:35(Qwen-Flash)   7=owl:21(Claude-Sonnet)  8=owl:501(Gemini-Pro)
-  owlAPI direkt:            --model owl:35  oder  -m 35  (bare ID → owl: Prefix auto)
+  owlAPI (lokal/gratis):    4=owl:120  5=owl:243  6=owl:113(Grok)  7=owl:38(QwQ)  8=owl:316
+  owlAPI (günstig/stark):   9=owl:35  a=owl:350  b=owl:503  c=owl:21  d=owl:84  e=owl:501
+  owlAPI direkt:            --model owl:35  oder  -m 350
 HELP_EOF
 }
 
@@ -181,13 +181,14 @@ model_from_number() {
     1) CLAU_MODEL="haiku" ;;
     2) CLAU_MODEL="sonnet" ;;
     3) CLAU_MODEL="opus" ;;
-    4) CLAU_MODEL="owl:120" ;;   # Qwen3.6-27B lokal
-    5) CLAU_MODEL="owl:38" ;;    # QwQ-Plus gratis
-    6) CLAU_MODEL="owl:35" ;;    # Qwen3.5-Flash günstig
-    7) CLAU_MODEL="owl:21" ;;    # Claude-Sonnet via owl
-    8) CLAU_MODEL="owl:501" ;;   # Gemini-2.5-Pro
+    4) CLAU_MODEL="owl:120" ;;   # PropellerA lokal
+    5) CLAU_MODEL="owl:243" ;;   # Qwopus lokal
+    6) CLAU_MODEL="owl:113" ;;   # Grok-4.3 gratis
+    7) CLAU_MODEL="owl:38" ;;    # QwQ-Plus gratis
+    8) CLAU_MODEL="owl:316" ;;   # Qwen3-Coder OR gratis
+    9) CLAU_MODEL="owl:35" ;;    # Qwen-Flash günstig
     *)
-      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-3=Claude CLI, 4-8=owlAPI)" >&2
+      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-3=Claude CLI, 4-9=owlAPI)" >&2
       exit 1
       ;;
   esac
@@ -244,14 +245,24 @@ choose_model_interactive() {
     echo "  1) haiku              schnell, günstig"
     echo "  2) sonnet             Standard                             [Enter]"
     echo "  3) opus               stärker, teurer"
-    echo "  --- owlAPI Chat (${OWL_BASE_URL}) ---"
-    echo "  4) owl:120            Qwen3.6-27B  lokal  Coding+Vision   GRATIS"
-    echo "  5) owl:38             QwQ-Plus     cloud  Reasoning       GRATIS"
-    echo "  6) owl:35             Qwen3.5-Flash cloud  günstig        \$0.05/\$0.15"
-    echo "  7) owl:21             Claude-Sonnet cloud  via owlAPI     \$3/\$15"
-    echo "  8) owl:501            Gemini-2.5-Pro cloud  stark         \$1.25/\$10"
-    echo "  o) owlAPI-Vollmenü   alle ~150 Modelle wählen"
-    printf "Auswahl [1-8, o, Enter=2]: "
+    echo "  --- owlAPI via Proxy (${OWL_BASE_URL}) ---"
+    echo "  --- Lokal / immer gratis ---"
+    echo "  4) owl:120   PropellerA-27B     lokal  tools+vision     GRATIS"
+    echo "  5) owl:243   Qwopus-9B-Coder    lokal  tools schnell    GRATIS"
+    echo "  --- Cloud gratis ---"
+    echo "  6) owl:113   Grok-4.3           xAI    tools 2M ctx     GRATIS"
+    echo "  7) owl:38    QwQ-Plus           Ali    reasoning        GRATIS"
+    echo "  8) owl:316   Qwen3-Coder        OR     tools 1M ctx     GRATIS"
+    echo "  --- Günstig ---"
+    echo "  9) owl:35    Qwen3.5-Flash      Ali    tools            \$0.05/\$0.15"
+    echo "  a) owl:350   DeepSeek-V4-Pro    OR     tools 1M ctx     \$0.44/\$0.87"
+    echo "  b) owl:503   Gemini-2.5-Flash-Lite Goog tools           \$0.10/\$0.40"
+    echo "  --- Stark ---"
+    echo "  c) owl:21    Claude-Sonnet-4.6  Anth   tools            \$3.00/\$15.00"
+    echo "  d) owl:84    GPT-5              OAI    tools            \$1.25/\$10.00"
+    echo "  e) owl:501   Gemini-2.5-Pro     Goog   tools            \$1.25/\$10.00"
+    echo "  o) ID direkt eingeben  (alle ~150 Modelle via owlAPI)"
+    printf "Auswahl [1-9, a-e, o, Enter=2]: "
     read -r choice
 
     case "${choice:-2}" in
@@ -259,10 +270,16 @@ choose_model_interactive() {
       2) CLAU_MODEL="sonnet"; break ;;
       3) CLAU_MODEL="opus"; break ;;
       4) CLAU_MODEL="owl:120"; break ;;
-      5) CLAU_MODEL="owl:38"; break ;;
-      6) CLAU_MODEL="owl:35"; break ;;
-      7) CLAU_MODEL="owl:21"; break ;;
-      8) CLAU_MODEL="owl:501"; break ;;
+      5) CLAU_MODEL="owl:243"; break ;;
+      6) CLAU_MODEL="owl:113"; break ;;
+      7) CLAU_MODEL="owl:38"; break ;;
+      8) CLAU_MODEL="owl:316"; break ;;
+      9) CLAU_MODEL="owl:35"; break ;;
+      a|A) CLAU_MODEL="owl:350"; break ;;
+      b|B) CLAU_MODEL="owl:503"; break ;;
+      c|C) CLAU_MODEL="owl:21"; break ;;
+      d|D) CLAU_MODEL="owl:84"; break ;;
+      e|E) CLAU_MODEL="owl:501"; break ;;
       o|O)
         printf "owlAPI Modell-ID (z.B. 35, 120, 38, 501): "
         read -r tmp_id
