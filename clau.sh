@@ -61,7 +61,7 @@ run_owl_via_claude() {
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
-  ANTHROPIC_API_KEY="sk-owl" \
+  ANTHROPIC_API_KEY="" \
   claude --model "claude-sonnet-4-6" $extra "$@" || true
 
   _kill_owl_proxy
