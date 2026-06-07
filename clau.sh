@@ -112,6 +112,7 @@ run_aider() {
     --openai-api-key dummy \
     --model "openai/${owl_id}" \
     --no-show-model-warnings \
+    --edit-format diff \
     "${extra[@]}" "$@"
 }
 
@@ -128,6 +129,7 @@ run_aider_headless() {
     --openai-api-key dummy \
     --model "openai/${owl_id}" \
     --no-show-model-warnings \
+    --edit-format diff \
     --yes \
     --message "$prompt"
 }
