@@ -275,7 +275,7 @@ Model-Mappings:
   Claude Code (agentisch):  1=haiku  2=sonnet  3=opus
   owlAPI (lokal/gratis):    4=owl:120  5=owl:243  6=owl:113(Grok)  7=owl:38(QwQ)  8=owl:316
   owlAPI (günstig/stark):   9=owl:35  a=owl:350  b=owl:503  c=owl:21  d=owl:84  e=owl:501
-  Aider (Editor-Modus):     f=aider:120  g=aider:350
+  Aider (Editor-Modus):     f=aider:120  g=aider:350  i=aider:502(GemFlash)  j=aider:84(GPT-5)  k=aider:351(MiniMax)
   owlAPI direkt:            --model owl:35  oder  -m 350
   Aider direkt:             --model aider:120  oder  -m aider:243
 HELP_EOF
@@ -378,8 +378,11 @@ choose_model_interactive() {
     echo "  f) PropellerA-27B  lokal   GRATIS"
     echo "  g) DeepSeek V4 Pro cloud   \$0.44/\$0.87"
     echo "  h) free (Router)           GRATIS"
+    echo "  i) Gemini 2.5 Flash cloud  \$0.30/\$2.50"
+    echo "  j) GPT-5           OAI     \$1.25/\$10.00"
+    echo "  k) MiniMax M3      cloud   1M ctx"
     echo "  p) Aider ID direkt"
-    printf "Auswahl [1-9, a-ee, f-h, o, p, Enter=2]: "
+    printf "Auswahl [1-9, a-ee, f-k, o, p, Enter=2]: "
     read -r choice
 
     case "${choice:-2}" in
@@ -401,6 +404,9 @@ choose_model_interactive() {
       f|F) CLAU_MODEL="aider:120"; break ;;
       g|G) CLAU_MODEL="aider:350"; break ;;
       h|H) CLAU_MODEL="aider:free"; break ;;
+      i|I) CLAU_MODEL="aider:502"; break ;;
+      j|J) CLAU_MODEL="aider:84"; break ;;
+      k|K) CLAU_MODEL="aider:351"; break ;;
       o|O)
         printf "LiteLLM/owlAPI Modell-ID: "
         read -r tmp_id
