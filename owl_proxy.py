@@ -114,15 +114,23 @@ def messages_ant_to_oai(messages, system=None):
     return result
 
 
+# Core tools kept for simple_mode — everything else (MCP, scheduling, agents, workflow) stripped
+_CORE_TOOLS = {
+    "Bash", "Read", "Write", "Edit",
+    "WebSearch", "WebFetch",
+    "TodoRead", "TodoWrite",
+}
+
+
 def _simplify_schema(schema):
-    """Flatten anyOf/oneOf to basic type hints so models don't choke on them."""
+    """Flatten anyOf/oneOf; strip $schema and additionalProperties that confuse some endpoints."""
     if not isinstance(schema, dict):
         return schema
-    # unwrap single-item anyOf/oneOf
     for key in ("anyOf", "oneOf"):
         if key in schema and isinstance(schema[key], list) and len(schema[key]) == 1:
             return _simplify_schema(schema[key][0])
-    result = {k: v for k, v in schema.items() if k not in ("anyOf", "oneOf", "allOf", "$defs", "definitions")}
+    drop = {"anyOf", "oneOf", "allOf", "$defs", "definitions", "$schema", "additionalProperties"}
+    result = {k: v for k, v in schema.items() if k not in drop}
     if "properties" in result:
         result["properties"] = {k: _simplify_schema(v) for k, v in result["properties"].items()}
     if "items" in result:
@@ -135,18 +143,21 @@ def tools_ant_to_oai(tools, simplify=False):
         return None
     result = []
     for t in tools:
+        name = t["name"]
+        if simplify and name not in _CORE_TOOLS:
+            continue
         schema = t.get("input_schema", {"type": "object", "properties": {}})
         if simplify:
             schema = _simplify_schema(schema)
         result.append({
             "type": "function",
             "function": {
-                "name": t["name"],
+                "name": name,
                 "description": (t.get("description") or "")[:300] if simplify else (t.get("description") or ""),
                 "parameters": schema
             }
         })
-    return result
+    return result or None
 
 
 def oai_resp_to_ant(oai_resp, model_name):
