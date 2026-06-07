@@ -78,11 +78,15 @@ aider_model_id() {
 }
 
 _find_aider() {
-  # 1. Aktive venv / PATH
+  # 1. Workspace-lokal (containert, priorisiert)
+  if [[ -x "./aider/bin/aider" ]]; then
+    echo "./aider/bin/aider"; return 0
+  fi
+  # 2. Aktive venv / PATH
   if command -v aider &>/dev/null; then
     command -v aider; return 0
   fi
-  # 2. Bekannte venv-Pfade
+  # 3. Bekannte globale venv-Pfade
   local c
   for c in \
     "$HOME/aider/bin/aider" \
@@ -97,13 +101,26 @@ _find_aider() {
   return 1
 }
 
+_install_aider_local() {
+  echo "Aider: kein Binary gefunden — installiere lokal in ${PWD}/aider/ ..."
+  if ! command -v python3 &>/dev/null; then
+    echo "Fehler: python3 nicht gefunden" >&2; return 1
+  fi
+  python3 -m venv "./aider"
+  "./aider/bin/pip" install --upgrade aider-chat
+  # aider/ in .gitignore eintragen wenn noch nicht drin
+  if [[ -f ".gitignore" ]] && ! grep -qE "^/?aider/?$" ".gitignore" 2>/dev/null; then
+    echo "/aider" >> ".gitignore"
+  fi
+  echo "./aider/bin/aider"
+}
+
 run_aider() {
   local owl_id="$1"
   shift
   local aider_bin
   if ! aider_bin="$(_find_aider)"; then
-    echo "Fehler: aider nicht gefunden — pip install aider-chat oder ~/aider/bin/aider anlegen" >&2
-    exit 1
+    aider_bin="$(_install_aider_local)" || exit 1
   fi
   # Aider braucht git-getrackte Dateien für die Repo-Map
   if git rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
@@ -129,8 +146,7 @@ run_aider_headless() {
   local prompt="$2"
   local aider_bin
   if ! aider_bin="$(_find_aider)"; then
-    echo "Fehler: aider nicht gefunden" >&2
-    exit 1
+    aider_bin="$(_install_aider_local)" || exit 1
   fi
   "$aider_bin" \
     --openai-api-base "${OWL_BASE_URL}/v1" \
