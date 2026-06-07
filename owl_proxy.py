@@ -110,6 +110,22 @@ def messages_ant_to_oai(messages, system=None):
     return result
 
 
+def _simplify_schema(schema):
+    """Flatten anyOf/oneOf to basic type hints so models don't choke on them."""
+    if not isinstance(schema, dict):
+        return schema
+    # unwrap single-item anyOf/oneOf
+    for key in ("anyOf", "oneOf"):
+        if key in schema and isinstance(schema[key], list) and len(schema[key]) == 1:
+            return _simplify_schema(schema[key][0])
+    result = {k: v for k, v in schema.items() if k not in ("anyOf", "oneOf", "allOf", "$defs", "definitions")}
+    if "properties" in result:
+        result["properties"] = {k: _simplify_schema(v) for k, v in result["properties"].items()}
+    if "items" in result:
+        result["items"] = _simplify_schema(result["items"])
+    return result
+
+
 def tools_ant_to_oai(tools):
     if not tools:
         return None
@@ -117,8 +133,8 @@ def tools_ant_to_oai(tools):
         "type": "function",
         "function": {
             "name": t["name"],
-            "description": t.get("description", ""),
-            "parameters": t.get("input_schema", {"type": "object", "properties": {}})
+            "description": (t.get("description") or "")[:300],
+            "parameters": _simplify_schema(t.get("input_schema", {"type": "object", "properties": {}}))
         }
     } for t in tools]
 
@@ -329,8 +345,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         tools = tools_ant_to_oai(req.get("tools"))
         if tools:
             oai_payload["tools"] = tools
+            oai_payload["parallel_tool_calls"] = False
         if stream:
             oai_payload["stream_options"] = {"include_usage": True}
+        _dbg(f"  tools_count={len(tools) if tools else 0} tool_names={[t['function']['name'] for t in (tools or [])][:5]}")
 
         last_msg = oai_payload['messages'][-1] if oai_payload['messages'] else {}
         _dbg(f"→ model={OWL_MODEL} stream={stream} tools={bool(tools)} msgs={len(oai_payload['messages'])} last_role={last_msg.get('role')} last_content={str(last_msg.get('content',''))[:80]}")
