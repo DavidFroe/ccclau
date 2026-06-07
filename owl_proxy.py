@@ -364,6 +364,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         last_msg = oai_payload['messages'][-1] if oai_payload['messages'] else {}
         _dbg(f"→ model={OWL_MODEL} stream={stream} tools={bool(tools)} msgs={len(oai_payload['messages'])} last_role={last_msg.get('role')} last_content={str(last_msg.get('content',''))[:80]}")
+        if DEBUG_LOG and len(oai_payload['messages']) >= 4:
+            # dump full payload for multi-turn tool failures
+            with open(DEBUG_LOG + ".payload", "w") as f:
+                json.dump(oai_payload, f, indent=2, ensure_ascii=False)
+            _dbg(f"  full payload dumped to {DEBUG_LOG}.payload")
         try:
             resp = requests.post(
                 f"{OWL_BASE}/chat/completions",
