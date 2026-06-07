@@ -18,6 +18,10 @@ OWL_MODEL = os.environ.get("OWL_MODEL", "120")
 PORT = int(os.environ.get("OWL_PROXY_PORT", "8325"))
 DEBUG_LOG = os.environ.get("OWL_DEBUG_LOG", "")  # Pfad z.B. /tmp/owl_debug.log
 
+# Models that need simplified tool schemas and no parallel tool calls
+# (owlAPI model IDs as strings)
+_SIMPLE_TOOLS_MODELS = {"350", "38", "316", "35"}  # DeepSeek, QwQ, Qwen-Coder, Qwen-Flash
+
 def _dbg(msg):
     if DEBUG_LOG:
         with open(DEBUG_LOG, "a") as f:
@@ -126,17 +130,23 @@ def _simplify_schema(schema):
     return result
 
 
-def tools_ant_to_oai(tools):
+def tools_ant_to_oai(tools, simplify=False):
     if not tools:
         return None
-    return [{
-        "type": "function",
-        "function": {
-            "name": t["name"],
-            "description": (t.get("description") or "")[:300],
-            "parameters": _simplify_schema(t.get("input_schema", {"type": "object", "properties": {}}))
-        }
-    } for t in tools]
+    result = []
+    for t in tools:
+        schema = t.get("input_schema", {"type": "object", "properties": {}})
+        if simplify:
+            schema = _simplify_schema(schema)
+        result.append({
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": (t.get("description") or "")[:300] if simplify else (t.get("description") or ""),
+                "parameters": schema
+            }
+        })
+    return result
 
 
 def oai_resp_to_ant(oai_resp, model_name):
@@ -342,10 +352,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
         }
         if req.get("max_tokens"):
             oai_payload["max_tokens"] = req["max_tokens"]
-        tools = tools_ant_to_oai(req.get("tools"))
+        simple_mode = OWL_MODEL in _SIMPLE_TOOLS_MODELS
+        tools = tools_ant_to_oai(req.get("tools"), simplify=simple_mode)
         if tools:
             oai_payload["tools"] = tools
-            oai_payload["parallel_tool_calls"] = False
+            if simple_mode:
+                oai_payload["parallel_tool_calls"] = False
         if stream:
             oai_payload["stream_options"] = {"include_usage": True}
         _dbg(f"  tools_count={len(tools) if tools else 0} tool_names={[t['function']['name'] for t in (tools or [])][:5]}")
