@@ -84,12 +84,12 @@ _find_aider() {
 }
 
 _install_aider_local() {
-  echo "Aider: kein Binary gefunden — installiere lokal in ${PWD}/aider/ ..."
+  echo "Aider: kein Binary gefunden — installiere lokal in ${PWD}/aider/ ..." >&2
   if ! command -v python3 &>/dev/null; then
     echo "Fehler: python3 nicht gefunden" >&2; return 1
   fi
-  python3 -m venv "./aider"
-  "./aider/bin/pip" install --upgrade aider-chat
+  python3 -m venv "./aider" >&2
+  "./aider/bin/pip" install --upgrade aider-chat >&2
   # aider/ in .gitignore eintragen wenn noch nicht drin
   if [[ -f ".gitignore" ]] && ! grep -qE "^/?aider/?$" ".gitignore" 2>/dev/null; then
     echo "/aider" >> ".gitignore"
