@@ -16,18 +16,6 @@ import requests
 OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.1:4040/v1")
 OWL_MODEL = os.environ.get("OWL_MODEL", "120")
 PORT = int(os.environ.get("OWL_PROXY_PORT", "8325"))
-DEBUG_LOG = os.environ.get("OWL_DEBUG_LOG", "")  # Pfad z.B. /tmp/owl_debug.log
-
-# Models that need simplified tool schemas and no parallel tool calls
-# (owlAPI model IDs as strings)
-_SIMPLE_TOOLS_MODELS = {"350", "38", "316", "35"}  # DeepSeek, QwQ, Qwen-Coder, Qwen-Flash
-
-def _dbg(msg):
-    if DEBUG_LOG:
-        with open(DEBUG_LOG, "a") as f:
-            f.write(msg + "\n")
-
-
 # ── Format-Konvertierung ───────────────────────────────────────────────────────
 
 def content_to_str(content):
@@ -95,50 +83,17 @@ def messages_ant_to_oai(messages, system=None):
     return result
 
 
-# Core tools kept for simple_mode — everything else (MCP, scheduling, agents, workflow) stripped
-_CORE_TOOLS = {
-    "Bash", "Read", "Write", "Edit",
-    "WebSearch", "WebFetch",
-    "TodoRead", "TodoWrite",
-}
-
-
-def _simplify_schema(schema):
-    """Flatten anyOf/oneOf; strip $schema and additionalProperties that confuse some endpoints."""
-    if not isinstance(schema, dict):
-        return schema
-    for key in ("anyOf", "oneOf"):
-        if key in schema and isinstance(schema[key], list) and len(schema[key]) == 1:
-            return _simplify_schema(schema[key][0])
-    drop = {"anyOf", "oneOf", "allOf", "$defs", "definitions", "$schema", "additionalProperties"}
-    result = {k: v for k, v in schema.items() if k not in drop}
-    if "properties" in result:
-        result["properties"] = {k: _simplify_schema(v) for k, v in result["properties"].items()}
-    if "items" in result:
-        result["items"] = _simplify_schema(result["items"])
-    return result
-
-
-def tools_ant_to_oai(tools, simplify=False):
+def tools_ant_to_oai(tools):
     if not tools:
         return None
-    result = []
-    for t in tools:
-        name = t["name"]
-        if simplify and name not in _CORE_TOOLS:
-            continue
-        schema = t.get("input_schema", {"type": "object", "properties": {}})
-        if simplify:
-            schema = _simplify_schema(schema)
-        result.append({
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": (t.get("description") or "")[:300] if simplify else (t.get("description") or ""),
-                "parameters": schema
-            }
-        })
-    return result or None
+    return [{
+        "type": "function",
+        "function": {
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "parameters": t.get("input_schema", {"type": "object", "properties": {}})
+        }
+    } for t in tools]
 
 
 def oai_resp_to_ant(oai_resp, model_name):
@@ -344,23 +299,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
         }
         if req.get("max_tokens"):
             oai_payload["max_tokens"] = req["max_tokens"]
-        simple_mode = OWL_MODEL in _SIMPLE_TOOLS_MODELS
-        tools = tools_ant_to_oai(req.get("tools"), simplify=simple_mode)
+        tools = tools_ant_to_oai(req.get("tools"))
         if tools:
             oai_payload["tools"] = tools
-            if simple_mode:
-                oai_payload["parallel_tool_calls"] = False
         if stream:
             oai_payload["stream_options"] = {"include_usage": True}
-        _dbg(f"  tools_count={len(tools) if tools else 0} tool_names={[t['function']['name'] for t in (tools or [])][:5]}")
-
-        last_msg = oai_payload['messages'][-1] if oai_payload['messages'] else {}
-        _dbg(f"→ model={OWL_MODEL} stream={stream} tools={bool(tools)} msgs={len(oai_payload['messages'])} last_role={last_msg.get('role')} last_content={str(last_msg.get('content',''))[:80]}")
-        if DEBUG_LOG and len(oai_payload['messages']) >= 4:
-            # dump full payload for multi-turn tool failures
-            with open(DEBUG_LOG + ".payload", "w") as f:
-                json.dump(oai_payload, f, indent=2, ensure_ascii=False)
-            _dbg(f"  full payload dumped to {DEBUG_LOG}.payload")
         try:
             resp = requests.post(
                 f"{OWL_BASE}/chat/completions",
@@ -370,7 +313,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 timeout=120
             )
             resp.raise_for_status()
-            _dbg(f"← status={resp.status_code}")
         except requests.exceptions.RequestException as e:
             self.send_error(502, f"owlAPI error: {e}")
             return
@@ -404,16 +346,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if data == b"[DONE]":
                     break
                 try:
-                    parsed = json.loads(data)
-                    choice = (parsed.get("choices") or [{}])[0]
-                    delta = choice.get("delta", {})
-                    fr = choice.get("finish_reason")
-                    has_content = bool(delta.get("content") or delta.get("tool_calls"))
-                    if fr or not has_content:
-                        _dbg(f"  chunk finish_reason={fr!r} delta_keys={list(delta.keys())} content={str(delta.get('content',''))[:100]}")
-                    else:
-                        _dbg(f"  chunk: content={str(delta.get('content',''))[:120]}")
-                    out = tr.chunk(parsed)
+                    out = tr.chunk(json.loads(data))
                     if out:
                         self.wfile.write(out.encode())
                         self.wfile.flush()
