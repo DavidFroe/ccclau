@@ -176,7 +176,7 @@ load_config() {
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
   fi
-  : "${CLAU_MODEL:=}"
+  : "${CLAU_MODEL:=aider:120}"
   : "${CLAU_SESSION_ID:=}"
   : "${CLAU_INTERACTION_LEVEL:=2}"
   : "${CLAU_EFFORT:=}"
@@ -771,13 +771,13 @@ interactive_start() {
   echo "clau — $(basename "$(pwd)")  [$tag]"
   [[ -n "${CLAU_SESSION_NAME:-}" ]] && echo "  Session: ${CLAU_SESSION_NAME}"
   echo "  1) Verfügbare Sessions auswählen"
-  echo "  2) Neue Session beginnen"
+  echo "  2) Neue Session beginnen        [Enter]"
   echo "  3) Modell wechseln"
   echo "  4) Bot-Einstellungen"
-  printf "Auswahl [1-4, Enter=1]: "
+  printf "Auswahl [1-4, Enter=2]: "
   read -r start_choice
 
-  case "${start_choice:-1}" in
+  case "${start_choice:-2}" in
     1) run_resume_picker ;;
     2) run_new_session_named ;;
     3) choose_model_interactive; interactive_start ;;
