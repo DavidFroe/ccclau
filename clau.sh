@@ -179,6 +179,8 @@ load_config() {
   : "${CLAU_MODEL:=}"
   : "${CLAU_SESSION_ID:=}"
   : "${CLAU_INTERACTION_LEVEL:=2}"
+  : "${CLAU_EFFORT:=}"
+  : "${CLAU_SESSION_NAME:=}"
   INTERACTION_LEVEL="$CLAU_INTERACTION_LEVEL"
 }
 
@@ -187,6 +189,8 @@ save_config() {
 CLAU_MODEL="${CLAU_MODEL}"
 CLAU_SESSION_ID="${CLAU_SESSION_ID}"
 CLAU_INTERACTION_LEVEL="${CLAU_INTERACTION_LEVEL}"
+CLAU_EFFORT="${CLAU_EFFORT:-}"
+CLAU_SESSION_NAME="${CLAU_SESSION_NAME:-}"
 CONF_EOF
 }
 
@@ -309,42 +313,41 @@ show_current() {
   echo "Aktuelles Verzeichnis : $(pwd)"
   echo "Konfiguriertes Modell : $mdl"
   echo "Backend               : $backend"
+  echo "Session-Name          : ${CLAU_SESSION_NAME:-<keiner>}"
   echo "Feste Session-ID      : ${CLAU_SESSION_ID:-<keine>}"
   echo "Autonomie-Level       : $(interaction_label)"
+  echo "Effort                : ${CLAU_EFFORT:-medium (Standard)}"
   echo "sudo NOPASSWD         : $(sudo_is_enabled && echo "AN  ($SUDO_FILE)" || echo "AUS")"
 }
 
 choose_model_interactive() {
   while true; do
     echo
-    echo "Bitte Modell wählen:"
-    echo "  --- Claude Code (agentisch – Datei-Editing, Shell, Tools) ---"
+    echo "Modell wählen:"
+    echo "  --- Standard Claude (agentisch, Datei-Editing + Shell) ---"
     echo "  1) haiku              schnell, günstig"
-    echo "  2) sonnet             Standard                             [Enter]"
+    echo "  2) sonnet             Standard                    [Enter]"
     echo "  3) opus               stärker, teurer"
-    echo "  --- owlAPI via Proxy (${OWL_BASE_URL}) ---"
-    echo "  --- Lokal / immer gratis ---"
-    echo "  4) owl:120   PropellerA-27B     lokal  tools+vision     GRATIS"
-    echo "  5) owl:243   Qwopus-9B-Coder    lokal  tools schnell    GRATIS"
-    echo "  --- Cloud gratis ---"
-    echo "  6) owl:113   Grok-4.3           xAI    tools 2M ctx     GRATIS"
-    echo "  7) owl:38    QwQ-Plus           Ali    reasoning        GRATIS"
-    echo "  8) owl:316   Qwen3-Coder        OR     tools 1M ctx     GRATIS"
-    echo "  --- Günstig ---"
-    echo "  9) owl:35    Qwen3.5-Flash      Ali    tools            \$0.05/\$0.15"
-    echo "  a) owl:350   DeepSeek-V4-Pro    OR     tools 1M ctx     \$0.44/\$0.87"
-    echo "  b) owl:503   Gemini-2.5-Flash-Lite Goog tools           \$0.10/\$0.40"
-    echo "  --- Stark ---"
-    echo "  c) owl:21    Claude-Sonnet-4.6  Anth   tools            \$3.00/\$15.00"
-    echo "  d) owl:84    GPT-5              OAI    tools            \$1.25/\$10.00"
-    echo "  e) owl:501   Gemini-2.5-Pro     Goog   tools            \$1.25/\$10.00"
-    echo "  o) ID direkt eingeben  (alle ~150 Modelle via owlAPI)"
-    echo "  --- Aider (Editor, direkt OpenAI-Format, kein Proxy) ---"
-    echo "  f) aider:120 PropellerA-27B    lokal  GRATIS"
-    echo "  g) aider:350 DeepSeek-V4-Pro   cloud  \$0.44/\$0.87"
-    echo "  p) Aider ID eingeben"
-    echo "  s) sudo NOPASSWD      $(sudo_is_enabled && echo "[AN]  → ausschalten" || echo "[AUS] → einschalten")"
-    printf "Auswahl [1-9, a-g, o, p, s, Enter=2]: "
+    echo "  --- LiteLLM Modelle (via Proxy, ${OWL_BASE_URL}) ---"
+    echo "  4) PropellerA-27B  lokal   tools+vision  GRATIS"
+    echo "  5) Qwopus-9B       lokal   tools schnell GRATIS"
+    echo "  6) Grok-4.3        xAI     tools 2M ctx  GRATIS"
+    echo "  7) QwQ-Plus        Ali     reasoning     GRATIS"
+    echo "  8) Qwen3-Coder     OR      tools 1M ctx  GRATIS"
+    echo "  9) free (Router)   ---     mix gratis    GRATIS"
+    echo "  a) Qwen-Flash      Ali     tools         \$0.05/\$0.15"
+    echo "  b) DeepSeek V4 Pro OR      tools 1M ctx  \$0.44/\$0.87"
+    echo "  c) Gemini-Flash    Goog    tools         \$0.10/\$0.40"
+    echo "  d) Claude-Sonnet   Anth    tools         \$3.00/\$15.00"
+    echo "  e) GPT-5           OAI     tools         \$1.25/\$10.00"
+    echo "  ee) Gemini-2.5-Pro Goog    tools         \$1.25/\$10.00"
+    echo "  o) LiteLLM ID direkt"
+    echo "  --- Aider Modelle (Editor-Modus, direkt OpenAI-Format) ---"
+    echo "  f) PropellerA-27B  lokal   GRATIS"
+    echo "  g) DeepSeek V4 Pro cloud   \$0.44/\$0.87"
+    echo "  h) free (Router)           GRATIS"
+    echo "  p) Aider ID direkt"
+    printf "Auswahl [1-9, a-ee, f-h, o, p, Enter=2]: "
     read -r choice
 
     case "${choice:-2}" in
@@ -356,16 +359,18 @@ choose_model_interactive() {
       6) CLAU_MODEL="owl:113"; break ;;
       7) CLAU_MODEL="owl:38"; break ;;
       8) CLAU_MODEL="owl:316"; break ;;
-      9) CLAU_MODEL="owl:35"; break ;;
-      a|A) CLAU_MODEL="owl:350"; break ;;
-      b|B) CLAU_MODEL="owl:503"; break ;;
-      c|C) CLAU_MODEL="owl:21"; break ;;
-      d|D) CLAU_MODEL="owl:84"; break ;;
-      e|E) CLAU_MODEL="owl:501"; break ;;
+      9) CLAU_MODEL="owl:free"; break ;;
+      a|A) CLAU_MODEL="owl:35"; break ;;
+      b|B) CLAU_MODEL="owl:350"; break ;;
+      c|C) CLAU_MODEL="owl:503"; break ;;
+      d|D) CLAU_MODEL="owl:21"; break ;;
+      e|E) CLAU_MODEL="owl:84"; break ;;
+      ee|EE) CLAU_MODEL="owl:501"; break ;;
       f|F) CLAU_MODEL="aider:120"; break ;;
       g|G) CLAU_MODEL="aider:350"; break ;;
+      h|H) CLAU_MODEL="aider:free"; break ;;
       o|O)
-        printf "owlAPI Modell-ID (z.B. 35, 120, 38, 501): "
+        printf "LiteLLM/owlAPI Modell-ID: "
         read -r tmp_id
         if [[ -n "$tmp_id" ]]; then
           CLAU_MODEL="owl:${tmp_id}"
@@ -374,7 +379,7 @@ choose_model_interactive() {
         echo "Abgebrochen."
         ;;
       p|P)
-        printf "Aider Modell-ID (z.B. 120, 350, 243): "
+        printf "Aider Modell-ID: "
         read -r tmp_id
         if [[ -n "$tmp_id" ]]; then
           CLAU_MODEL="aider:${tmp_id}"
@@ -382,15 +387,12 @@ choose_model_interactive() {
         fi
         echo "Abgebrochen."
         ;;
-      s|S)
-        toggle_sudo
-        ;;
       *) echo "Ungültige Auswahl." ;;
     esac
   done
 
   save_config
-  echo "Modell für dieses Verzeichnis gesetzt auf: $CLAU_MODEL"
+  echo "Modell: $CLAU_MODEL"
 }
 
 ensure_model() {
@@ -426,6 +428,57 @@ choose_interaction_interactive() {
   done
   save_config
   echo "Autonomie-Level gesetzt auf: $(interaction_label)"
+}
+
+choose_effort_interactive() {
+  echo
+  echo "Effort-Level (--effort, gilt für Claude):"
+  echo "  1) low    — schnell, weniger gründlich"
+  echo "  2) medium — Standard"
+  echo "  3) high   — gründlicher, mehr Schritte"
+  echo "  4) max    — maximal"
+  printf "Auswahl [1-4, Enter=2]: "
+  read -r choice
+  case "${choice:-2}" in
+    1) CLAU_EFFORT="low" ;;
+    2) CLAU_EFFORT="medium" ;;
+    3) CLAU_EFFORT="high" ;;
+    4) CLAU_EFFORT="max" ;;
+    *) echo "Ungültige Auswahl."; return ;;
+  esac
+  EFFORT_LEVEL="$CLAU_EFFORT"
+  save_config
+  echo "Effort: $CLAU_EFFORT"
+}
+
+choose_bot_settings() {
+  while true; do
+    echo
+    echo "Bot-Einstellungen:"
+    echo "  1) Autonomie-Level  — ${INTERACTION_LEVEL:-2}: $(interaction_label)"
+    echo "  2) sudo NOPASSWD    — $(sudo_is_enabled && echo "AN  [$SUDO_FILE]" || echo "AUS")"
+    echo "  3) Effort           — ${CLAU_EFFORT:-medium}  (nur Claude)"
+    echo "  0) Zurück"
+    printf "Auswahl [0-3]: "
+    read -r choice
+    case "${choice:-0}" in
+      1) choose_interaction_interactive ;;
+      2) toggle_sudo ;;
+      3) choose_effort_interactive ;;
+      0|"") break ;;
+      *) echo "Ungültige Auswahl." ;;
+    esac
+  done
+}
+
+run_new_session_named() {
+  printf "Session-Name (optional, Enter=ohne): "
+  read -r sname
+  if [[ -n "$sname" ]]; then
+    CLAU_SESSION_NAME="$sname"
+    save_config
+  fi
+  run_new_session
 }
 
 install_self() {
@@ -489,10 +542,15 @@ self_update() {
 }
 
 _interaction_args() {
-  # --dangerously-skip-permissions ist von Claude CLI als root verboten
+  local parts=()
   if [[ "${INTERACTION_LEVEL:-2}" -eq 0 ]] && [[ "$(id -u)" -ne 0 ]]; then
-    echo "--dangerously-skip-permissions"
+    parts+=(--dangerously-skip-permissions)
   fi
+  local effort="${EFFORT_LEVEL:-${CLAU_EFFORT:-}}"
+  if [[ -n "$effort" && "$effort" != "medium" ]]; then
+    parts+=(--effort "$effort")
+  fi
+  echo "${parts[*]}"
 }
 
 run_resume_picker() {
@@ -699,44 +757,33 @@ EOF
 interactive_start() {
   ensure_model
 
-  local mdl
-  mdl="$(effective_model)"
+  local mdl; mdl="$(effective_model)"
+  local tag
+  if is_aider_model "$mdl"; then
+    tag="Aider:$(aider_model_id "$mdl")"
+  elif is_owl_model "$mdl"; then
+    tag="LiteLLM:$(owl_model_id "$mdl")"
+  else
+    tag="Claude:$mdl"
+  fi
 
   echo
-  echo "Startoptionen für $(pwd):"
+  echo "clau — $(basename "$(pwd)")  [$tag]"
+  [[ -n "${CLAU_SESSION_NAME:-}" ]] && echo "  Session: ${CLAU_SESSION_NAME}"
   echo "  1) Verfügbare Sessions auswählen"
-  echo "  2) Neue Session starten"
-  if [[ -n "${CLAU_SESSION_ID:-}" ]]; then
-    echo "  3) Feste gespeicherte Session starten ($CLAU_SESSION_ID)"
-    echo "  4) Modell ändern (aktuell: $mdl)"
-    echo "  5) Autonomie-Level ändern (aktuell: $(interaction_label))"
-    printf "Auswahl [1-5, Enter=1]: "
-  else
-    echo "  3) Modell ändern (aktuell: $mdl)"
-    echo "  4) Autonomie-Level ändern (aktuell: $(interaction_label))"
-    printf "Auswahl [1-4, Enter=1]: "
-  fi
-
+  echo "  2) Neue Session beginnen"
+  echo "  3) Modell wechseln"
+  echo "  4) Bot-Einstellungen"
+  printf "Auswahl [1-4, Enter=1]: "
   read -r start_choice
 
-  if [[ -n "${CLAU_SESSION_ID:-}" ]]; then
-    case "${start_choice:-1}" in
-      1) run_resume_picker ;;
-      2) run_new_session ;;
-      3) run_saved_session ;;
-      4) choose_model_interactive; interactive_start ;;
-      5) choose_interaction_interactive; interactive_start ;;
-      *) echo "Ungültige Auswahl."; exit 1 ;;
-    esac
-  else
-    case "${start_choice:-1}" in
-      1) run_resume_picker ;;
-      2) run_new_session ;;
-      3) choose_model_interactive; interactive_start ;;
-      4) choose_interaction_interactive; interactive_start ;;
-      *) echo "Ungültige Auswahl."; exit 1 ;;
-    esac
-  fi
+  case "${start_choice:-1}" in
+    1) run_resume_picker ;;
+    2) run_new_session_named ;;
+    3) choose_model_interactive; interactive_start ;;
+    4) choose_bot_settings; interactive_start ;;
+    *) echo "Ungültige Auswahl."; exit 1 ;;
+  esac
 }
 
 # --- Git-Helfer ---
