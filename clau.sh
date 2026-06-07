@@ -67,6 +67,49 @@ _kill_owl_proxy() {
   printf '\e[?1000l\e[?1002l\e[?1003l\e[?1004l\e[?1006l\e[?1015l\e[?1016l' > /dev/tty 2>/dev/null || true
 }
 
+# ── Aider-Integration ─────────────────────────────────────────────────────────
+
+is_aider_model() {
+  [[ "${1:-}" == aider:* ]]
+}
+
+aider_model_id() {
+  echo "${1#aider:}"
+}
+
+run_aider() {
+  local owl_id="$1"
+  shift
+  if ! command -v aider &>/dev/null; then
+    echo "Fehler: aider nicht gefunden (pip install aider-chat)" >&2
+    exit 1
+  fi
+  local extra=()
+  [[ "${INTERACTION_LEVEL:-2}" -eq 0 ]] && extra+=(--yes)
+  aider \
+    --openai-api-base "${OWL_BASE_URL}/v1" \
+    --openai-api-key dummy \
+    --model "openai/${owl_id}" \
+    --no-show-model-warnings \
+    "${extra[@]}" "$@"
+}
+
+run_aider_headless() {
+  local owl_id="$1"
+  local prompt="$2"
+  if ! command -v aider &>/dev/null; then
+    echo "Fehler: aider nicht gefunden" >&2
+    exit 1
+  fi
+  aider \
+    --openai-api-base "${OWL_BASE_URL}/v1" \
+    --openai-api-key dummy \
+    --model "openai/${owl_id}" \
+    --no-show-model-warnings \
+    --yes \
+    --message "$prompt"
+}
+
 # claude über owlAPI-Proxy starten (interaktiv)
 run_owl_via_claude() {
   local owl_id="$1"
@@ -196,7 +239,9 @@ Model-Mappings:
   Claude Code (agentisch):  1=haiku  2=sonnet  3=opus
   owlAPI (lokal/gratis):    4=owl:120  5=owl:243  6=owl:113(Grok)  7=owl:38(QwQ)  8=owl:316
   owlAPI (günstig/stark):   9=owl:35  a=owl:350  b=owl:503  c=owl:21  d=owl:84  e=owl:501
+  Aider (Editor-Modus):     f=aider:120  g=aider:350
   owlAPI direkt:            --model owl:35  oder  -m 350
+  Aider direkt:             --model aider:120  oder  -m aider:243
 HELP_EOF
 }
 
@@ -211,8 +256,10 @@ model_from_number() {
     7) CLAU_MODEL="owl:38" ;;    # QwQ-Plus gratis
     8) CLAU_MODEL="owl:316" ;;   # Qwen3-Coder OR gratis
     9) CLAU_MODEL="owl:35" ;;    # Qwen-Flash günstig
+    f) CLAU_MODEL="aider:120" ;; # Aider + PropellerA-27B
+    g) CLAU_MODEL="aider:350" ;; # Aider + DeepSeek-V4-Pro
     *)
-      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-3=Claude CLI, 4-9=owlAPI)" >&2
+      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-3=Claude CLI, 4-9/f-g=owlAPI/Aider)" >&2
       exit 1
       ;;
   esac
@@ -224,6 +271,9 @@ normalize_model_name() {
       CLI_MODEL_OVERRIDE="$1"
       ;;
     owl:*)
+      CLI_MODEL_OVERRIDE="$1"
+      ;;
+    aider:*)
       CLI_MODEL_OVERRIDE="$1"
       ;;
     *)
@@ -253,6 +303,8 @@ show_current() {
   local backend="Claude Code (agentisch)"
   if is_owl_model "${CLAU_MODEL:-}"; then
     backend="owlAPI Chat (${OWL_BASE_URL}, Modell $(owl_model_id "${CLAU_MODEL}"))"
+  elif is_aider_model "${CLAU_MODEL:-}"; then
+    backend="Aider direkt (${OWL_BASE_URL}/v1, Modell $(aider_model_id "${CLAU_MODEL}"))"
   fi
   echo "Aktuelles Verzeichnis : $(pwd)"
   echo "Konfiguriertes Modell : $mdl"
@@ -287,8 +339,12 @@ choose_model_interactive() {
     echo "  d) owl:84    GPT-5              OAI    tools            \$1.25/\$10.00"
     echo "  e) owl:501   Gemini-2.5-Pro     Goog   tools            \$1.25/\$10.00"
     echo "  o) ID direkt eingeben  (alle ~150 Modelle via owlAPI)"
+    echo "  --- Aider (Editor, direkt OpenAI-Format, kein Proxy) ---"
+    echo "  f) aider:120 PropellerA-27B    lokal  GRATIS"
+    echo "  g) aider:350 DeepSeek-V4-Pro   cloud  \$0.44/\$0.87"
+    echo "  p) Aider ID eingeben"
     echo "  s) sudo NOPASSWD      $(sudo_is_enabled && echo "[AN]  → ausschalten" || echo "[AUS] → einschalten")"
-    printf "Auswahl [1-9, a-e, o, s, Enter=2]: "
+    printf "Auswahl [1-9, a-g, o, p, s, Enter=2]: "
     read -r choice
 
     case "${choice:-2}" in
@@ -306,11 +362,22 @@ choose_model_interactive() {
       c|C) CLAU_MODEL="owl:21"; break ;;
       d|D) CLAU_MODEL="owl:84"; break ;;
       e|E) CLAU_MODEL="owl:501"; break ;;
+      f|F) CLAU_MODEL="aider:120"; break ;;
+      g|G) CLAU_MODEL="aider:350"; break ;;
       o|O)
         printf "owlAPI Modell-ID (z.B. 35, 120, 38, 501): "
         read -r tmp_id
         if [[ -n "$tmp_id" ]]; then
           CLAU_MODEL="owl:${tmp_id}"
+          break
+        fi
+        echo "Abgebrochen."
+        ;;
+      p|P)
+        printf "Aider Modell-ID (z.B. 120, 350, 243): "
+        read -r tmp_id
+        if [[ -n "$tmp_id" ]]; then
+          CLAU_MODEL="aider:${tmp_id}"
           break
         fi
         echo "Abgebrochen."
@@ -439,6 +506,10 @@ run_resume_picker() {
     run_owl_via_claude "$(owl_model_id "$mdl")" --resume
     return
   fi
+  if is_aider_model "$mdl"; then
+    run_aider "$(aider_model_id "$mdl")"
+    return
+  fi
   echo "Öffne Session-Auswahl (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
@@ -456,6 +527,10 @@ run_saved_session() {
     run_owl_via_claude "$(owl_model_id "$mdl")"
     return
   fi
+  if is_aider_model "$mdl"; then
+    run_aider "$(aider_model_id "$mdl")"
+    return
+  fi
   echo "Starte feste Session $CLAU_SESSION_ID (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
@@ -471,6 +546,10 @@ run_new_session() {
   fi
   if is_owl_model "$mdl"; then
     run_owl_via_claude "$(owl_model_id "$mdl")"
+    return
+  fi
+  if is_aider_model "$mdl"; then
+    run_aider "$(aider_model_id "$mdl")"
     return
   fi
   echo "Starte neue Session (Modell: $mdl, Autonomie: $(interaction_label)) ..."
@@ -538,6 +617,14 @@ run_headless_here() {
     run_owl_headless_via_claude "$(owl_model_id "$mdl")" "$PROMPT_TEXT"
     return
   fi
+  if is_aider_model "$mdl"; then
+    if [[ -z "${PROMPT_TEXT:-}" ]]; then
+      echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
+      exit 1
+    fi
+    run_aider_headless "$(aider_model_id "$mdl")" "$PROMPT_TEXT"
+    return
+  fi
   build_headless_cmd
   echo "Starte headless im Verzeichnis: $(pwd)"
   exec "${CLAUDE_CMD[@]}"
@@ -553,6 +640,14 @@ run_headless_in_dir() {
       exit 1
     fi
     (cd "$dir"; run_owl_headless_via_claude "$(owl_model_id "$mdl")" "$PROMPT_TEXT")
+    return
+  fi
+  if is_aider_model "$mdl"; then
+    if [[ -z "${PROMPT_TEXT:-}" ]]; then
+      echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
+      exit 1
+    fi
+    (cd "$dir"; run_aider_headless "$(aider_model_id "$mdl")" "$PROMPT_TEXT")
     return
   fi
   echo "Projektverzeichnis bereit für headless: $dir"
