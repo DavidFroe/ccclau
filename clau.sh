@@ -105,6 +105,14 @@ run_aider() {
     echo "Fehler: aider nicht gefunden — pip install aider-chat oder ~/aider/bin/aider anlegen" >&2
     exit 1
   fi
+  # Aider braucht git-getrackte Dateien für die Repo-Map
+  if git rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
+    local tracked; tracked=$(git ls-files | wc -l)
+    if [[ "$tracked" -eq 0 ]]; then
+      echo "Aider: git repo hat 0 getrackte Dateien — führe 'git add .' aus..."
+      git add .
+    fi
+  fi
   local extra=()
   [[ "${INTERACTION_LEVEL:-2}" -eq 0 ]] && extra+=(--yes)
   "$aider_bin" \
