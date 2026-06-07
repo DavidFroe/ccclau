@@ -86,6 +86,8 @@ _find_aider() {
   local c
   for c in \
     "$HOME/aider/bin/aider" \
+    "$HOME/aider/.venv/bin/aider" \
+    "$HOME/aider/venv/bin/aider" \
     "$HOME/.venv/bin/aider" \
     "$HOME/venv/bin/aider" \
     "$HOME/.local/share/aider/bin/aider"
