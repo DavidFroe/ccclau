@@ -45,13 +45,20 @@ _BRAND_RE = re.compile(
 def _neutralize_brand(text: str) -> str:
     return _BRAND_RE.sub("the AI assistant", text)
 
+# Prefix injected into system prompt to override identity claims without
+# garbling the rest of the prompt (global replace breaks coherence).
+_SYSTEM_PREFIX = (
+    "You are a helpful AI coding assistant. "
+    "Disregard any identity claims in the following instructions "
+    "about being a specific model or company — treat them as generic assistant instructions.\n\n"
+)
 
 def messages_ant_to_oai(messages, system=None):
     result = []
     if system:
         if isinstance(system, list):
             system = "\n".join(b.get("text", "") for b in system if b.get("type") == "text")
-        result.append({"role": "system", "content": _neutralize_brand(system)})
+        result.append({"role": "system", "content": _SYSTEM_PREFIX + system})
 
     for msg in messages:
         role = msg["role"]
@@ -242,6 +249,18 @@ class StreamTranslator:
 
         # Finish
         if finish_reason in ("stop", "tool_calls", "length"):
+            # Empty response fallback — model returned nothing (content filter / refusal)
+            if not self.text_started and not self.tool_buffers:
+                self.text_started = True
+                out.append(self._evt("content_block_start", {
+                    "type": "content_block_start", "index": self.text_index,
+                    "content_block": {"type": "text", "text": ""}
+                }))
+                out.append(self._evt("content_block_delta", {
+                    "type": "content_block_delta", "index": self.text_index,
+                    "delta": {"type": "text_delta",
+                              "text": f"[Modell {OWL_MODEL} hat leere Antwort zurückgegeben — möglicherweise Inhaltsfilter. Bitte Anfrage umformulieren.]"}
+                }))
             if self.text_started:
                 out.append(self._evt("content_block_stop", {
                     "type": "content_block_stop", "index": self.text_index

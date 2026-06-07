@@ -64,7 +64,7 @@ _kill_owl_proxy() {
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
   fi
   # Claude CLI aktiviert Mouse-Tracking — bei Exit sauber deaktivieren
-  printf '\e[?1000l\e[?1002l\e[?1003l\e[?1006l\e[?1015l' 2>/dev/null || true
+  printf '\e[?1000l\e[?1002l\e[?1003l\e[?1004l\e[?1006l\e[?1015l\e[?1016l' > /dev/tty 2>/dev/null || true
 }
 
 # claude über owlAPI-Proxy starten (interaktiv)
