@@ -78,26 +78,8 @@ aider_model_id() {
 }
 
 _find_aider() {
-  # 1. Workspace-lokal (containert, priorisiert)
-  if [[ -x "./aider/bin/aider" ]]; then
-    echo "./aider/bin/aider"; return 0
-  fi
-  # 2. Aktive venv / PATH
-  if command -v aider &>/dev/null; then
-    command -v aider; return 0
-  fi
-  # 3. Bekannte globale venv-Pfade
-  local c
-  for c in \
-    "$HOME/aider/bin/aider" \
-    "$HOME/aider/.venv/bin/aider" \
-    "$HOME/aider/venv/bin/aider" \
-    "$HOME/.venv/bin/aider" \
-    "$HOME/venv/bin/aider" \
-    "$HOME/.local/share/aider/bin/aider"
-  do
-    [[ -x "$c" ]] && { echo "$c"; return 0; }
-  done
+  # Nur workspace-lokal — kein globales Fallback
+  [[ -x "./aider/bin/aider" ]] && { echo "./aider/bin/aider"; return 0; }
   return 1
 }
 
