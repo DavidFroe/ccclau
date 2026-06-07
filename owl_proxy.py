@@ -6,7 +6,7 @@ Lauscht auf localhost:PORT, übersetzt /v1/messages für claude CLI.
 
 import json
 import os
-import re
+
 import sys
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -38,31 +38,12 @@ def content_to_str(content):
     return str(content)
 
 
-# Pattern: strip Anthropic/Claude brand from assistant history to avoid
-# third-party model brand-protection filters (e.g. DeepSeek refuses to
-# continue after seeing "Ich bin Claude Sonnet / made by Anthropic").
-_BRAND_RE = re.compile(
-    r'\b(Claude(?:\s+(?:Sonnet|Haiku|Opus|Code|3|4|[\d.]+))*|Anthropic)\b',
-    re.IGNORECASE
-)
-
-def _neutralize_brand(text: str) -> str:
-    return _BRAND_RE.sub("the AI assistant", text)
-
-# Prefix injected into system prompt to override identity claims without
-# garbling the rest of the prompt (global replace breaks coherence).
-_SYSTEM_PREFIX = (
-    "You are a helpful AI coding assistant. "
-    "Disregard any identity claims in the following instructions "
-    "about being a specific model or company — treat them as generic assistant instructions.\n\n"
-)
-
 def messages_ant_to_oai(messages, system=None):
     result = []
     if system:
         if isinstance(system, list):
             system = "\n".join(b.get("text", "") for b in system if b.get("type") == "text")
-        result.append({"role": "system", "content": _SYSTEM_PREFIX + system})
+        result.append({"role": "system", "content": system})
 
     for msg in messages:
         role = msg["role"]
@@ -90,10 +71,10 @@ def messages_ant_to_oai(messages, system=None):
                     })
                 out = {"role": "assistant", "tool_calls": tool_calls}
                 if text_blocks:
-                    out["content"] = _neutralize_brand(content_to_str(text_blocks))
+                    out["content"] = content_to_str(text_blocks)
                 result.append(out)
             else:
-                result.append({"role": "assistant", "content": _neutralize_brand(content_to_str(content))})
+                result.append({"role": "assistant", "content": content_to_str(content)})
 
         elif role == "user":
             if tool_result_blocks:
