@@ -77,16 +77,35 @@ aider_model_id() {
   echo "${1#aider:}"
 }
 
+_find_aider() {
+  # 1. Aktive venv / PATH
+  if command -v aider &>/dev/null; then
+    command -v aider; return 0
+  fi
+  # 2. Bekannte venv-Pfade
+  local c
+  for c in \
+    "$HOME/aider/bin/aider" \
+    "$HOME/.venv/bin/aider" \
+    "$HOME/venv/bin/aider" \
+    "$HOME/.local/share/aider/bin/aider"
+  do
+    [[ -x "$c" ]] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
 run_aider() {
   local owl_id="$1"
   shift
-  if ! command -v aider &>/dev/null; then
-    echo "Fehler: aider nicht gefunden (pip install aider-chat)" >&2
+  local aider_bin
+  if ! aider_bin="$(_find_aider)"; then
+    echo "Fehler: aider nicht gefunden — pip install aider-chat oder ~/aider/bin/aider anlegen" >&2
     exit 1
   fi
   local extra=()
   [[ "${INTERACTION_LEVEL:-2}" -eq 0 ]] && extra+=(--yes)
-  aider \
+  "$aider_bin" \
     --openai-api-base "${OWL_BASE_URL}/v1" \
     --openai-api-key dummy \
     --model "openai/${owl_id}" \
@@ -97,11 +116,12 @@ run_aider() {
 run_aider_headless() {
   local owl_id="$1"
   local prompt="$2"
-  if ! command -v aider &>/dev/null; then
+  local aider_bin
+  if ! aider_bin="$(_find_aider)"; then
     echo "Fehler: aider nicht gefunden" >&2
     exit 1
   fi
-  aider \
+  "$aider_bin" \
     --openai-api-base "${OWL_BASE_URL}/v1" \
     --openai-api-key dummy \
     --model "openai/${owl_id}" \
