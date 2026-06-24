@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-owl_proxy.py — Anthropic-API → owlAPI (OpenAI-Format) Proxy
+owl_proxy.py — Anthropic-API → QuiteQue (OpenAI-Format) Proxy
 Lauscht auf localhost:PORT, übersetzt /v1/messages für claude CLI.
+Setzt X-OwlTrail-User Header (User 'opencode' per default) für QuiteQue-Auth.
 """
 
 import json
@@ -13,8 +14,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
 
-OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.1:4040/v1")
+OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.13:7077/v1")
 OWL_MODEL = os.environ.get("OWL_MODEL", "120")
+OWL_USER = os.environ.get("OWL_PROXY_USER", "opencode")
 PORT = int(os.environ.get("OWL_PROXY_PORT", "8325"))
 # ── Format-Konvertierung ───────────────────────────────────────────────────────
 
@@ -308,7 +310,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             resp = requests.post(
                 f"{OWL_BASE}/chat/completions",
                 json=oai_payload,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", "X-OwlTrail-User": OWL_USER},
                 stream=stream,
                 timeout=120
             )

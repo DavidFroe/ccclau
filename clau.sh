@@ -27,9 +27,11 @@ toggle_sudo() {
   fi
 }
 
-# owlAPI-Proxy: claude CLI spricht Anthropic-Format, Proxy übersetzt → owlAPI
+# owlAPI-Proxy: claude CLI spricht Anthropic-Format, Proxy übersetzt → QuiteQue
+# QuiteQue hier auf 11.0.0.13 (diese Stack) — User "opencode" für vLLM/Claude-Backends
 OWL_PROXY_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/owl_proxy.py"
-OWL_BASE_URL="http://11.0.0.1:4040"
+OWL_BASE_URL="http://11.0.0.13:7077"
+QQ_USER="opencode"
 
 is_owl_model() {
   [[ "${1:-}" == owl:* ]]
@@ -37,6 +39,155 @@ is_owl_model() {
 
 owl_model_id() {
   echo "${1#owl:}"
+}
+
+# Kontext-Window pro owl-Modell (für CLAUDE_CODE_MAX_CONTEXT_TOKENS).
+# Auto-generiert aus QuiteQue /v1/models. Verhindert dass claude-CLI glaubt
+# das Modell hätte 200k, obwohl das echte Backend-Modell nur 97k (PropellerA) hat.
+declare -gA OWL_CONTEXT_WINDOWS=(
+  ["20"]="200000"   # Claude Haiku 4.5
+  ["50"]="32000"    # SkinnyJoe T79: Qwen3 4B Instruct (CPU)
+  ["51"]="16000"    # SkinnyJoe T77: Dolphin3 3B (CPU)
+  ["52"]="8000"     # SkinnyJoe T78: L3.1 Dark-Planet 8B (CPU, RP)
+  ["53"]="4000"     # SkinnyJoe W4: Whisper-large-v3 (ASR)
+  ["54"]="0"        # SkinnyJoe B3: SD-Turbo (Image-Gen, CPU)
+  ["90"]="1048000"  # GPT-5.1
+  ["120"]="97000"   # PropellerA: Qwen3.6 27B (Tools+Vision+Thinking)
+  ["317"]="1048000" # OpenRouter Owl Alpha (1M ctx, Agentic, FREE)
+  ["350"]="1048000" # DeepSeek V4 Pro (1M ctx, Reasoning)
+  ["351"]="1048000" # MiniMax M3 (1M ctx)
+  ["360"]="262000"  # MoonshotAI Kimi K2.7 Code (262k)
+  ["361"]="1000000" # Qwen3.7 Max (1M ctx)
+  ["362"]="1000000" # Qwen3.7 Plus (1M ctx)
+  ["367"]="202000"  # Z.ai GLM 4.7 Flash (203k)
+  ["368"]="202000"  # Z.ai GLM 4.7 (203k)
+  ["379"]="1048000" # DeepSeek V4 Flash (1M ctx, MoE)
+  ["380"]="1048000" # Xiaomi MiMo V2.5 (1M ctx, Omnimodal)
+  ["381"]="1000000" # Qwen3 Coder Plus (1M ctx, 480B A35B Coding-Agent)
+  ["382"]="1048000" # Z.ai GLM 5.2 (1M ctx, Reasoning)
+  ["383"]="128000"  # Amazon Nova Micro 1.0 (128k)
+  ["384"]="1048000" # Qwen3 Coder 480B A35B (1M ctx)
+  ["385"]="262000"  # Qwen3.6 27B (262k, Vision)
+  ["386"]="1048000" # Meta Llama 4 Maverick (1M ctx, Vision)
+)
+
+owl_context_window() {
+  local owl_id="${1:-}"
+  local cw="${OWL_CONTEXT_WINDOWS[$owl_id]:-}"
+  if [[ -n "$cw" && "$cw" -gt 0 ]]; then
+    echo "$cw"
+  fi
+}
+
+# ── Pre-Flight: Session-Größe schätzen (vor claude-CLI Start) ────────────────
+# claude-CLI speichert Sessions in ~/.claude/projects/<hash>/<session-id>.jsonl
+# wobei hash = pwd mit "/" ersetzt durch "-". Wir lesen die letzte usage-Zeile
+# und berechnen die geschätzte aktuelle Kontext-Größe. Wenn die Session zu groß
+# für das gewählte Modell ist, lehnen wir ab oder warnen.
+
+_claude_projects_dir() {
+  echo "${HOME}/.claude/projects"
+}
+
+_project_hash_for() {
+  local dir="${1:-$PWD}"
+  echo "${dir//\//-}"
+}
+
+_latest_session_file() {
+  local dir="${1:-$PWD}"
+  local ph; ph="$(_project_hash_for "$dir")"
+  local proj_dir; proj_dir="$(_claude_projects_dir)/${ph}"
+  [[ -d "$proj_dir" ]] || return 1
+  # neueste .jsonl nach mtime
+  ls -1t "$proj_dir"/*.jsonl 2>/dev/null | head -1
+}
+
+_estimate_session_tokens() {
+  # Liest die letzte usage-Zeile und gibt geschätzte Kontext-Tokens zurück
+  # (= input_tokens + cache_read_input_tokens + cache_creation_input_tokens)
+  local sf="${1:-}"
+  [[ -f "$sf" ]] || { echo "0"; return 1; }
+  # Wir nehmen die letzte Zeile mit non-empty usage
+  python3 - "$sf" <<'PYEOF' 2>/dev/null || echo "0"
+import json, sys
+sf = sys.argv[1]
+last_in = 0
+last_cache_read = 0
+last_cache_creation = 0
+found = False
+with open(sf) as f:
+    for line in f:
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        msg = d.get('message', {})
+        u = msg.get('usage') or {}
+        if u:
+            last_in = u.get('input_tokens', 0) or 0
+            last_cache_read = u.get('cache_read_input_tokens', 0) or 0
+            last_cache_creation = u.get('cache_creation_input_tokens', 0) or 0
+            found = True
+if not found:
+    print("0")
+else:
+    print(last_in + last_cache_read + last_cache_creation)
+PYEOF
+}
+
+_pre_flight_check() {
+  local owl_id="$1"
+  local cw; cw="$(owl_context_window "$owl_id")"
+  [[ -n "$cw" && "$cw" -gt 0 ]] || return 0  # kein Check möglich (z.B. Claude direkt)
+
+  local sf; sf="$(_latest_session_file 2>/dev/null)"
+  [[ -n "$sf" && -f "$sf" ]] || { echo "✓ Pre-Flight: keine Session gefunden, starte neu"; return 0; }
+
+  local tokens; tokens="$(_estimate_session_tokens "$sf")"
+  tokens="${tokens:-0}"
+  [[ "$tokens" -eq 0 ]] && { echo "✓ Pre-Flight: leere Session, starte"; return 0; }
+
+  local pct=$(( tokens * 100 / cw ))
+  local sf_name; sf_name="$(basename "$sf")"
+
+  if [[ "$tokens" -gt "$cw" ]]; then
+    cat >&2 <<EOF
+⚠ PRE-FLIGHT FEHLGESCHLAGEN — Session überschreitet Modell-Context-Window
+
+  Modell:      owl:$owl_id
+  Kontext:     $cw Tokens
+  Session:     $tokens Tokens ($pct%)
+  Session-File: $sf
+
+  Diese Session ist zu groß für das gewählte Modell. claude-CLI wird
+  beim Start einen API-Error geben, weil das Backend den Input nicht
+  verarbeiten kann.
+
+  Empfehlung (eine davon):
+    1) Größeres Modell wählen, z.B.:
+         clau -m owl:351    (MiniMax M3, 1M ctx)
+         clau -m owl:361    (Qwen3.7 Max, 1M ctx)
+         clau -m owl:379    (DeepSeek V4 Flash, 1M ctx)
+    2) Neue Session starten (alte verwerfen):
+         clau --new -m owl:$owl_id
+    3) Erst /compact in alter Session, dann hier weitermachen.
+
+  Override mit --force-context, wenn du es trotzdem versuchen willst.
+EOF
+    return 1
+  fi
+
+  if [[ "$pct" -gt 80 ]]; then
+    cat >&2 <<EOF
+⚠ Pre-Flight: Session hat $tokens Tokens ($pct% von $cw Kontext-Window)
+  Modell owl:$owl_id hat nur $cw Kontext-Tokens.
+  Empfehlung: /compact aufrufen oder größeres Modell wählen.
+EOF
+  else
+    echo "✓ Pre-Flight: Session $tokens Tokens ($pct% von $cw) — passt zu owl:$owl_id"
+  fi
+  return 0
 }
 
 # Freien TCP-Port finden
@@ -51,7 +202,7 @@ _start_owl_proxy() {
   local owl_id="$1"
   local port
   port="$(_free_port)"
-  OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" \
+  OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
     python3 "$OWL_PROXY_SCRIPT" "$port" >/dev/null 2>&1 &
   echo "$!" > "$_OWL_PID_FILE"
   echo "$port"
@@ -148,13 +299,48 @@ run_owl_via_claude() {
     echo "Fehler: owl_proxy.py nicht gefunden: $OWL_PROXY_SCRIPT" >&2
     exit 1
   fi
+
+  # Pre-Flight: Session-Größe vs. Modell-Context-Window
+  local force_ctx=0
+  for arg in "$@"; do
+    [[ "$arg" == "--force-context" ]] && force_ctx=1
+  done
+  if [[ "$force_ctx" -eq 0 ]]; then
+    _pre_flight_check "$owl_id" || exit 1
+  fi
+
+  # Auto-Compact-Threshold: kleiner Modelle brauchen früheren Compact.
+  # Wir setzen ihn auf 80% der Modell-Context-Window, damit /compact
+  # auch WIRKLICH unter die echte Window kommt. claude-CLI respektiert
+  # CLAUDE_CODE_AUTO_COMPACT_WINDOW ohne DISABLE_COMPACT zu setzen!
+  local cw; cw="$(owl_context_window "$owl_id")"
+  if [[ -n "$cw" && "$cw" -gt 0 && "$cw" -lt 1000000 ]]; then
+    local compact_target=$(( cw * 80 / 100 ))
+    export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$compact_target"
+    echo "Auto-Compact-Window: $compact_target Tokens (80% von $cw für owl:$owl_id)"
+  else
+    unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  fi
+
   echo "Starte owlAPI-Proxy für Modell $owl_id ..."
   local port
   port="$(_start_owl_proxy "$owl_id")"
   trap '_kill_owl_proxy' EXIT INT TERM
   sleep 0.6
 
-  echo "Claude Code → Proxy :${port} → owlAPI (Modell $owl_id)"
+  # Kontext-Window für die Info-Anzeige ausgeben. Wir überschreiben NICHT
+  # CLAUDE_CODE_MAX_CONTEXT_TOKENS — das würde Auto-Compact ausschalten
+  # (greift nur wenn DISABLE_COMPACT gesetzt ist), und der User will
+  # Auto-Compact aktiv lassen. Statt dessen: User alle paar Turns /compact
+  # aufrufen lassen, oder ein größeres Modell wählen.
+  local cw; cw="$(owl_context_window "$owl_id")"
+  echo "Claude Code → Proxy :${port} → QuiteQue (Modell $owl_id${cw:+, ctx=$cw})"
+  if [[ -n "$cw" && "$cw" -lt 200000 ]]; then
+    echo "Hinweis: Modell $owl_id hat nur $cw Token Kontext."
+    echo "         Bei langen Sessions regelmäßig /compact aufrufen,"
+    echo "         oder ein größeres Modell wählen (z.B. owl:351 oder owl:361)."
+  fi
+
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
@@ -173,10 +359,28 @@ run_owl_headless_via_claude() {
     echo "Fehler: owl_proxy.py nicht gefunden: $OWL_PROXY_SCRIPT" >&2
     exit 1
   fi
+
+  # Pre-Flight: Session-Größe vs. Modell-Context-Window
+  _pre_flight_check "$owl_id" || exit 1
+
+  # Auto-Compact-Threshold: kleiner Modelle brauchen früheren Compact.
+  local cw; cw="$(owl_context_window "$owl_id")"
+  if [[ -n "$cw" && "$cw" -gt 0 && "$cw" -lt 1000000 ]]; then
+    local compact_target=$(( cw * 80 / 100 ))
+    export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$compact_target"
+  else
+    unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  fi
+
   local port
   port="$(_start_owl_proxy "$owl_id")"
   trap '_kill_owl_proxy' EXIT INT TERM
   sleep 0.6
+
+  echo "Claude Code headless → Proxy :${port} → QuiteQue (Modell $owl_id${cw:+, ctx=$cw})"
+  if [[ -n "$cw" && "$cw" -lt 200000 ]]; then
+    echo "Hinweis: Modell $owl_id hat $cw Token Kontext."
+  fi
 
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
   ANTHROPIC_API_KEY="sk-owl" \
