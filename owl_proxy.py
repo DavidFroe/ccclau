@@ -18,6 +18,8 @@ OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.13:7077/v1")
 OWL_MODEL = os.environ.get("OWL_MODEL", "120")
 OWL_USER = os.environ.get("OWL_PROXY_USER", "opencode")
 PORT = int(os.environ.get("OWL_PROXY_PORT", "8325"))
+# Timeout: lang genug für langsame Modelle (PropellerA etc.)
+REQUEST_TIMEOUT = int(os.environ.get("OWL_PROXY_TIMEOUT", "600"))
 # ── Format-Konvertierung ───────────────────────────────────────────────────────
 
 def content_to_str(content):
@@ -312,7 +314,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 json=oai_payload,
                 headers={"Content-Type": "application/json", "X-OwlTrail-User": OWL_USER},
                 stream=stream,
-                timeout=120
+                timeout=REQUEST_TIMEOUT
             )
             resp.raise_for_status()
         except requests.exceptions.RequestException as e:

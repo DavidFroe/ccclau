@@ -18,7 +18,7 @@ toggle_sudo() {
   else
     printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$user" | sudo tee "$SUDO_FILE" > /dev/null
     sudo chmod 440 "$SUDO_FILE"
-    if sudo visudo -c &>/dev/null; then
+    if sudo visudo -cf "$SUDO_FILE" &>/dev/null; then
       echo "sudo: AN — ${user} hat jetzt NOPASSWD sudo"
     else
       sudo rm -f "$SUDO_FILE" 2>/dev/null || true
@@ -76,6 +76,114 @@ owl_context_window() {
   local cw="${OWL_CONTEXT_WINDOWS[$owl_id]:-}"
   if [[ -n "$cw" && "$cw" -gt 0 ]]; then
     echo "$cw"
+  fi
+}
+
+# ── Effective Context Window (alle Modell-Typen) ─────────────────────────────
+# Gibt das Context-Window für ein beliebiges Modell zurück.
+# owl:X → OWL_CONTEXT_WINDOWS lookup
+# aider:X → OWL_CONTEXT_WINDOWS lookup (gleiche IDs)
+# Claude-Modelle → bekannte Werte
+# Gibt leer zurück, wenn nicht gefunden.
+effective_context_window() {
+  local model="${1:-}"
+  [[ -n "$model" ]] || return 0
+
+  local owl_id=""
+
+  if [[ "$model" == owl:* ]]; then
+    owl_id="${model#owl:}"
+  elif [[ "$model" == aider:* ]]; then
+    owl_id="${model#aider:}"
+  elif [[ "$model" == "haiku" || "$model" == "claude-haiku"* ]]; then
+    echo "200000"
+    return
+  elif [[ "$model" == "sonnet" || "$model" == "claude-sonnet"* ]]; then
+    echo "200000"
+    return
+  elif [[ "$model" == "opus" || "$model" == "claude-opus"* ]]; then
+    echo "200000"
+    return
+  fi
+
+  if [[ -n "$owl_id" ]]; then
+    owl_context_window "$owl_id"
+  fi
+}
+
+# ── Timeout-Presets pro Modell ──────────────────────────────────────────────
+# Default/Max Timeout in ms pro Modell-ID. Langsame Modelle brauchen mehr Zeit.
+# Format: DEFAULT_MAX_TIMEOUT_MS (Default) : MAX_MAX_TIMEOUT_MS (Maximum)
+# Kleine Modelle (CPU, <10B): 10 Min Default, 30 Min Max
+# Mittlere Modelle (10-30B): 30 Min Default, 60 Min Max
+# Große Modelle (30B+): 30 Min Default, 120 Min Max
+# 1M-Context-Modelle: 60 Min Default, 180 Min Max
+declare -gA TIMEOUT_PRESET_DEFAULT=(
+  ["50"]="600000"    # SkinnyJoe T79: Qwen3 4B (CPU) → 10 Min
+  ["51"]="600000"    # SkinnyJoe T77: Dolphin3 3B (CPU) → 10 Min
+  ["52"]="600000"    # SkinnyJoe T78: L3.1 Dark-Planet 8B (CPU) → 10 Min
+  ["120"]="1800000"  # PropellerA: Qwen3.6 27B → 30 Min
+  ["317"]="3600000"  # OpenRouter Owl Alpha (1M ctx) → 60 Min
+  ["350"]="3600000"  # DeepSeek V4 Pro (1M ctx) → 60 Min
+  ["351"]="3600000"  # MiniMax M3 (1M ctx) → 60 Min
+  ["360"]="1800000"  # MoonshotAI Kimi K2.7 Code (262k) → 30 Min
+  ["361"]="3600000"  # Qwen3.7 Max (1M ctx) → 60 Min
+  ["362"]="3600000"  # Qwen3.7 Plus (1M ctx) → 60 Min
+  ["367"]="1800000"  # Z.ai GLM 4.7 Flash (203k) → 30 Min
+  ["368"]="1800000"  # Z.ai GLM 4.7 (203k) → 30 Min
+  ["379"]="3600000"  # DeepSeek V4 Flash (1M ctx) → 60 Min
+  ["380"]="3600000"  # Xiaomi MiMo V2.5 (1M ctx) → 60 Min
+  ["381"]="3600000"  # Qwen3 Coder Plus (1M ctx) → 60 Min
+  ["382"]="3600000"  # Z.ai GLM 5.2 (1M ctx) → 60 Min
+  ["383"]="1800000"  # Amazon Nova Micro 1.0 (128k) → 30 Min
+  ["384"]="3600000"  # Qwen3 Coder 480B (1M ctx) → 60 Min
+  ["385"]="1800000"  # Qwen3.6 27B (262k) → 30 Min
+  ["386"]="3600000"  # Meta Llama 4 Maverick (1M ctx) → 60 Min
+)
+declare -gA TIMEOUT_PRESET_MAX=(
+  ["50"]="1800000"   # SkinnyJoe → 30 Min
+  ["51"]="1800000"
+  ["52"]="1800000"
+  ["120"]="3600000"  # PropellerA → 60 Min
+  ["317"]="10800000" # OpenRouter Owl Alpha → 180 Min
+  ["350"]="10800000" # DeepSeek V4 Pro → 180 Min
+  ["351"]="10800000" # MiniMax M3 → 180 Min
+  ["360"]="3600000"  # Kimi K2.7 → 60 Min
+  ["361"]="10800000" # Qwen3.7 Max → 180 Min
+  ["362"]="10800000" # Qwen3.7 Plus → 180 Min
+  ["367"]="3600000"  # GLM 4.7 Flash → 60 Min
+  ["368"]="3600000"  # GLM 4.7 → 60 Min
+  ["379"]="10800000" # DeepSeek V4 Flash → 180 Min
+  ["380"]="10800000" # Xiaomi MiMo → 180 Min
+  ["381"]="10800000" # Qwen3 Coder Plus → 180 Min
+  ["382"]="10800000" # GLM 5.2 → 180 Min
+  ["383"]="3600000"  # Nova Micro → 60 Min
+  ["384"]="10800000" # Qwen3 Coder 480B → 180 Min
+  ["385"]="3600000"  # Qwen3.6 27B → 60 Min
+  ["386"]="10800000" # Llama 4 Maverick → 180 Min
+)
+
+# Setzt Timeout-Werte basierend auf Modell-Preset oder verwendet Konfig/Default
+apply_timeout_for_model() {
+  local model="${1:-}"
+  [[ -n "$model" ]] || return 0
+
+  local owl_id=""
+  if [[ "$model" == owl:* ]]; then
+    owl_id="${model#owl:}"
+  elif [[ "$model" == aider:* ]]; then
+    owl_id="${model#aider:}"
+  fi
+
+  if [[ -n "$owl_id" ]]; then
+    local preset_default="${TIMEOUT_PRESET_DEFAULT[$owl_id]:-}"
+    local preset_max="${TIMEOUT_PRESET_MAX[$owl_id]:-}"
+    if [[ -n "$preset_default" ]]; then
+      CLAU_TIMEOUT_DEFAULT="$preset_default"
+    fi
+    if [[ -n "$preset_max" ]]; then
+      CLAU_TIMEOUT_MAX="$preset_max"
+    fi
   fi
 }
 
@@ -350,6 +458,10 @@ run_owl_via_claude() {
     echo "         oder ein größeres Modell wählen (z.B. owl:351 oder owl:361)."
   fi
 
+  # Timeout-Konfiguration: verhindert dass claude den Proxy nach 2 Min killt
+  export BASH_DEFAULT_TIMEOUT_MS="${CLAU_TIMEOUT_DEFAULT:-1800000}"
+  export BASH_MAX_TIMEOUT_MS="${CLAU_TIMEOUT_MAX:-7200000}"
+
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
@@ -392,6 +504,10 @@ run_owl_headless_via_claude() {
   trap '_kill_owl_proxy' EXIT INT TERM
   sleep 0.6
 
+  # Timeout-Konfiguration
+  export BASH_DEFAULT_TIMEOUT_MS="${CLAU_TIMEOUT_DEFAULT:-1800000}"
+  export BASH_MAX_TIMEOUT_MS="${CLAU_TIMEOUT_MAX:-7200000}"
+
   echo "Claude Code headless → Proxy :${port} → QuiteQue (Modell $owl_id${cw:+, ctx=$cw})"
   if [[ -n "$cw" && "$cw" -lt 200000 ]]; then
     echo "Hinweis: Modell $owl_id hat $cw Token Kontext."
@@ -430,11 +546,15 @@ load_config() {
   : "${CLAU_INTERACTION_LEVEL:=2}"
   : "${CLAU_EFFORT:=}"
   : "${CLAU_SESSION_NAME:=}"
+  : "${CLAU_AUTO_COMPACT_ENABLED:=1}"
   : "${CLAU_AUTO_COMPACT_WINDOW:=}"
   : "${CLAU_AUTO_COMPACT_PCT:=80}"
   : "${CLAU_DISABLE_TOOLS:=}"
   : "${CLAU_DISABLE_ARTIFACT:=0}"
   : "${CLAU_DISABLE_AGENT_VIEW:=0}"
+  # Timeout: in ms, für Claude Code Bash-Tool + Modell-Inferenz
+  : "${CLAU_TIMEOUT_DEFAULT:=1800000}"
+  : "${CLAU_TIMEOUT_MAX:=7200000}"
   INTERACTION_LEVEL="$CLAU_INTERACTION_LEVEL"
 }
 
@@ -445,11 +565,14 @@ CLAU_SESSION_ID="${CLAU_SESSION_ID}"
 CLAU_INTERACTION_LEVEL="${CLAU_INTERACTION_LEVEL}"
 CLAU_EFFORT="${CLAU_EFFORT:-}"
 CLAU_SESSION_NAME="${CLAU_SESSION_NAME:-}"
+CLAU_AUTO_COMPACT_ENABLED="${CLAU_AUTO_COMPACT_ENABLED:-1}"
 CLAU_AUTO_COMPACT_WINDOW="${CLAU_AUTO_COMPACT_WINDOW:-}"
 CLAU_AUTO_COMPACT_PCT="${CLAU_AUTO_COMPACT_PCT:-80}"
 CLAU_DISABLE_TOOLS="${CLAU_DISABLE_TOOLS:-}"
 CLAU_DISABLE_ARTIFACT="${CLAU_DISABLE_ARTIFACT:-0}"
 CLAU_DISABLE_AGENT_VIEW="${CLAU_DISABLE_AGENT_VIEW:-0}"
+CLAU_TIMEOUT_DEFAULT="${CLAU_TIMEOUT_DEFAULT:-1800000}"
+CLAU_TIMEOUT_MAX="${CLAU_TIMEOUT_MAX:-7200000}"
 CONF_EOF
 }
 
@@ -468,6 +591,17 @@ compute_auto_compact_window() {
   else
     local pct="${CLAU_AUTO_COMPACT_PCT:-80}"
     echo $(( cw * pct / 100 ))
+  fi
+}
+
+# Kurzstatus für die Menüleiste
+auto_compact_status() {
+  if [[ "${CLAU_AUTO_COMPACT_ENABLED:-1}" == "0" ]]; then
+    echo "AUS"
+  elif [[ -n "${CLAU_AUTO_COMPACT_WINDOW:-}" && "${CLAU_AUTO_COMPACT_WINDOW:-}" -gt 0 ]]; then
+    echo "AN (fest: ${CLAU_AUTO_COMPACT_WINDOW} Tokens)"
+  else
+    echo "AN (${CLAU_AUTO_COMPACT_PCT:-80}% Context-Window)"
   fi
 }
 
@@ -602,6 +736,8 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_TOOLS="WebFetch,Agent"  Tools aus System-Prompt entfernen (kommagetrennt)
   CLAU_DISABLE_ARTIFACT="1"          Artifacts deaktivieren (spart ~2-3K Tokens)
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
+  CLAU_TIMEOUT_DEFAULT="1800000"     Default Bash-Timeout in ms (30 Min = 1800000)
+  CLAU_TIMEOUT_MAX="7200000"         Max Bash-Timeout in ms (120 Min = 7200000)
 
 Aider direkt:             --model aider:120  oder  -m aider:243
 HELP_EOF
@@ -676,10 +812,27 @@ show_current() {
   echo "Autonomie-Level       : $(interaction_label)"
   echo "Effort                : ${CLAU_EFFORT:-medium (Standard)}"
   echo "sudo NOPASSWD         : $(sudo_is_enabled && echo "AN  ($SUDO_FILE)" || echo "AUS")"
-  echo "Auto-Compact          : ${CLAU_AUTO_COMPACT_WINDOW:-${CLAU_AUTO_COMPACT_PCT:-80}%}"
+  local cw="$(effective_context_window "${CLAU_MODEL:-}")"
+  [[ -n "$cw" ]] && echo "Context-Window          : $cw Tokens"
+  local trigger="$(compute_auto_compact_window "${cw:-0}")"
+  [[ -n "$trigger" && "$trigger" -gt 0 ]] && echo "Compact-Trigger           : $trigger Tokens"
+  echo "Auto-Compact          : $(auto_compact_status)"
   echo "Blockierte Tools      : ${CLAU_DISABLE_TOOLS:-<keine>}"
   echo "Artifacts deaktiviert : ${CLAU_DISABLE_ARTIFACT:-0}"
   echo "Agent-View deaktiviert: ${CLAU_DISABLE_AGENT_VIEW:-0}"
+  local owl_id_for_preset=""
+  if [[ "${CLAU_MODEL:-}" == owl:* ]]; then owl_id_for_preset="${CLAU_MODEL#owl:}"
+  elif [[ "${CLAU_MODEL:-}" == aider:* ]]; then owl_id_for_preset="${CLAU_MODEL#aider:}"; fi
+  local preset_d="${TIMEOUT_PRESET_DEFAULT[$owl_id_for_preset]:-}"
+  local preset_m="${TIMEOUT_PRESET_MAX[$owl_id_for_preset]:-}"
+  local preset_indicator=""
+  if [[ -n "$preset_d" && "$CLAU_TIMEOUT_DEFAULT" == "$preset_d" && "$CLAU_TIMEOUT_MAX" == "$preset_m" ]]; then
+    preset_indicator=" (Preset)"
+  elif [[ -n "$preset_d" ]]; then
+    preset_indicator=" (angepasst, Preset: $(( preset_d / 60000 )) / $(( preset_m / 60000 )) Min)"
+  fi
+  echo "Timeout Default        : $(( CLAU_TIMEOUT_DEFAULT / 60000 )) Min (${CLAU_TIMEOUT_DEFAULT} ms)${preset_indicator}"
+  echo "Timeout Max            : $(( CLAU_TIMEOUT_MAX / 60000 )) Min (${CLAU_TIMEOUT_MAX} ms)"
 }
 
 choose_model_interactive() {
@@ -759,6 +912,8 @@ choose_model_interactive() {
     esac
   done
 
+  # Timeout-Preset für das gewählte Modell anwenden
+  apply_timeout_for_model "$CLAU_MODEL"
   save_config
   echo "Modell: $CLAU_MODEL"
 }
@@ -819,6 +974,141 @@ choose_effort_interactive() {
   echo "Effort: $CLAU_EFFORT"
 }
 
+choose_auto_compact_settings() {
+  while true; do
+    local cw="$(effective_context_window "${CLAU_MODEL:-}")"
+    local trigger="$(compute_auto_compact_window "${cw:-0}")"
+    local enabled_label="AN"
+    [[ "${CLAU_AUTO_COMPACT_ENABLED:-1}" == "0" ]] && enabled_label="AUS"
+
+    echo
+    echo "Auto-Compact-Einstellungen:"
+    echo "  Modell-Context-Window : ${cw:-<unbekannt>}"
+    [[ -n "$trigger" && "$trigger" -gt 0 ]] && echo "  Compact-Trigger         : $trigger Tokens"
+    echo
+    echo "  1) Auto-Compact        : $enabled_label"
+    echo "  2) Festes Token-Limit  : ${CLAU_AUTO_COMPACT_WINDOW:-<prozent-basiert>}"
+    echo "  3) Prozent             : ${CLAU_AUTO_COMPACT_PCT:-80}%"
+    echo "  0) Zurück"
+    printf "Auswahl [0-3]: "
+    read -r choice
+    case "${choice:-0}" in
+      1)
+        # Toggle auto-compact on/off
+        if [[ "${CLAU_AUTO_COMPACT_ENABLED:-1}" == "1" ]]; then
+          CLAU_AUTO_COMPACT_ENABLED="0"
+        else
+          CLAU_AUTO_COMPACT_ENABLED="1"
+        fi
+        save_config
+        echo "Auto-Compact: $([[ "$CLAU_AUTO_COMPACT_ENABLED" == "1" ]] && echo "AN" || echo "AUS")"
+        ;;
+      2)
+        printf "Festes Token-Limit (leer = prozent-basiert): "
+        read -r val
+        if [[ -z "$val" ]]; then
+          CLAU_AUTO_COMPACT_WINDOW=""
+        elif [[ "$val" =~ ^[0-9]+$ ]]; then
+          CLAU_AUTO_COMPACT_WINDOW="$val"
+        else
+          echo "Ungültige Zahl."
+          continue
+        fi
+        save_config
+        echo "Token-Limit: ${CLAU_AUTO_COMPACT_WINDOW:-<prozent-basiert>}"
+        ;;
+      3)
+        printf "Prozent des Context-Window [10-99, Default 80]: "
+        read -r val
+        if [[ -z "$val" || "$val" == "80" ]]; then
+          CLAU_AUTO_COMPACT_PCT="80"
+        elif [[ "$val" =~ ^[0-9]+$ && "$val" -ge 10 && "$val" -le 99 ]]; then
+          CLAU_AUTO_COMPACT_PCT="$val"
+        else
+          echo "Ungültig. Muss zwischen 10 und 99 sein."
+          continue
+        fi
+        save_config
+        echo "Prozent: ${CLAU_AUTO_COMPACT_PCT}%"
+        ;;
+      0|"") break ;;
+      *) echo "Ungültige Auswahl." ;;
+    esac
+  done
+}
+
+choose_timeout_settings() {
+  while true; do
+    local mdl="${CLAU_MODEL:-}"
+    local owl_id=""
+    if [[ "$mdl" == owl:* ]]; then
+      owl_id="${mdl#owl:}"
+    elif [[ "$mdl" == aider:* ]]; then
+      owl_id="${mdl#aider:}"
+    fi
+
+    local preset_default="${TIMEOUT_PRESET_DEFAULT[$owl_id]:-}"
+    local preset_max="${TIMEOUT_PRESET_MAX[$owl_id]:-}"
+    local preset_label="<kein Preset>"
+    if [[ -n "$preset_default" ]]; then
+      preset_label="$(( preset_default / 60000 )) Min / $(( preset_max / 60000 )) Min"
+    fi
+
+    echo
+    echo "Timeout-Einstellungen:"
+    echo "  Aktuelles Modell : $mdl"
+    echo "  Timeout-Preset   : $preset_label"
+    echo "  Default-Timeout  : $(( CLAU_TIMEOUT_DEFAULT / 60000 )) Min (${CLAU_TIMEOUT_DEFAULT} ms)"
+    echo "  Max-Timeout      : $(( CLAU_TIMEOUT_MAX / 60000 )) Min (${CLAU_TIMEOUT_MAX} ms)"
+    echo
+    echo "  1) Default-Timeout  — $(( CLAU_TIMEOUT_DEFAULT / 60000 )) Min"
+    echo "  2) Max-Timeout      — $(( CLAU_TIMEOUT_MAX / 60000 )) Min"
+    echo "  3) Reset auf Preset — ${preset_label}"
+    echo "  0) Zurück"
+    printf "Auswahl [0-3]: "
+    read -r choice
+    case "${choice:-0}" in
+      1)
+        printf "Default-Timeout in Minuten [1-300]: "
+        read -r val
+        if [[ "$val" =~ ^[0-9]+$ && "$val" -ge 1 && "$val" -le 300 ]]; then
+          CLAU_TIMEOUT_DEFAULT=$(( val * 60000 ))
+          save_config
+          echo "Default-Timeout: $(( CLAU_TIMEOUT_DEFAULT / 60000 )) Min"
+        else
+          echo "Ungültig. Muss zwischen 1 und 300 sein."
+        fi
+        ;;
+      2)
+        printf "Max-Timeout in Minuten [1-600]: "
+        read -r val
+        if [[ "$val" =~ ^[0-9]+$ && "$val" -ge 1 && "$val" -le 600 ]]; then
+          CLAU_TIMEOUT_MAX=$(( val * 60000 ))
+          save_config
+          echo "Max-Timeout: $(( CLAU_TIMEOUT_MAX / 60000 )) Min"
+        else
+          echo "Ungültig. Muss zwischen 1 und 600 sein."
+        fi
+        ;;
+      3)
+        if [[ -n "$preset_default" ]]; then
+          CLAU_TIMEOUT_DEFAULT="$preset_default"
+          CLAU_TIMEOUT_MAX="$preset_max"
+          save_config
+          echo "Reset auf Preset: $(( CLAU_TIMEOUT_DEFAULT / 60000 )) Min / $(( CLAU_TIMEOUT_MAX / 60000 )) Min"
+        else
+          echo "Kein Preset für dieses Modell. Verwende Standard (30 Min / 120 Min)."
+          CLAU_TIMEOUT_DEFAULT="1800000"
+          CLAU_TIMEOUT_MAX="7200000"
+          save_config
+        fi
+        ;;
+      0|"") break ;;
+      *) echo "Ungültige Auswahl." ;;
+    esac
+  done
+}
+
 choose_bot_settings() {
   while true; do
     echo
@@ -826,13 +1116,17 @@ choose_bot_settings() {
     echo "  1) Autonomie-Level  — ${INTERACTION_LEVEL:-2}: $(interaction_label)"
     echo "  2) sudo NOPASSWD    — $(sudo_is_enabled && echo "AN  [$SUDO_FILE]" || echo "AUS")"
     echo "  3) Effort           — ${CLAU_EFFORT:-medium}  (nur Claude)"
+    echo "  4) Auto-Compact     — $(auto_compact_status)"
+    echo "  5) Timeout          — $(( CLAU_TIMEOUT_DEFAULT / 60000 )) Min / $(( CLAU_TIMEOUT_MAX / 60000 )) Min"
     echo "  0) Zurück"
-    printf "Auswahl [0-3]: "
+    printf "Auswahl [0-5]: "
     read -r choice
     case "${choice:-0}" in
       1) choose_interaction_interactive ;;
       2) toggle_sudo ;;
       3) choose_effort_interactive ;;
+      4) choose_auto_compact_settings ;;
+      5) choose_timeout_settings ;;
       0|"") break ;;
       *) echo "Ungültige Auswahl." ;;
     esac
@@ -971,7 +1265,7 @@ run_new_session() {
     mdl="$(effective_model)"
   fi
   if is_owl_model "$mdl"; then
-    run_owl_via_claude "$(owl_model_id "$mdl")"
+    run_owl_via_claude "$(owl_model_id "$mdl")" --force-context
     return
   fi
   if is_aider_model "$mdl"; then

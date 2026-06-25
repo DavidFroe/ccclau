@@ -86,6 +86,8 @@ CLAU_DISABLE_AGENT_VIEW="1"
 | `CLAU_DISABLE_TOOLS` | Tools aus System-Prompt entfernen (~25K Token sparen) |
 | `CLAU_DISABLE_ARTIFACT` | Artifacts deaktivieren (`1` = an) |
 | `CLAU_DISABLE_AGENT_VIEW` | Background Agent Views deaktivieren (`1` = an) |
+| `CLAU_TIMEOUT_DEFAULT` | Default-Bash-Timeout in ms (Default `1800000` = 30 Min) |
+| `CLAU_TIMEOUT_MAX` | Max-Bash-Timeout in ms (Default `7200000` = 120 Min) |
 
 **Beispiel PropellerA (97K Context):**
 
@@ -95,4 +97,23 @@ CLAU_DISABLE_TOOLS="WebFetch,ToolSearch,DesignSync,CronCreate,CronDelete,CronLis
 CLAU_DISABLE_ARTIFACT="1"
 CLAU_DISABLE_AGENT_VIEW="1"
 ```
+
+## Timeout-Konfiguration
+
+Problem: Claude Code killt den Proxy nach ~2 Minuten, aber langsame Modelle (PropellerA etc.) brauchen länger für die Inferenz. Das führt zu „Modell hat nicht geantwortet"-Fehlern obwohl die Inferenz auf dem Server noch läuft.
+
+Lösung: Timeout über `.clau.conf` erhöhen:
+
+```bash
+# Default: 30 Min, Maximum: 120 Min
+CLAU_TIMEOUT_DEFAULT="1800000"
+CLAU_TIMEOUT_MAX="7200000"
+```
+
+Dies setzt `BASH_DEFAULT_TIMEOUT_MS` und `BASH_MAX_TIMEOUT_MS` für Claude Code und erhöht das owl_proxy Timeout von 120s auf 600s.
+
+| Variable | Claude-Code-Var | Default | Wirkung |
+|----------|----------------|---------|---------|
+| `CLAU_TIMEOUT_DEFAULT` | `BASH_DEFAULT_TIMEOUT_MS` | `1800000` (30 Min) | Standard-Timeout für Bash-Befehle |
+| `CLAU_TIMEOUT_MAX` | `BASH_MAX_TIMEOUT_MS` | `7200000` (120 Min) | Maximales erlaubtes Timeout |
 ```
