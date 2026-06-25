@@ -11,7 +11,8 @@ Wrapper für Claude Code, Aider und eigene Modelle via QuiteQue.
   - **QuiteQue** (lokale/cloud-Modelle) — `owl:<ID>` (z.B. `owl:120` = PropellerA)
   - **Aider** (Editor-Modus) — `aider:<ID>` (workspace-lokales venv, Auto-Install)
 - **Pre-Flight-Check**: Session-Größe vs. Modell-Context-Window vor Start
-- **Auto-Compact**: Threshold auf 80% des echten Context-Windows
+- **Auto-Compact**: Konfigurierbarer Threshold (Prozent oder festes Token-Limit)
+- **Token-Optimierung**: Tools deaktivieren, Artifacts/Agent View ausschalten
 - **Custom Compact** (`cc_compact.py`): Session-Chunking + Summary via QuiteQue
 - **Headless-Modus** für CI/Automation
 - **Git-Helfer**: `--git-up` (commit + push), `--git-down` (pull / klonen)
@@ -60,4 +61,38 @@ clau --git-down               # Pull von origin
 
 ```bash
 python3 cc_compact.py [--model 120] [--target-tokens 68000] [--dry-run]
+```
+
+## Token-Optimierung
+
+Per-Projekt-Konfiguration in `.clau.conf` um Token-Verbrauch zu reduzieren:
+
+```bash
+# Auto-Compact: festes Token-Limit (leer = prozent-basiert)
+CLAU_AUTO_COMPACT_WINDOW=""
+# Auto-Compact: Prozent des Context-Window (Default 80)
+CLAU_AUTO_COMPACT_PCT="80"
+# Tools aus System-Prompt entfernen (kommagetrennt)
+CLAU_DISABLE_TOOLS="WebFetch,Agent,CronCreate"
+# Token-Fresser deaktivieren
+CLAU_DISABLE_ARTIFACT="1"
+CLAU_DISABLE_AGENT_VIEW="1"
+```
+
+| Variable | Wirkung |
+|----------|---------|
+| `CLAU_AUTO_COMPACT_WINDOW` | Festes Token-Limit (z.B. `90000` für PropellerA 97K) |
+| `CLAU_AUTO_COMPACT_PCT` | Prozent-basiert (z.B. `90` = 90% des Context-Window) |
+| `CLAU_DISABLE_TOOLS` | Tools aus System-Prompt entfernen (~25K Token sparen) |
+| `CLAU_DISABLE_ARTIFACT` | Artifacts deaktivieren (`1` = an) |
+| `CLAU_DISABLE_AGENT_VIEW` | Background Agent Views deaktivieren (`1` = an) |
+
+**Beispiel PropellerA (97K Context):**
+
+```bash
+CLAU_AUTO_COMPACT_WINDOW="90000"
+CLAU_DISABLE_TOOLS="WebFetch,ToolSearch,DesignSync,CronCreate,CronDelete,CronList,ScheduleWakeup,PushNotification,NotebookEdit"
+CLAU_DISABLE_ARTIFACT="1"
+CLAU_DISABLE_AGENT_VIEW="1"
+```
 ```

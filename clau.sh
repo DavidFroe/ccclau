@@ -309,18 +309,28 @@ run_owl_via_claude() {
     _pre_flight_check "$owl_id" || exit 1
   fi
 
-  # Auto-Compact-Threshold: kleiner Modelle brauchen früheren Compact.
-  # Wir setzen ihn auf 80% der Modell-Context-Window, damit /compact
-  # auch WIRKLICH unter die echte Window kommt. claude-CLI respektiert
-  # CLAUDE_CODE_AUTO_COMPACT_WINDOW ohne DISABLE_COMPACT zu setzen!
+  # Auto-Compact-Threshold: konfigurierbar via CLAU_AUTO_COMPACT_WINDOW (fester Wert)
+  # oder CLAU_AUTO_COMPACT_PCT (Prozent von Context-Window, Default 80).
+  # claude-CLI respektiert CLAUDE_CODE_AUTO_COMPACT_WINDOW ohne DISABLE_COMPACT zu setzen!
   local cw; cw="$(owl_context_window "$owl_id")"
   if [[ -n "$cw" && "$cw" -gt 0 && "$cw" -lt 1000000 ]]; then
-    local compact_target=$(( cw * 80 / 100 ))
+    local compact_target; compact_target="$(compute_auto_compact_window "$cw")"
     export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$compact_target"
-    echo "Auto-Compact-Window: $compact_target Tokens (80% von $cw für owl:$owl_id)"
+    if [[ -n "${CLAU_AUTO_COMPACT_WINDOW:-}" && "${CLAU_AUTO_COMPACT_WINDOW:-}" -gt 0 ]]; then
+      echo "Auto-Compact-Window: $compact_target Tokens (fester Wert für owl:$owl_id)"
+    else
+      local pct="${CLAU_AUTO_COMPACT_PCT:-80}"
+      echo "Auto-Compact-Window: $compact_target Tokens (${pct}% von $cw für owl:$owl_id)"
+    fi
   else
     unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
   fi
+
+  # Token-Fresser deaktivieren
+  token_saver_env >/dev/null
+
+  # Tool-Blocking: generiert/aktualisiert .claude/settings.json
+  apply_tool_blocking
 
   echo "Starte owlAPI-Proxy für Modell $owl_id ..."
   local port
@@ -333,7 +343,6 @@ run_owl_via_claude() {
   # (greift nur wenn DISABLE_COMPACT gesetzt ist), und der User will
   # Auto-Compact aktiv lassen. Statt dessen: User alle paar Turns /compact
   # aufrufen lassen, oder ein größeres Modell wählen.
-  local cw; cw="$(owl_context_window "$owl_id")"
   echo "Claude Code → Proxy :${port} → QuiteQue (Modell $owl_id${cw:+, ctx=$cw})"
   if [[ -n "$cw" && "$cw" -lt 200000 ]]; then
     echo "Hinweis: Modell $owl_id hat nur $cw Token Kontext."
@@ -363,14 +372,20 @@ run_owl_headless_via_claude() {
   # Pre-Flight: Session-Größe vs. Modell-Context-Window
   _pre_flight_check "$owl_id" || exit 1
 
-  # Auto-Compact-Threshold: kleiner Modelle brauchen früheren Compact.
+  # Auto-Compact-Threshold: konfigurierbar
   local cw; cw="$(owl_context_window "$owl_id")"
   if [[ -n "$cw" && "$cw" -gt 0 && "$cw" -lt 1000000 ]]; then
-    local compact_target=$(( cw * 80 / 100 ))
+    local compact_target; compact_target="$(compute_auto_compact_window "$cw")"
     export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$compact_target"
   else
     unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
   fi
+
+  # Token-Fresser deaktivieren
+  token_saver_env >/dev/null
+
+  # Tool-Blocking
+  apply_tool_blocking
 
   local port
   port="$(_start_owl_proxy "$owl_id")"
@@ -415,6 +430,11 @@ load_config() {
   : "${CLAU_INTERACTION_LEVEL:=2}"
   : "${CLAU_EFFORT:=}"
   : "${CLAU_SESSION_NAME:=}"
+  : "${CLAU_AUTO_COMPACT_WINDOW:=}"
+  : "${CLAU_AUTO_COMPACT_PCT:=80}"
+  : "${CLAU_DISABLE_TOOLS:=}"
+  : "${CLAU_DISABLE_ARTIFACT:=0}"
+  : "${CLAU_DISABLE_AGENT_VIEW:=0}"
   INTERACTION_LEVEL="$CLAU_INTERACTION_LEVEL"
 }
 
@@ -425,7 +445,103 @@ CLAU_SESSION_ID="${CLAU_SESSION_ID}"
 CLAU_INTERACTION_LEVEL="${CLAU_INTERACTION_LEVEL}"
 CLAU_EFFORT="${CLAU_EFFORT:-}"
 CLAU_SESSION_NAME="${CLAU_SESSION_NAME:-}"
+CLAU_AUTO_COMPACT_WINDOW="${CLAU_AUTO_COMPACT_WINDOW:-}"
+CLAU_AUTO_COMPACT_PCT="${CLAU_AUTO_COMPACT_PCT:-80}"
+CLAU_DISABLE_TOOLS="${CLAU_DISABLE_TOOLS:-}"
+CLAU_DISABLE_ARTIFACT="${CLAU_DISABLE_ARTIFACT:-0}"
+CLAU_DISABLE_AGENT_VIEW="${CLAU_DISABLE_AGENT_VIEW:-0}"
 CONF_EOF
+}
+
+# ── Auto-Compact-Logik (konfigurierbar) ──────────────────────────────────────
+# Gibt das Auto-Compact-Token-Limit zurück.
+# Priorität: 1) CLAU_AUTO_COMPACT_WINDOW (fester Wert)  2) CLAU_AUTO_COMPACT_PCT % von CW  3) 80% Fallback
+compute_auto_compact_window() {
+  local cw="$1"  # context window des Modells
+  if [[ -z "$cw" || "$cw" -le 0 ]]; then
+    echo ""
+    return
+  fi
+
+  if [[ -n "${CLAU_AUTO_COMPACT_WINDOW:-}" && "${CLAU_AUTO_COMPACT_WINDOW:-}" -gt 0 ]]; then
+    echo "$CLAU_AUTO_COMPACT_WINDOW"
+  else
+    local pct="${CLAU_AUTO_COMPACT_PCT:-80}"
+    echo $(( cw * pct / 100 ))
+  fi
+}
+
+# ── Tool-Blocking (settings.json) ─────────────────────────────────────────────
+# Generiert/aktualisiert .claude/settings.json mit deny-Liste für CLAU_DISABLE_TOOLS
+apply_tool_blocking() {
+  local disable_tools="${CLAU_DISABLE_TOOLS:-}"
+  [[ -n "$disable_tools" ]] || return 0
+
+  local settings_dir=".claude"
+  local settings_file="$settings_dir/settings.json"
+  mkdir -p "$settings_dir"
+
+  # Tools aus CLAU_DISABLE_TOOLS als JSON-Array
+  local tools_json="["
+  local first=1
+  IFS=',' read -ra TOOL_LIST <<< "$disable_tools"
+  for tool in "${TOOL_LIST[@]}"; do
+    tool="$(echo "$tool" | xargs)"  # trim whitespace
+    [[ -n "$tool" ]] || continue
+    if [[ "$first" -eq 1 ]]; then
+      tools_json+="\"$tool\""
+      first=0
+    else
+      tools_json+=", \"$tool\""
+    fi
+  done
+  tools_json+="]"
+
+  # Bestehende settings.json lesen und deny-Liste mergen
+  local existing="{}"
+  if [[ -f "$settings_file" ]]; then
+    existing="$(cat "$settings_file")"
+  fi
+
+  # Mit python3 JSON mergen (sicherer als jq das nicht installiert sein muss)
+  python3 -c "
+import json, sys
+existing = json.loads('$existing')
+deny = json.loads('$tools_json')
+perms = existing.setdefault('permissions', {})
+existing_deny = perms.get('deny', [])
+for t in deny:
+    if t not in existing_deny:
+        existing_deny.append(t)
+perms['deny'] = existing_deny
+print(json.dumps(existing, indent=2))
+" > "$settings_file" 2>/dev/null || {
+    # Fallback: einfache JSON-Generierung ohne python3
+    cat > "$settings_file" <<SETTINGS_EOF
+{
+  "permissions": {
+    "deny": $tools_json
+  }
+}
+SETTINGS_EOF
+  }
+
+  echo "Tools blockiert: $disable_tools"
+}
+
+# ── Token-Fresser Env-Vars ────────────────────────────────────────────────────
+# Gibt die Env-Vars für Token-Optimierung zurück (wird vor claude-Call gesetzt)
+token_saver_env() {
+  local env_args=""
+  if [[ "${CLAU_DISABLE_ARTIFACT:-0}" == "1" ]]; then
+    export CLAUDE_CODE_DISABLE_ARTIFACT=1
+    env_args+="CLAUDE_CODE_DISABLE_ARTIFACT=1 "
+  fi
+  if [[ "${CLAU_DISABLE_AGENT_VIEW:-0}" == "1" ]]; then
+    export CLAUDE_CODE_DISABLE_AGENT_VIEW=1
+    env_args+="CLAUDE_CODE_DISABLE_AGENT_VIEW=1 "
+  fi
+  echo "$env_args"
 }
 
 print_help() {
@@ -479,7 +595,15 @@ Model-Mappings:
   owlAPI (günstig/stark):   9=owl:35  a=owl:350  b=owl:503  c=owl:21  d=owl:84  e=owl:501
   Aider (Editor-Modus):     f=aider:120  g=aider:350  i=aider:502(GemFlash)  j=aider:84(GPT-5)  k=aider:351(MiniMax)
   owlAPI direkt:            --model owl:35  oder  -m 350
-  Aider direkt:             --model aider:120  oder  -m aider:243
+
+Token-Optimierung (in .clau.conf konfigurierbar):
+  CLAU_AUTO_COMPACT_WINDOW="90000"   Festes Auto-Compact-Limit (leer = Prozent-basiert)
+  CLAU_AUTO_COMPACT_PCT="80"         Prozent des Context-Windows (Default 80)
+  CLAU_DISABLE_TOOLS="WebFetch,Agent"  Tools aus System-Prompt entfernen (kommagetrennt)
+  CLAU_DISABLE_ARTIFACT="1"          Artifacts deaktivieren (spart ~2-3K Tokens)
+  CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
+
+Aider direkt:             --model aider:120  oder  -m aider:243
 HELP_EOF
 }
 
@@ -552,6 +676,10 @@ show_current() {
   echo "Autonomie-Level       : $(interaction_label)"
   echo "Effort                : ${CLAU_EFFORT:-medium (Standard)}"
   echo "sudo NOPASSWD         : $(sudo_is_enabled && echo "AN  ($SUDO_FILE)" || echo "AUS")"
+  echo "Auto-Compact          : ${CLAU_AUTO_COMPACT_WINDOW:-${CLAU_AUTO_COMPACT_PCT:-80}%}"
+  echo "Blockierte Tools      : ${CLAU_DISABLE_TOOLS:-<keine>}"
+  echo "Artifacts deaktiviert : ${CLAU_DISABLE_ARTIFACT:-0}"
+  echo "Agent-View deaktiviert: ${CLAU_DISABLE_AGENT_VIEW:-0}"
 }
 
 choose_model_interactive() {
