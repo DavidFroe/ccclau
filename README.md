@@ -7,9 +7,10 @@ Wrapper für Claude Code, Aider und eigene Modelle via QuiteQue.
 - **Modell pro Projektordner** in `.clau.conf` speichern
 - **Session-Auswahl** beim Start (Resume-Picker, neue Session, feste Session-ID)
 - **Drei Backends**:
-  - **Claude Code** (agentisch) — `haiku`, `sonnet`, `opus`
+  - **Claude Code** (agentisch) — `haiku`, `sonnet`, `opus`, `fable`
   - **QuiteQue** (lokale/cloud-Modelle) — `owl:<ID>` (z.B. `owl:120` = PropellerA)
   - **Aider** (Editor-Modus) — `aider:<ID>` (workspace-lokales venv, Auto-Install)
+- **opencode** wird beim `--install` automatisch mitinstalliert (spricht QuiteQue direkt im OpenAI-Format)
 - **Pre-Flight-Check**: Session-Größe vs. Modell-Context-Window vor Start
 - **Auto-Compact**: Konfigurierbarer Threshold (Prozent oder festes Token-Limit)
 - **Token-Optimierung**: Tools deaktivieren, Artifacts/Agent View ausschalten
@@ -24,10 +25,21 @@ Wrapper für Claude Code, Aider und eigene Modelle via QuiteQue.
 clau --install
 ```
 
-Symlink nach `~/.local/bin/clau`. Falls `~/.local/bin` nicht im PATH:
+`--install` legt den Symlink `~/.local/bin/clau` an **und** installiert fehlende
+Abhängigkeiten automatisch: `claude-code` und `opencode` (native Installer, npm-Fallback).
+Der Schritt ist idempotent — bereits vorhandene Tools werden übersprungen.
+
+Falls `~/.local/bin` nicht im PATH:
 
 ```bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+```
+
+### Frisches Zielsystem (bei ausgetauschten SSH-Keys)
+
+```bash
+git clone git@github.com:DavidFroe/ccclau.git ~/ccclau
+~/ccclau/clau.sh --install
 ```
 
 ## Verwendung
@@ -36,6 +48,9 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 clau                          # Interaktiver Start: Session/Modell wählen
 clau --new                    # Neue Session
 clau --list                   # Resume-Picker
+clau --resume ID              # Bestimmte Session fortsetzen (ohne ID = Picker)
+clau --compact                # Session extern komprimieren (QuiteQue) + fortsetzen
+clau -m fable                 # Mit Claude Fable starten
 clau -m owl:120               # Mit eigenem Modell starten
 clau -m aider:120             # Mit Aider + PropellerA starten
 clau --headless -p "Prompt"   # Headless-Modus
@@ -48,19 +63,31 @@ clau --git-down               # Pull von origin
 
 | Taste | Backend | Modell |
 |-------|---------|--------|
-| 1-3 | Claude | haiku / sonnet / opus |
-| 4 | QuiteQue | PropellerA-27B (lokal, gratis) |
-| 5 | QuiteQue | Qwopus-9B (lokal, gratis) |
-| 6-9 | QuiteQue | Grok, QwQ, Qwen3-Coder, free |
-| a-e | QuiteQue | Qwen-Flash, DeepSeek V4, Gemini, Claude, GPT-5 |
+| 1-4 | Claude | haiku / sonnet / opus / fable |
+| 5 | QuiteQue | PropellerA-27B (lokal, gratis) |
+| 6 | QuiteQue | Qwopus-9B (lokal, gratis) |
+| 7-9 | QuiteQue | Grok, QwQ, Qwen3-Coder |
+| 0 | QuiteQue | free (Router) |
+| a-ee | QuiteQue | Qwen-Flash, DeepSeek V4, Gemini, Claude, GPT-5, Gemini-2.5-Pro |
 | f-k | Aider | PropellerA, DeepSeek, Gemini Flash, GPT-5, MiniMax |
 
 ## Custom Compact
 
-`cc_compact.py` fasst eine lange Session chunked zusammen und schreibt eine neue, resumbare Session-JSONL:
+Für Sessions, die nicht mehr in den Kontext eines lokalen Modells passen: `cc_compact.py`
+fasst die aktuelle Session chunked über QuiteQue zusammen und schreibt eine neue, kleinere,
+resumbare Session-JSONL (Kopie mit Summary statt Vollverlauf).
+
+Am einfachsten über clau (fragt danach, ob direkt fortgesetzt werden soll):
+
+```bash
+clau --compact                # nutzt owl-Modell falls gesetzt, sonst 120 (PropellerA)
+```
+
+Oder direkt:
 
 ```bash
 python3 cc_compact.py [--model 120] [--target-tokens 68000] [--dry-run]
+clau --resume <neue-id>       # danach die komprimierte Session fortsetzen
 ```
 
 ## Token-Optimierung
@@ -116,4 +143,3 @@ Dies setzt `BASH_DEFAULT_TIMEOUT_MS` und `BASH_MAX_TIMEOUT_MS` für Claude Code 
 |----------|----------------|---------|---------|
 | `CLAU_TIMEOUT_DEFAULT` | `BASH_DEFAULT_TIMEOUT_MS` | `1800000` (30 Min) | Standard-Timeout für Bash-Befehle |
 | `CLAU_TIMEOUT_MAX` | `BASH_MAX_TIMEOUT_MS` | `7200000` (120 Min) | Maximales erlaubtes Timeout |
-```

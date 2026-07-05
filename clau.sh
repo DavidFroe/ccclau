@@ -30,6 +30,7 @@ toggle_sudo() {
 # owlAPI-Proxy: claude CLI spricht Anthropic-Format, Proxy übersetzt → QuiteQue
 # QuiteQue hier auf 11.0.0.13 (diese Stack) — User "opencode" für vLLM/Claude-Backends
 OWL_PROXY_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/owl_proxy.py"
+CC_COMPACT_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc_compact.py"
 OWL_BASE_URL="http://11.0.0.13:7077"
 QQ_USER="opencode"
 
@@ -102,6 +103,9 @@ effective_context_window() {
     echo "200000"
     return
   elif [[ "$model" == "opus" || "$model" == "claude-opus"* ]]; then
+    echo "200000"
+    return
+  elif [[ "$model" == "fable" || "$model" == "claude-fable"* ]]; then
     echo "200000"
     return
   fi
@@ -463,10 +467,15 @@ run_owl_via_claude() {
   export BASH_MAX_TIMEOUT_MS="${CLAU_TIMEOUT_MAX:-7200000}"
 
   local extra; extra="$(_interaction_args)"
+  # --force-context ist internes Flag — nicht an claude weiterleiten
+  local real_args=()
+  for arg in "$@"; do
+    [[ "$arg" != "--force-context" ]] && real_args+=("$arg")
+  done
   # shellcheck disable=SC2086
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
   ANTHROPIC_API_KEY="sk-ant-api03-owl-dummy-key-not-real" \
-  claude --model "claude-sonnet-4-6" $extra "$@" || true
+  claude --model "claude-sonnet-4-6" $extra "${real_args[@]}" || true
 
   _kill_owl_proxy
   trap - EXIT INT TERM
@@ -538,8 +547,10 @@ GIT_REPO_NAME=""
 
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then
+    # ./-Präfix: sonst durchsucht `source` erst $PATH (sourcepath) und lädt evtl.
+    # eine fremde .clau.conf aus einem PATH-Verzeichnis statt der im aktuellen Ordner.
     # shellcheck disable=SC1090
-    source "$CONFIG_FILE"
+    source "./$CONFIG_FILE"
   fi
   : "${CLAU_MODEL:=aider:120}"
   : "${CLAU_SESSION_ID:=}"
@@ -678,6 +689,45 @@ token_saver_env() {
   echo "$env_args"
 }
 
+# Räumt tool-blocking deny-Liste wieder auf (für direkte Claude-Modelle)
+cleanup_tool_blocking() {
+  local disable_tools="${CLAU_DISABLE_TOOLS:-}"
+  [[ -n "$disable_tools" ]] || return 0
+  local settings_file=".claude/settings.json"
+  [[ -f "$settings_file" ]] || return 0
+
+  IFS=',' read -ra TOOL_LIST <<< "$disable_tools"
+  local tools_to_remove=""
+  for tool in "${TOOL_LIST[@]}"; do
+    tool="$(echo "$tool" | xargs)"
+    [[ -n "$tool" ]] || continue
+    tools_to_remove+="\"$tool\","
+  done
+
+  python3 -c "
+import json
+with open('$settings_file') as f:
+    settings = json.load(f)
+remove = [t for t in '$tools_to_remove'.split(',') if t.strip().strip('\"')]
+deny = settings.get('permissions', {}).get('deny', [])
+deny = [t for t in deny if t not in remove]
+if deny:
+    settings['permissions']['deny'] = deny
+else:
+    del settings['permissions']['deny']
+    if not settings['permissions']:
+        del settings['permissions']
+with open('$settings_file', 'w') as f:
+    json.dump(settings, f, indent=2)
+" 2>/dev/null || true
+}
+
+# Räumt token-saver Env-Vars wieder auf (für direkte Claude-Modelle)
+unset_token_saver_env() {
+  unset CLAUDE_CODE_DISABLE_ARTIFACT
+  unset CLAUDE_CODE_DISABLE_AGENT_VIEW
+}
+
 print_help() {
   cat <<'HELP_EOF'
 clau.sh - Interaktiver & Headless-Wrapper für Claude Code mit per-Ordner-Config
@@ -685,13 +735,15 @@ clau.sh - Interaktiver & Headless-Wrapper für Claude Code mit per-Ordner-Config
 Verwendung (interaktiv):
   clau                            Interaktiver Start: Session/Modell auswählen
   clau --list                     Öffnet den Claude-Resume-Picker
+  clau --resume [ID]              Setzt eine Session fort (ohne ID = Resume-Picker)
   clau --new                      Startet eine neue Session
-  clau --model N                  Setzt das Standardmodell (1=haiku, 2=sonnet, 3=opus)
+  clau --compact                  Custom-Compact: aktuelle Session extern komprimieren (QuiteQue)
+  clau --model N                  Setzt das Standardmodell (1=haiku, 2=sonnet, 3=opus, 4=fable)
   clau --take ID                  Merkt sich eine feste Session-ID für dieses Verzeichnis
   clau --forget                   Entfernt die gemerkte Session-ID
   clau --current                  Zeigt aktuelle Session/Model-Config
   clau --clear-model              Entfernt das gespeicherte Modell
-  clau --install                  Installiert "clau" nach ~/.local/bin
+  clau --install                  Installiert "clau" + claude-code + opencode nach ~/.local/bin
   clau --uninstall                Entfernt "clau" aus ~/.local/bin
   clau --self-update              Aktualisiert clau auf die neueste Version aus dem Git-Repo
 
@@ -705,7 +757,7 @@ Headless-Optionen:
   --headless                      Claude im print/headless mode (nicht interaktiv)
   -p, --prompt TEXT               Prompt-Text für headless mode (erforderlich bei --headless)
   -f, --folder PATH               Zielverzeichnis für --new
-  -m, --mdl MODEL                 Modell: haiku | sonnet | opus
+  -m, --mdl MODEL                 Modell: haiku | sonnet | opus | fable | owl:<ID> | aider:<ID>
       --effort LEVEL              low | medium | high | max
       --max-turns N               Max. agentische Schritte
       --max-budget-usd USD        Kostenlimit
@@ -724,9 +776,9 @@ Git-Helfer (Repo aus GitHub via SSH):
   clau --git-down NAME            Klont git@github.com:DavidFroe/NAME.git ins aktuelle Verzeichnis
 
 Model-Mappings:
-  Claude Code (agentisch):  1=haiku  2=sonnet  3=opus
-  owlAPI (lokal/gratis):    4=owl:120  5=owl:243  6=owl:113(Grok)  7=owl:38(QwQ)  8=owl:316
-  owlAPI (günstig/stark):   9=owl:35  a=owl:350  b=owl:503  c=owl:21  d=owl:84  e=owl:501
+  Claude Code (agentisch):  1=haiku  2=sonnet  3=opus  4=fable
+  owlAPI (lokal/gratis):    5=owl:120  6=owl:243  7=owl:113(Grok)  8=owl:38(QwQ)  9=owl:316  0=owl:free
+  owlAPI (günstig/stark):   a=owl:35  b=owl:350  c=owl:503  d=owl:21  e=owl:84  ee=owl:501
   Aider (Editor-Modus):     f=aider:120  g=aider:350  i=aider:502(GemFlash)  j=aider:84(GPT-5)  k=aider:351(MiniMax)
   owlAPI direkt:            --model owl:35  oder  -m 350
 
@@ -748,16 +800,17 @@ model_from_number() {
     1) CLAU_MODEL="haiku" ;;
     2) CLAU_MODEL="sonnet" ;;
     3) CLAU_MODEL="opus" ;;
-    4) CLAU_MODEL="owl:120" ;;   # PropellerA lokal
-    5) CLAU_MODEL="owl:243" ;;   # Qwopus lokal
-    6) CLAU_MODEL="owl:113" ;;   # Grok-4.3 gratis
-    7) CLAU_MODEL="owl:38" ;;    # QwQ-Plus gratis
-    8) CLAU_MODEL="owl:316" ;;   # Qwen3-Coder OR gratis
-    9) CLAU_MODEL="owl:35" ;;    # Qwen-Flash günstig
+    4) CLAU_MODEL="fable" ;;     # Claude Fable 5
+    5) CLAU_MODEL="owl:120" ;;   # PropellerA lokal
+    6) CLAU_MODEL="owl:243" ;;   # Qwopus lokal
+    7) CLAU_MODEL="owl:113" ;;   # Grok-4.3 gratis
+    8) CLAU_MODEL="owl:38" ;;    # QwQ-Plus gratis
+    9) CLAU_MODEL="owl:316" ;;   # Qwen3-Coder OR gratis
+    0) CLAU_MODEL="owl:free" ;;  # free Router gratis
     f) CLAU_MODEL="aider:120" ;; # Aider + PropellerA-27B
     g) CLAU_MODEL="aider:350" ;; # Aider + DeepSeek-V4-Pro
     *)
-      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-3=Claude CLI, 4-9/f-g=owlAPI/Aider)" >&2
+      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5-9/0/f-g=owlAPI/Aider)" >&2
       exit 1
       ;;
   esac
@@ -765,7 +818,7 @@ model_from_number() {
 
 normalize_model_name() {
   case "${1:-}" in
-    haiku|sonnet|opus)
+    haiku|sonnet|opus|fable)
       CLI_MODEL_OVERRIDE="$1"
       ;;
     owl:*)
@@ -794,6 +847,15 @@ effective_model() {
   else
     echo ""
   fi
+}
+
+# Übersetzt den internen Claude-Modell-Kurznamen in den Namen, den die claude-CLI
+# erwartet. haiku/sonnet/opus sind gültige CLI-Aliase; fable braucht die volle ID.
+claude_cli_model() {
+  case "${1:-}" in
+    fable) echo "claude-fable-5" ;;
+    *) echo "$1" ;;
+  esac
 }
 
 show_current() {
@@ -843,13 +905,14 @@ choose_model_interactive() {
     echo "  1) haiku              schnell, günstig"
     echo "  2) sonnet             Standard                    [Enter]"
     echo "  3) opus               stärker, teurer"
+    echo "  4) fable              neu, agentisch"
     echo "  --- LiteLLM Modelle (via Proxy, ${OWL_BASE_URL}) ---"
-    echo "  4) PropellerA-27B  lokal   tools+vision  GRATIS"
-    echo "  5) Qwopus-9B       lokal   tools schnell GRATIS"
-    echo "  6) Grok-4.3        xAI     tools 2M ctx  GRATIS"
-    echo "  7) QwQ-Plus        Ali     reasoning     GRATIS"
-    echo "  8) Qwen3-Coder     OR      tools 1M ctx  GRATIS"
-    echo "  9) free (Router)   ---     mix gratis    GRATIS"
+    echo "  5) PropellerA-27B  lokal   tools+vision  GRATIS"
+    echo "  6) Qwopus-9B       lokal   tools schnell GRATIS"
+    echo "  7) Grok-4.3        xAI     tools 2M ctx  GRATIS"
+    echo "  8) QwQ-Plus        Ali     reasoning     GRATIS"
+    echo "  9) Qwen3-Coder     OR      tools 1M ctx  GRATIS"
+    echo "  0) free (Router)   ---     mix gratis    GRATIS"
     echo "  a) Qwen-Flash      Ali     tools         \$0.05/\$0.15"
     echo "  b) DeepSeek V4 Pro OR      tools 1M ctx  \$0.44/\$0.87"
     echo "  c) Gemini-Flash    Goog    tools         \$0.10/\$0.40"
@@ -865,19 +928,20 @@ choose_model_interactive() {
     echo "  j) GPT-5           OAI     \$1.25/\$10.00"
     echo "  k) MiniMax M3      cloud   1M ctx"
     echo "  p) Aider ID direkt"
-    printf "Auswahl [1-9, a-ee, f-k, o, p, Enter=2]: "
+    printf "Auswahl [0-9, a-ee, f-k, o, p, Enter=2]: "
     read -r choice
 
     case "${choice:-2}" in
       1) CLAU_MODEL="haiku"; break ;;
       2) CLAU_MODEL="sonnet"; break ;;
       3) CLAU_MODEL="opus"; break ;;
-      4) CLAU_MODEL="owl:120"; break ;;
-      5) CLAU_MODEL="owl:243"; break ;;
-      6) CLAU_MODEL="owl:113"; break ;;
-      7) CLAU_MODEL="owl:38"; break ;;
-      8) CLAU_MODEL="owl:316"; break ;;
-      9) CLAU_MODEL="owl:free"; break ;;
+      4) CLAU_MODEL="fable"; break ;;
+      5) CLAU_MODEL="owl:120"; break ;;
+      6) CLAU_MODEL="owl:243"; break ;;
+      7) CLAU_MODEL="owl:113"; break ;;
+      8) CLAU_MODEL="owl:38"; break ;;
+      9) CLAU_MODEL="owl:316"; break ;;
+      0) CLAU_MODEL="owl:free"; break ;;
       a|A) CLAU_MODEL="owl:35"; break ;;
       b|B) CLAU_MODEL="owl:350"; break ;;
       c|C) CLAU_MODEL="owl:503"; break ;;
@@ -1143,6 +1207,42 @@ run_new_session_named() {
   run_new_session
 }
 
+_have() { command -v "$1" >/dev/null 2>&1; }
+
+# Installiert claude-code falls nicht vorhanden (native Installer, npm-Fallback)
+_ensure_claude_code() {
+  if _have claude; then
+    echo "  claude-code: bereits vorhanden ($(command -v claude))"
+    return 0
+  fi
+  echo "  claude-code: nicht gefunden — installiere ..."
+  if _have curl; then
+    if curl -fsSL https://claude.ai/install.sh | bash; then return 0; fi
+  fi
+  if _have npm; then
+    if npm install -g @anthropic-ai/claude-code; then return 0; fi
+  fi
+  echo "  WARN: claude-code konnte nicht installiert werden (curl/npm fehlen oder Fehler)." >&2
+  return 1
+}
+
+# Installiert opencode falls nicht vorhanden (native Installer, npm-Fallback)
+_ensure_opencode() {
+  if _have opencode; then
+    echo "  opencode: bereits vorhanden ($(command -v opencode))"
+    return 0
+  fi
+  echo "  opencode: nicht gefunden — installiere ..."
+  if _have curl; then
+    if curl -fsSL https://opencode.ai/install | bash; then return 0; fi
+  fi
+  if _have npm; then
+    if npm install -g opencode-ai; then return 0; fi
+  fi
+  echo "  WARN: opencode konnte nicht installiert werden (curl/npm fehlen oder Fehler)." >&2
+  return 1
+}
+
 install_self() {
   local script_path target_path
   script_path="$(readlink -f "$0")"
@@ -1153,6 +1253,12 @@ install_self() {
   ln -sfn "$script_path" "$target_path"
 
   echo "Installiert: $target_path -> $script_path"
+
+  # Abhängigkeiten automatisch mitinstallieren (idempotent, überspringt Vorhandenes)
+  echo
+  echo "Prüfe/Installiere Abhängigkeiten ..."
+  _ensure_claude_code || true
+  _ensure_opencode || true
 
   case ":$PATH:" in
     *":${INSTALL_DIR}:"*)
@@ -1165,6 +1271,11 @@ install_self() {
       echo 'export PATH="$HOME/.local/bin:$PATH"'
       ;;
   esac
+
+  echo
+  echo "Fertig. 'clau' ist einsatzbereit."
+  _have claude   || echo "  Hinweis: 'claude' evtl. erst nach Shell-Neustart im PATH."
+  _have opencode || echo "  Hinweis: 'opencode' evtl. erst nach Shell-Neustart im PATH."
 }
 
 uninstall_self() {
@@ -1231,9 +1342,11 @@ run_resume_picker() {
     return
   fi
   echo "Öffne Session-Auswahl (Modell: $mdl, Autonomie: $(interaction_label)) ..."
+  cleanup_tool_blocking
+  unset_token_saver_env
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
-  exec claude --resume --model "$mdl" $extra
+  exec claude --resume --model "$(claude_cli_model "$mdl")" $extra
 }
 
 run_saved_session() {
@@ -1252,9 +1365,11 @@ run_saved_session() {
     return
   fi
   echo "Starte feste Session $CLAU_SESSION_ID (Modell: $mdl, Autonomie: $(interaction_label)) ..."
+  cleanup_tool_blocking
+  unset_token_saver_env
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
-  exec claude --resume "$CLAU_SESSION_ID" --model "$mdl" $extra
+  exec claude --resume "$CLAU_SESSION_ID" --model "$(claude_cli_model "$mdl")" $extra
 }
 
 run_new_session() {
@@ -1273,9 +1388,74 @@ run_new_session() {
     return
   fi
   echo "Starte neue Session (Modell: $mdl, Autonomie: $(interaction_label)) ..."
+  cleanup_tool_blocking
+  unset_token_saver_env
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
-  exec claude --model "$mdl" $extra
+  exec claude --model "$(claude_cli_model "$mdl")" $extra
+}
+
+# Setzt eine konkrete Session-ID fort (z.B. nach custom-compact)
+run_resume_id() {
+  local rid="$1"
+  local mdl; mdl="$(effective_model)"
+  if [[ -z "$mdl" ]]; then
+    ensure_model
+    mdl="$(effective_model)"
+  fi
+  if is_owl_model "$mdl"; then
+    run_owl_via_claude "$(owl_model_id "$mdl")" --resume "$rid"
+    return
+  fi
+  if is_aider_model "$mdl"; then
+    echo "Aider kann keine Claude-Session fortsetzen. Wähle ein Claude- oder owl-Modell." >&2
+    exit 1
+  fi
+  echo "Setze Session $rid fort (Modell: $mdl, Autonomie: $(interaction_label)) ..."
+  cleanup_tool_blocking
+  unset_token_saver_env
+  local extra; extra="$(_interaction_args)"
+  # shellcheck disable=SC2086
+  exec claude --resume "$rid" --model "$(claude_cli_model "$mdl")" $extra
+}
+
+# Custom-Compact: komprimiert die aktuelle Session extern via QuiteQue (cc_compact.py)
+# und bietet an, die neue (kleinere) Session direkt fortzusetzen. Gedacht für
+# Sessions, die nicht mehr in den Kontext eines lokalen Modells passen.
+run_compact() {
+  if [[ ! -f "$CC_COMPACT_SCRIPT" ]]; then
+    echo "Fehler: cc_compact.py nicht gefunden: $CC_COMPACT_SCRIPT" >&2
+    exit 1
+  fi
+  local mdl; mdl="$(effective_model)"
+  local sum_id="120"  # Default-Summary-Modell (PropellerA lokal)
+  if is_owl_model "$mdl"; then
+    sum_id="$(owl_model_id "$mdl")"
+  fi
+  echo "Starte custom-compact (Summary-Modell: $sum_id) im Projekt $(pwd) ..."
+  local tmpf; tmpf="$(mktemp)"
+  python3 "$CC_COMPACT_SCRIPT" --model "$sum_id" 2>&1 | tee "$tmpf"
+  local rc=${PIPESTATUS[0]}
+  if [[ "$rc" -ne 0 ]]; then
+    rm -f "$tmpf"
+    echo "custom-compact fehlgeschlagen (Exit $rc)." >&2
+    exit 1
+  fi
+  local new_id
+  new_id="$(sed -n 's/.*Neue Session-ID:[[:space:]]*\([0-9a-fA-F-]*\).*/\1/p' "$tmpf" | tail -1)"
+  rm -f "$tmpf"
+  if [[ -z "$new_id" ]]; then
+    echo "Konnte neue Session-ID nicht aus der Ausgabe ermitteln." >&2
+    exit 1
+  fi
+  echo
+  echo "Komprimierte Session: $new_id"
+  printf "Jetzt fortsetzen? [J/n]: "
+  read -r ans
+  case "${ans:-J}" in
+    n|N) echo "Später fortsetzen mit: clau --resume $new_id" ;;
+    *) run_resume_id "$new_id" ;;
+  esac
 }
 
 build_headless_cmd() {
@@ -1285,7 +1465,7 @@ build_headless_cmd() {
   CLAUDE_CMD=(claude)
 
   if [[ -n "$mdl" ]]; then
-    CLAUDE_CMD+=(--model "$mdl")
+    CLAUDE_CMD+=(--model "$(claude_cli_model "$mdl")")
   fi
 
   if [[ -n "${EFFORT_LEVEL:-}" ]]; then
@@ -1386,7 +1566,8 @@ run_new_project_interactive() {
   (
     cd "$dir"
     if [[ -f "$CONFIG_FILE" ]]; then
-      source "$CONFIG_FILE"
+      # ./-Präfix: sonst sucht `source` erst in $PATH (siehe load_config)
+      source "./$CONFIG_FILE"
       : "${CLAU_MODEL:=}"
     fi
     if [[ -z "${CLAU_MODEL:-}" ]]; then
@@ -1396,12 +1577,14 @@ run_new_project_interactive() {
         echo "  1) haiku   - schnell, günstig"
         echo "  2) sonnet  - Standard"
         echo "  3) opus    - stärker, teurer"
-        printf "Auswahl [1-3, Enter=2]: "
+        echo "  4) fable   - neu, agentisch"
+        printf "Auswahl [1-4, Enter=2]: "
         read -r choice
         case "${choice:-2}" in
           1) CLAU_MODEL="haiku"; break ;;
           2) CLAU_MODEL="sonnet"; break ;;
           3) CLAU_MODEL="opus"; break ;;
+          4) CLAU_MODEL="fable"; break ;;
           *) echo "Ungültige Auswahl." ;;
         esac
       done
@@ -1412,7 +1595,11 @@ CLAU_INTERACTION_LEVEL="${CLAU_INTERACTION_LEVEL:-2}"
 EOF
     fi
     echo "Starte neue Session im Projekt mit Modell ${CLAU_MODEL} ..."
-    exec claude --model "${CLAU_MODEL}"
+    if ! is_owl_model "${CLAU_MODEL}" && ! is_aider_model "${CLAU_MODEL}"; then
+      cleanup_tool_blocking
+      unset_token_saver_env
+    fi
+    exec claude --model "$(claude_cli_model "${CLAU_MODEL}")"
   )
 }
 
@@ -1436,7 +1623,8 @@ interactive_start() {
   echo "  2) Neue Session beginnen        [Enter]"
   echo "  3) Modell wechseln"
   echo "  4) Bot-Einstellungen"
-  printf "Auswahl [1-4, Enter=2]: "
+  echo "  5) Session komprimieren (custom-compact via QuiteQue)"
+  printf "Auswahl [1-5, Enter=2]: "
   read -r start_choice
 
   case "${start_choice:-2}" in
@@ -1444,6 +1632,7 @@ interactive_start() {
     2) run_new_session_named ;;
     3) choose_model_interactive; interactive_start ;;
     4) choose_bot_settings; interactive_start ;;
+    5) run_compact ;;
     *) echo "Ungültige Auswahl."; exit 1 ;;
   esac
 }
@@ -1628,7 +1817,7 @@ parse_args() {
         ;;
       --model)
         if [[ -z "${2:-}" ]]; then
-          echo "--model erwartet eine Zahl (1=haiku, 2=sonnet, 3=opus)" >&2
+          echo "--model erwartet eine Zahl (1=haiku, 2=sonnet, 3=opus, 4=fable)" >&2
           exit 1
         fi
         model_from_number "$2"
@@ -1638,7 +1827,7 @@ parse_args() {
         ;;
       -m|--mdl)
         if [[ -z "${2:-}" ]]; then
-          echo "-m/--mdl erwartet ein Modell: haiku|sonnet|opus" >&2
+          echo "-m/--mdl erwartet ein Modell: haiku|sonnet|opus|fable|owl:<ID>|aider:<ID>" >&2
           exit 1
         fi
         normalize_model_name "$2"
@@ -1676,6 +1865,20 @@ parse_args() {
         ;;
       --list)
         ACTION="list"
+        shift
+        ;;
+      --resume)
+        if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+          ACTION="list"   # ohne ID → Resume-Picker
+          shift
+        else
+          ACTION="resume"
+          RESUME_SESSION_ID="$2"
+          shift 2
+        fi
+        ;;
+      --compact)
+        ACTION="compact"
         shift
         ;;
       --new)
@@ -1760,6 +1963,7 @@ parse_args() {
 }
 
 ACTION="interactive"
+RESUME_SESSION_ID=""
 
 load_config
 parse_args "$@"
@@ -1768,6 +1972,13 @@ case "${ACTION}" in
   list)
     ensure_model
     run_resume_picker
+    ;;
+  resume)
+    ensure_model
+    run_resume_id "$RESUME_SESSION_ID"
+    ;;
+  compact)
+    run_compact
     ;;
   new)
     if [[ "$HEADLESS" -eq 1 ]]; then
