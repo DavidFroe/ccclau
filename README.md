@@ -17,6 +17,7 @@ Wrapper für Claude Code, Aider und eigene Modelle via QuiteQue.
 - **Custom Compact** (`cc_compact.py`): Session-Chunking + Summary via QuiteQue
 - **Headless-Modus** für CI/Automation
 - **Git-Helfer**: `--git-up` (commit + push), `--git-down` (pull / klonen)
+- **Auto-Update-Check**: prüft beim Start (max. 1×/Tag) gegen GitHub und bietet `--self-update` an
 - **Bot-Einstellungen**: Autonomie-Level (0-2), sudo NOPASSWD, Effort-Level
 
 ## Installation
@@ -143,3 +144,17 @@ Dies setzt `BASH_DEFAULT_TIMEOUT_MS` und `BASH_MAX_TIMEOUT_MS` für Claude Code 
 |----------|----------------|---------|---------|
 | `CLAU_TIMEOUT_DEFAULT` | `BASH_DEFAULT_TIMEOUT_MS` | `1800000` (30 Min) | Standard-Timeout für Bash-Befehle |
 | `CLAU_TIMEOUT_MAX` | `BASH_MAX_TIMEOUT_MS` | `7200000` (120 Min) | Maximales erlaubtes Timeout |
+
+## Auto-Update-Check
+
+Beim interaktiven Start prüft clau (throttled, max. 1×/Tag) per `git fetch`, ob
+`origin/<branch>` neuer ist. Falls ja, wird ein Hinweis angezeigt und optional direkt
+`--self-update` ausgeführt. Offline / ohne Netz / ohne Zugriff wird der Check stumm
+übersprungen (5s-Timeout, keine SSH-/Passwort-Prompts). Headless-Läufe prüfen nie.
+
+```bash
+CLAU_UPDATE_CHECK="1"              # 0 = ausschalten
+CLAU_UPDATE_CHECK_INTERVAL="86400" # Prüf-Intervall in Sekunden (Default 1 Tag)
+```
+
+Zeitstempel des letzten Checks: `${XDG_CACHE_HOME:-~/.cache}/clau/last_update_check`.

@@ -790,6 +790,8 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
   CLAU_TIMEOUT_DEFAULT="1800000"     Default Bash-Timeout in ms (30 Min = 1800000)
   CLAU_TIMEOUT_MAX="7200000"         Max Bash-Timeout in ms (120 Min = 7200000)
+  CLAU_UPDATE_CHECK="1"              Beim Start gegen GitHub auf Updates prüfen (0 = aus)
+  CLAU_UPDATE_CHECK_INTERVAL="86400" Prüf-Intervall in Sekunden (Default 1×/Tag)
 
 Aider direkt:             --model aider:120  oder  -m aider:243
 HELP_EOF
@@ -1312,6 +1314,66 @@ self_update() {
     ln -sfn "$script_path" "$target_path"
     echo "Symlink aktualisiert: $target_path -> $script_path"
   fi
+}
+
+# ── Update-Check gegen GitHub (throttled, non-blocking) ──────────────────────
+# Prüft max. 1×/Tag ob origin/<branch> neuer ist und weist den Nutzer darauf hin.
+# Offline/kein-Netz/keine-Berechtigung → stumm ignorieren. Deaktivierbar via
+# CLAU_UPDATE_CHECK=0; Intervall via CLAU_UPDATE_CHECK_INTERVAL (Sekunden).
+_update_stamp_file() {
+  local cache="${XDG_CACHE_HOME:-$HOME/.cache}/clau"
+  mkdir -p "$cache" 2>/dev/null || true
+  echo "$cache/last_update_check"
+}
+
+check_for_updates() {
+  [[ "${CLAU_UPDATE_CHECK:-1}" == "1" ]] || return 0
+  command -v git >/dev/null 2>&1 || return 0
+
+  local repo_dir
+  repo_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+  git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+  # Throttle: nur alle CLAU_UPDATE_CHECK_INTERVAL Sekunden (Default 1 Tag)
+  local interval="${CLAU_UPDATE_CHECK_INTERVAL:-86400}"
+  local stamp now last
+  stamp="$(_update_stamp_file)"
+  now="$(date +%s)"
+  if [[ -f "$stamp" ]]; then
+    last="$(cat "$stamp" 2>/dev/null || echo 0)"
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    (( now - last < interval )) && return 0
+  fi
+  echo "$now" > "$stamp" 2>/dev/null || true
+
+  local branch
+  branch="$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  [[ -n "$branch" && "$branch" != "HEAD" ]] || branch="main"
+
+  # Leiser fetch mit hartem Timeout, keine SSH-/Passwort-Prompts (nicht blockieren)
+  GIT_TERMINAL_PROMPT=0 timeout 5 git -C "$repo_dir" fetch --quiet origin "$branch" 2>/dev/null || return 0
+
+  local behind
+  behind="$(git -C "$repo_dir" rev-list --count "HEAD..origin/$branch" 2>/dev/null || echo 0)"
+  [[ "$behind" =~ ^[0-9]+$ ]] || return 0
+  (( behind > 0 )) || return 0
+
+  echo
+  echo "🔄 clau: Update verfügbar ($behind neue(r) Commit(s) auf origin/$branch)."
+  printf "   Jetzt aktualisieren? [j/N]: "
+  local ans; read -r ans
+  case "${ans:-N}" in
+    j|J|y|Y)
+      self_update
+      echo
+      echo "Bitte 'clau' erneut starten, um die neue Version zu nutzen."
+      exit 0
+      ;;
+    *)
+      echo "   Später mit:  clau --self-update"
+      echo
+      ;;
+  esac
 }
 
 _interaction_args() {
@@ -1967,6 +2029,9 @@ RESUME_SESSION_ID=""
 
 load_config
 parse_args "$@"
+
+# Update-Check nur für interaktive Läufe (nicht headless/CI)
+[[ "${HEADLESS:-0}" -eq 1 ]] || check_for_updates
 
 case "${ACTION}" in
   list)
