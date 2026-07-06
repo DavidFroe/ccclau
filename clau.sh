@@ -569,7 +569,21 @@ load_config() {
   INTERACTION_LEVEL="$CLAU_INTERACTION_LEVEL"
 }
 
+_CONFIG_RO_WARNED=0
+_warn_config_readonly() {
+  [[ "$_CONFIG_RO_WARNED" -eq 1 ]] && return 0
+  _CONFIG_RO_WARNED=1
+  echo "⚠️  clau: '$CONFIG_FILE' in $(pwd) nicht beschreibbar – Einstellungen werden diesmal nicht gespeichert." >&2
+}
+
 save_config() {
+  # Verzeichnis nicht beschreibbar (z.B. clau in fremdem Home gestartet)?
+  # Dann nur einmal warnen und weitermachen – nicht mit rohem Bash-Fehler abbrechen.
+  if [[ -e "$CONFIG_FILE" ]]; then
+    [[ -w "$CONFIG_FILE" ]] || { _warn_config_readonly; return 0; }
+  else
+    [[ -w "." ]] || { _warn_config_readonly; return 0; }
+  fi
   cat > "$CONFIG_FILE" <<CONF_EOF
 CLAU_MODEL="${CLAU_MODEL}"
 CLAU_SESSION_ID="${CLAU_SESSION_ID}"
