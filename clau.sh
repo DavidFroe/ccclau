@@ -574,6 +574,12 @@ _warn_config_readonly() {
   [[ "$_CONFIG_RO_WARNED" -eq 1 ]] && return 0
   _CONFIG_RO_WARNED=1
   echo "⚠️  clau: '$CONFIG_FILE' in $(pwd) nicht beschreibbar – Einstellungen werden diesmal nicht gespeichert." >&2
+  echo "   (Die Session selbst wird normal in ~/.claude gespeichert und ist per --resume fortsetzbar.)" >&2
+  # Nur interaktiv auf Tastendruck warten – im Headless-/CI-Lauf nicht blockieren.
+  [[ "${HEADLESS:-0}" -eq 1 ]] && return 0
+  printf "   Weiter mit beliebiger Taste ... " >&2
+  read -r -n 1 _ 2>/dev/null || true
+  echo >&2
 }
 
 save_config() {
