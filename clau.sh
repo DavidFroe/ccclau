@@ -34,6 +34,10 @@ CC_COMPACT_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc_compact.py
 OWL_BASE_URL="http://11.0.0.13:7077"
 QQ_USER="opencode"
 
+# Telegram-Integration (lokale Config außerhalb des Repos)
+CLAU_TG_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/clau/telegram.conf"
+CLAU_TG_STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/clau/telegram"
+
 is_owl_model() {
   [[ "${1:-}" == owl:* ]]
 }
@@ -323,6 +327,247 @@ _kill_owl_proxy() {
   fi
   # Claude CLI aktiviert Mouse-Tracking — bei Exit sauber deaktivieren
   printf '\e[?1000l\e[?1002l\e[?1003l\e[?1004l\e[?1006l\e[?1015l\e[?1016l' > /dev/tty 2>/dev/null || true
+}
+
+# ── Telegram-Integration ────────────────────────────────────────────────────
+# Ein Bot, eine Supergruppe mit "Themen" (Topics). Pro Claude-Session ein Topic:
+# clau legt es beim ersten Event an, meldet dort Status und schließt es am Ende.
+# Config liegt LOKAL in ~/.config/clau/telegram.conf (nicht im Git-Repo).
+
+_tg_load() {
+  [[ -f "$CLAU_TG_CONF" ]] && source "$CLAU_TG_CONF"
+  : "${CLAU_TG_ENABLED:=0}"
+  : "${CLAU_TG_EVENTS:=notification,stop,sessionend}"
+}
+
+# true, wenn Telegram voll konfiguriert ist (Token + Gruppe + aktiviert)
+_tg_ready() {
+  _tg_load
+  [[ "${CLAU_TG_ENABLED}" == "1" && -n "${CLAU_TG_BOT_TOKEN:-}" && -n "${CLAU_TG_GROUP_ID:-}" ]]
+}
+
+# Ruft eine Bot-API-Methode; weitere Args sind curl-Felder (--data-urlencode ...)
+_tg_api() {
+  local method="$1"; shift
+  curl -fsS --max-time 15 \
+    "https://api.telegram.org/bot${CLAU_TG_BOT_TOKEN}/${method}" "$@" 2>/dev/null
+}
+
+# Setzt/ersetzt einen Schlüssel in der Telegram-Config (behält den Rest)
+_tg_conf_set() {
+  local k="$1" v="$2"
+  mkdir -p "$(dirname "$CLAU_TG_CONF")"
+  touch "$CLAU_TG_CONF"; chmod 600 "$CLAU_TG_CONF"
+  python3 - "$CLAU_TG_CONF" "$k" "$v" <<'PY'
+import sys
+f, k, v = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = open(f).read().splitlines()
+found = False
+out = []
+for l in lines:
+    if l.startswith(k + "="):
+        out.append(f'{k}="{v}"'); found = True
+    else:
+        out.append(l)
+if not found:
+    out.append(f'{k}="{v}"')
+open(f, "w").write("\n".join(out) + "\n")
+PY
+}
+
+# Sendet Text; $1 = Topic-Thread-ID (leer = direkt in die Gruppe)
+_tg_send() {
+  local thread="$1"; local text="$2"
+  local args=(--data-urlencode "chat_id=${CLAU_TG_GROUP_ID}" --data-urlencode "text=${text}")
+  [[ -n "$thread" ]] && args+=(--data-urlencode "message_thread_id=${thread}")
+  _tg_api sendMessage "${args[@]}" >/dev/null 2>&1 || true
+}
+
+# Liefert (ggf. neu erstellte) Topic-Thread-ID für eine Session. Leer, wenn die
+# Gruppe kein Forum ist (dann gehen Nachrichten ungethreadet in die Gruppe).
+_tg_topic_for() {
+  local sid="$1" name="$2"
+  local reg="${CLAU_TG_STATE_DIR}/topic-${sid}"
+  if [[ -f "$reg" ]]; then cat "$reg"; return 0; fi
+  local resp tid
+  resp="$(_tg_api createForumTopic \
+    --data-urlencode "chat_id=${CLAU_TG_GROUP_ID}" \
+    --data-urlencode "name=${name}")"
+  tid="$(printf '%s' "$resp" | python3 -c 'import sys,json
+try: print(json.load(sys.stdin)["result"]["message_thread_id"])
+except Exception: pass' 2>/dev/null)"
+  if [[ -n "$tid" ]]; then
+    mkdir -p "$CLAU_TG_STATE_DIR"
+    printf '%s' "$tid" > "$reg"
+    echo "$tid"
+  fi
+}
+
+_tg_close_topic() {
+  local sid="$1" thread="$2"
+  [[ -n "$thread" ]] || return 0
+  _tg_api closeForumTopic \
+    --data-urlencode "chat_id=${CLAU_TG_GROUP_ID}" \
+    --data-urlencode "message_thread_id=${thread}" >/dev/null 2>&1 || true
+  rm -f "${CLAU_TG_STATE_DIR}/topic-${sid}" 2>/dev/null || true
+}
+
+# Claude-Code-Hook-Handler: liest Event-JSON von stdin und meldet an Telegram.
+# Blockiert NIE die Session (immer exit 0).
+tg_hook() {
+  _tg_ready || exit 0
+  local payload; payload="$(cat)"
+  [[ -n "$payload" ]] || exit 0
+  local parsed
+  parsed="$(printf '%s' "$payload" | python3 -c '
+import sys, json
+try: d = json.load(sys.stdin)
+except Exception: sys.exit(0)
+def g(k):
+    v = d.get(k, "")
+    return "" if v is None else str(v)
+print("SID=" + g("session_id"))
+print("CWD=" + g("cwd"))
+print("EV=" + g("hook_event_name"))
+msg = str(d.get("message") or "").replace("\n", " ").strip()[:300]
+print("MSG=" + msg)
+' 2>/dev/null)" || exit 0
+  local SID="" CWD="" EV="" MSG="" line
+  while IFS= read -r line; do
+    case "$line" in
+      SID=*) SID="${line#SID=}" ;;
+      CWD=*) CWD="${line#CWD=}" ;;
+      EV=*)  EV="${line#EV=}" ;;
+      MSG=*) MSG="${line#MSG=}" ;;
+    esac
+  done <<< "$parsed"
+  [[ -n "$SID" ]] || exit 0
+
+  local key text
+  case "$EV" in
+    Notification) key="notification"; text="❓ ${MSG:-Claude braucht deine Eingabe}" ;;
+    Stop)         key="stop";         text="🟢 Antwort abgeschlossen." ;;
+    SessionEnd)   key="sessionend";   text="✅ Session beendet." ;;
+    *) exit 0 ;;
+  esac
+  # Event-Filter aus CLAU_TG_EVENTS
+  [[ ",${CLAU_TG_EVENTS}," == *",${key},"* ]] || exit 0
+
+  local proj; proj="$(basename "${CWD:-$PWD}")"
+  local topic_name="📁 ${proj} · ${SID:0:6}"
+  local thread; thread="$(_tg_topic_for "$SID" "$topic_name")"
+  _tg_send "$thread" "$text"
+  [[ "$key" == "sessionend" ]] && _tg_close_topic "$SID" "$thread"
+  exit 0
+}
+
+# Schreibt die Telegram-Hooks in .claude/settings.json (idempotent)
+apply_tg_hooks() {
+  _tg_ready || return 0
+  local sf=".claude/settings.json"
+  mkdir -p .claude
+  [[ -f "$sf" ]] || echo '{}' > "$sf"
+  local cmd; cmd="$(command -v clau 2>/dev/null || echo clau) --tg-hook"
+  python3 - "$sf" "$cmd" <<'PY' 2>/dev/null || true
+import sys, json
+f, cmd = sys.argv[1], sys.argv[2]
+try: s = json.load(open(f))
+except Exception: s = {}
+hooks = s.setdefault("hooks", {})
+def ensure(evt):
+    arr = hooks.setdefault(evt, [])
+    for grp in arr:
+        for h in grp.get("hooks", []):
+            if str(h.get("command", "")).endswith("--tg-hook"):
+                return
+    arr.append({"hooks": [{"type": "command", "command": cmd}]})
+for e in ("Notification", "Stop", "SessionEnd"):
+    ensure(e)
+json.dump(s, open(f, "w"), indent=2)
+PY
+}
+
+# clau --tg-test : Testnachricht in die Gruppe
+tg_test() {
+  _tg_load
+  [[ -n "${CLAU_TG_BOT_TOKEN:-}" ]] || { echo "Kein Bot-Token in $CLAU_TG_CONF. Erst 'clau --tg-setup'." >&2; exit 1; }
+  [[ -n "${CLAU_TG_GROUP_ID:-}" ]] || { echo "Keine Gruppen-ID. Erst 'clau --tg-setup'." >&2; exit 1; }
+  local resp
+  resp="$(_tg_api sendMessage \
+    --data-urlencode "chat_id=${CLAU_TG_GROUP_ID}" \
+    --data-urlencode "text=✅ clau-Test von $(hostname): Verbindung steht.")"
+  if printf '%s' "$resp" | grep -q '"ok":true'; then
+    echo "Testnachricht gesendet an Gruppe ${CLAU_TG_GROUP_ID}."
+  else
+    echo "Fehler beim Senden: $resp" >&2; exit 1
+  fi
+}
+
+# clau --tg-setup : Gruppen-ID ermitteln (Bot muss in der Gruppe sein + Nachricht)
+tg_setup() {
+  _tg_load
+  if [[ -z "${CLAU_TG_BOT_TOKEN:-}" ]]; then
+    printf "Bot-Token (von @BotFather): "; read -r tok
+    [[ -n "$tok" ]] || { echo "Kein Token — abgebrochen." >&2; exit 1; }
+    CLAU_TG_BOT_TOKEN="$tok"
+    _tg_conf_set CLAU_TG_BOT_TOKEN "$tok"
+    _tg_conf_set CLAU_TG_ENABLED "1"
+  fi
+  echo
+  echo "Setup Telegram-Gruppe:"
+  echo "  1) Erstelle in Telegram eine Gruppe."
+  echo "  2) Gruppen-Einstellungen → 'Themen' (Topics) AKTIVIEREN."
+  echo "  3) Füge deinen Bot hinzu und mache ihn zum ADMIN"
+  echo "     (Rechte: Nachrichten senden + Themen verwalten)."
+  echo "  4) Schreibe irgendeine Nachricht in die Gruppe."
+  printf "Danach [Enter] drücken zum Auslesen ... "; read -r _
+  local resp ids
+  resp="$(_tg_api getUpdates)"
+  ids="$(printf '%s' "$resp" | python3 -c '
+import sys, json
+try: d = json.load(sys.stdin)
+except Exception: sys.exit(0)
+seen = {}
+for u in d.get("result", []):
+    for key in ("message","edited_message","channel_post","my_chat_member"):
+        m = u.get(key) or {}
+        c = m.get("chat") or {}
+        if c.get("type") in ("group","supergroup"):
+            seen[c["id"]] = (c.get("title","?"), c.get("type"), c.get("is_forum", False))
+for cid,(t,ty,forum) in seen.items():
+    print(f"{cid}\t{t}\t{ty}\tforum={forum}")
+' 2>/dev/null)"
+  if [[ -z "$ids" ]]; then
+    echo "Keine Gruppe gefunden. Ist der Bot in der Gruppe und wurde eine Nachricht geschrieben?" >&2
+    echo "(Roh-Antwort: $resp)" >&2
+    exit 1
+  fi
+  echo "Gefundene Gruppen:"
+  local -a arr=()
+  while IFS= read -r l; do arr+=("$l"); done <<< "$ids"
+  local i=1
+  for l in "${arr[@]}"; do
+    printf "  %d) %s\n" "$i" "$l"; ((i++))
+  done
+  local gid
+  if [[ "${#arr[@]}" -eq 1 ]]; then
+    gid="$(printf '%s' "${arr[0]}" | cut -f1)"
+    echo "→ Verwende einzige Gruppe: $gid"
+  else
+    printf "Nummer der Gruppe: "; read -r idx
+    [[ "$idx" =~ ^[0-9]+$ ]] && (( idx>=1 && idx<=${#arr[@]} )) || { echo "Ungültig." >&2; exit 1; }
+    gid="$(printf '%s' "${arr[$((idx-1))]}" | cut -f1)"
+  fi
+  # Forum-Warnung
+  local is_forum; is_forum="$(printf '%s' "$ids" | grep "^${gid}"$'\t' | grep -o 'forum=[A-Za-z]*' | cut -d= -f2)"
+  if [[ "$is_forum" != "True" ]]; then
+    echo "⚠️  Achtung: Diese Gruppe hat KEINE Themen aktiviert — es gibt dann kein"
+    echo "   Topic pro Session, alle Meldungen landen im Haupt-Chat. Aktiviere 'Themen'"
+    echo "   in den Gruppen-Einstellungen für die Topic-pro-Session-Ansicht."
+  fi
+  _tg_conf_set CLAU_TG_GROUP_ID "$gid"
+  echo "Gruppen-ID $gid gespeichert in $CLAU_TG_CONF."
+  echo "Test mit:  clau --tg-test"
 }
 
 # claude über owlAPI-Proxy starten (interaktiv)
@@ -688,6 +933,15 @@ Verwendung (interaktiv):
   clau --install                  Installiert "clau" + claude-code + opencode nach ~/.local/bin
   clau --uninstall                Entfernt "clau" aus ~/.local/bin
   clau --self-update              Aktualisiert clau auf die neueste Version aus dem Git-Repo
+
+Telegram-Benachrichtigung (Handy):
+  clau --tg-setup                 Ermittelt & speichert die Gruppen-ID (Bot muss in der Gruppe sein)
+  clau --tg-test                  Sendet eine Testnachricht in die Gruppe
+  Pro Session ein Topic in einer Supergruppe (Themen aktiviert). Meldet bei
+  Rückfrage/Fertig/Ende und schließt das Topic am Session-Ende.
+  Config (lokal, geheim): ~/.config/clau/telegram.conf
+    CLAU_TG_ENABLED=1  CLAU_TG_BOT_TOKEN=...  CLAU_TG_GROUP_ID=...
+    CLAU_TG_EVENTS="notification,stop,sessionend"  (welche Events melden)
 
 Headless / Projekt-Modus:
   clau --headless -p "Prompt"
@@ -1313,6 +1567,7 @@ run_resume_picker() {
   echo "Öffne Session-Auswahl (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   cleanup_tool_blocking
   unset_token_saver_env
+  apply_tg_hooks
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
   exec claude --resume --model "$(claude_cli_model "$mdl")" $extra
@@ -1332,6 +1587,7 @@ run_saved_session() {
   echo "Starte feste Session $CLAU_SESSION_ID (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   cleanup_tool_blocking
   unset_token_saver_env
+  apply_tg_hooks
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
   exec claude --resume "$CLAU_SESSION_ID" --model "$(claude_cli_model "$mdl")" $extra
@@ -1351,6 +1607,7 @@ run_new_session() {
   echo "Starte neue Session (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   cleanup_tool_blocking
   unset_token_saver_env
+  apply_tg_hooks
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
   exec claude --model "$(claude_cli_model "$mdl")" $extra
@@ -1371,6 +1628,7 @@ run_resume_id() {
   echo "Setze Session $rid fort (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   cleanup_tool_blocking
   unset_token_saver_env
+  apply_tg_hooks
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
   exec claude --resume "$rid" --model "$(claude_cli_model "$mdl")" $extra
@@ -1475,6 +1733,7 @@ run_headless_here() {
     return
   fi
   build_headless_cmd
+  apply_tg_hooks
   echo "Starte headless im Verzeichnis: $(pwd)"
   exec "${CLAUDE_CMD[@]}"
 }
@@ -1495,6 +1754,7 @@ run_headless_in_dir() {
   (
     cd "$dir"
     build_headless_cmd
+    apply_tg_hooks
     echo "Starte headless in: $dir"
     exec "${CLAUDE_CMD[@]}"
   )
@@ -1539,6 +1799,7 @@ EOF
     if ! is_owl_model "${CLAU_MODEL}"; then
       cleanup_tool_blocking
       unset_token_saver_env
+      apply_tg_hooks
     fi
     exec claude --model "$(claude_cli_model "${CLAU_MODEL}")"
   )
@@ -1820,6 +2081,18 @@ parse_args() {
         ACTION="compact"
         shift
         ;;
+      --tg-setup)
+        ACTION="tg-setup"
+        shift
+        ;;
+      --tg-test)
+        ACTION="tg-test"
+        shift
+        ;;
+      --tg-hook)
+        ACTION="tg-hook"
+        shift
+        ;;
       --new)
         ACTION="new"
         shift
@@ -1907,8 +2180,17 @@ RESUME_SESSION_ID=""
 load_config
 parse_args "$@"
 
-# Update-Check nur für interaktive Läufe (nicht headless/CI)
-[[ "${HEADLESS:-0}" -eq 1 ]] || check_for_updates
+# Telegram-Hook: sofort abarbeiten (kein Update-Check, kein Menü) — muss schnell sein
+if [[ "${ACTION}" == "tg-hook" ]]; then
+  tg_hook
+  exit 0
+fi
+
+# Update-Check nur für interaktive Läufe (nicht headless/CI/tg)
+case "${ACTION}" in
+  tg-setup|tg-test) : ;;
+  *) [[ "${HEADLESS:-0}" -eq 1 ]] || check_for_updates ;;
+esac
 
 case "${ACTION}" in
   list)
@@ -1921,6 +2203,12 @@ case "${ACTION}" in
     ;;
   compact)
     run_compact
+    ;;
+  tg-setup)
+    tg_setup
+    ;;
+  tg-test)
+    tg_test
     ;;
   new)
     if [[ "$HEADLESS" -eq 1 ]]; then

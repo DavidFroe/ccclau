@@ -144,6 +144,36 @@ Dies setzt `BASH_DEFAULT_TIMEOUT_MS` und `BASH_MAX_TIMEOUT_MS` für Claude Code 
 | `CLAU_TIMEOUT_DEFAULT` | `BASH_DEFAULT_TIMEOUT_MS` | `1800000` (30 Min) | Standard-Timeout für Bash-Befehle |
 | `CLAU_TIMEOUT_MAX` | `BASH_MAX_TIMEOUT_MS` | `7200000` (120 Min) | Maximales erlaubtes Timeout |
 
+## Telegram-Benachrichtigung (Handy)
+
+clau kann per Telegram-Bot aufs Handy melden, wenn eine Session eine Rückfrage hat,
+fertig ist oder endet — ideal für autonome „durchlaufen"-Läufe (Autonomie 0).
+
+**Modell: ein Bot, eine Supergruppe mit „Themen" (Topics), ein Topic pro Session.**
+clau legt das Topic beim ersten Event automatisch an, meldet dort den Status und
+schließt es am Session-Ende. So bleiben auch 1000 parallele Sessions sauber getrennt
+(jedes Topic ist selbstbeschriftet mit `📁 <projekt> · <session-id>`).
+
+**Einmal-Setup:**
+
+1. In Telegram bei **@BotFather** → `/newbot` → Token holen.
+2. Gruppe anlegen, in den Einstellungen **„Themen" aktivieren**, Bot als **Admin**
+   hinzufügen (Rechte: Nachrichten + Themen verwalten), eine Nachricht schreiben.
+3. Token in `~/.config/clau/telegram.conf` eintragen (lokal, `chmod 600`, **nicht** im Repo).
+4. `clau --tg-setup` → ermittelt die Gruppen-ID.  `clau --tg-test` → Testnachricht.
+
+```bash
+# ~/.config/clau/telegram.conf
+CLAU_TG_ENABLED="1"
+CLAU_TG_BOT_TOKEN="123456:ABC-..."
+CLAU_TG_GROUP_ID="-100..."                       # via clau --tg-setup
+CLAU_TG_EVENTS="notification,stop,sessionend"    # welche Events melden
+```
+
+Die Benachrichtigung läuft über Claude-Code-Hooks (`Notification`/`Stop`/`SessionEnd`),
+die clau beim Session-Start in `.claude/settings.json` einträgt. Ist Telegram nicht
+konfiguriert, passiert nichts (stiller No-Op). Token geleakt? → @BotFather `/revoke`.
+
 ## Auto-Update-Check
 
 Beim interaktiven Start prüft clau (throttled, max. 1×/Tag) per `git fetch`, ob
