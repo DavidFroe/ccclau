@@ -415,6 +415,8 @@ _tg_close_topic() {
 # Claude-Code-Hook-Handler: liest Event-JSON von stdin und meldet an Telegram.
 # Blockiert NIE die Session (immer exit 0).
 tg_hook() {
+  # Vom Bot-Modus unterdrückt (sonst würden Headless-Turns Extra-Topics anlegen)
+  [[ -n "${CLAU_TG_SUPPRESS:-}" ]] && exit 0
   _tg_ready || exit 0
   local payload; payload="$(cat)"
   [[ -n "$payload" ]] || exit 0
@@ -568,6 +570,154 @@ for cid,(t,ty,forum) in seen.items():
   _tg_conf_set CLAU_TG_GROUP_ID "$gid"
   echo "Gruppen-ID $gid gespeichert in $CLAU_TG_CONF."
   echo "Test mit:  clau --tg-test"
+}
+
+# clau --tg-whoami : eigene Telegram-User-ID ermitteln (für CLAU_TG_ALLOWED_USER)
+tg_whoami() {
+  _tg_load
+  [[ -n "${CLAU_TG_BOT_TOKEN:-}" ]] || { echo "Erst 'clau --tg-setup'." >&2; exit 1; }
+  echo "Schreibe JETZT eine Nachricht in die Gruppe, dann [Enter] ..."
+  read -r _
+  local resp
+  resp="$(_tg_api getUpdates)"
+  printf '%s' "$resp" | python3 -c '
+import sys, json
+try: d = json.load(sys.stdin)
+except Exception: sys.exit(0)
+seen = {}
+for u in d.get("result", []):
+    m = u.get("message") or {}
+    fr = m.get("from") or {}
+    if fr.get("id"):
+        seen[fr["id"]] = fr.get("username") or fr.get("first_name","?")
+if not seen:
+    print("Keine Nachricht gefunden — nochmal schreiben und erneut versuchen.")
+for uid, name in seen.items():
+    print(f"User-ID {uid}  ({name})")
+'
+  echo
+  echo "Trag deine ID in ~/.config/clau/telegram.conf ein:  CLAU_TG_ALLOWED_USER=\"<ID>\""
+}
+
+# ── Telegram Phase 2: Bot-Poller (vom Handy entwickeln) ─────────────────────
+# Läuft dauerhaft (tmux/systemd). Jede Nachricht in einem Topic wird zu einem
+# Claude-Code-Headless-Turn im an das Topic gebundenen Verzeichnis; die Antwort
+# geht zurück ins Topic. Session wird pro Topic fortgesetzt (Kontext bleibt).
+
+_tg_bot_state() { echo "${CLAU_TG_STATE_DIR}/chat-${1:-0}"; }
+
+_tg_bind_set() {  # $1=thread $2=key $3=val
+  local f; f="$(_tg_bot_state "$1")"; mkdir -p "$CLAU_TG_STATE_DIR"; touch "$f"
+  python3 - "$f" "$2" "$3" <<'PY'
+import sys
+f, k, v = sys.argv[1:4]
+lines = [l for l in open(f).read().splitlines() if not l.startswith(k + "=")]
+lines.append(f"{k}={v}")
+open(f, "w").write("\n".join(lines) + "\n")
+PY
+}
+
+# Sendet Text in Stücken (Telegram-Limit ~4096 Zeichen)
+_tg_send_chunked() {
+  local thread="$1" text="$2"
+  [[ -n "$text" ]] || { _tg_send "$thread" "（keine Ausgabe）"; return; }
+  while [[ -n "$text" ]]; do
+    _tg_send "$thread" "${text:0:3800}"
+    text="${text:3800}"
+  done
+}
+
+# Führt einen Claude-Headless-Turn aus; gibt die neue Session-ID auf stdout aus
+# und schickt die Antwort ins Topic.
+_tg_claude_turn() {  # $1=thread $2=dir $3=sid $4=prompt
+  local thread="$1" dir="$2" sid="$3" prompt="$4"
+  local -a args=(-p "$prompt" --output-format json --dangerously-skip-permissions)
+  [[ -n "$sid" ]] && args=(--resume "$sid" "${args[@]}")
+  local raw
+  raw="$(cd "$dir" && CLAU_TG_SUPPRESS=1 claude "${args[@]}" 2>&1)" || true
+  local parsed result newsid
+  parsed="$(printf '%s' "$raw" | python3 -c '
+import sys, json
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+    print((d.get("result") or "") + "\x1e" + (d.get("session_id") or ""))
+except Exception:
+    print(raw + "\x1e")
+' 2>/dev/null)"
+  result="${parsed%%$'\x1e'*}"
+  newsid="${parsed##*$'\x1e'}"
+  _tg_send_chunked "$thread" "$result"
+  printf '%s' "$newsid"
+}
+
+# Verarbeitet eine eingehende Nachricht in einem Topic
+_tg_bot_handle() {
+  local th="$1" txt="$2"
+  local DIR="" SID="" line
+  while IFS= read -r line; do
+    case "$line" in DIR=*) DIR="${line#DIR=}" ;; SID=*) SID="${line#SID=}" ;; esac
+  done < <(cat "$(_tg_bot_state "$th")" 2>/dev/null)
+
+  case "$txt" in
+    /help*|/start*)
+      _tg_send "$th" $'clau-Bot Befehle:\n/cd <pfad>  – Projektordner für dieses Topic setzen\n/pwd        – aktuellen Ordner zeigen\n/new        – neue Session (Kontext zurücksetzen)\nsonst: Text = Anweisung an Claude (im gesetzten Ordner)'
+      return ;;
+    "/cd "*|"/dir "*)
+      local p="${txt#* }"; p="${p/#\~/$HOME}"
+      [[ -d "$p" ]] || { _tg_send "$th" "❌ Ordner nicht gefunden: $p"; return; }
+      _tg_bind_set "$th" DIR "$p"; _tg_bind_set "$th" SID ""
+      _tg_send "$th" "📁 Ordner gesetzt: $p (neue Session)"; return ;;
+    /pwd*)
+      _tg_send "$th" "📁 ${DIR:-<nicht gesetzt – erst /cd /pfad>}"; return ;;
+    /new*)
+      _tg_bind_set "$th" SID ""
+      _tg_send "$th" "🔄 Neue Session im Ordner ${DIR:-<keiner>}"; return ;;
+    /*)
+      _tg_send "$th" "❓ Unbekannter Befehl. /help"; return ;;
+  esac
+
+  [[ -n "$DIR" ]] || { _tg_send "$th" "❌ Erst Ordner setzen:  /cd /pfad/zum/projekt"; return; }
+  _tg_send "$th" "⏳ arbeite ..."
+  local newsid; newsid="$(_tg_claude_turn "$th" "$DIR" "$SID" "$txt")"
+  [[ -n "$newsid" ]] && _tg_bind_set "$th" SID "$newsid"
+}
+
+# clau --tg-bot : Dauer-Poller. Idealerweise in tmux oder als systemd-Service.
+tg_bot() {
+  _tg_ready || { echo "Telegram nicht konfiguriert — erst 'clau --tg-setup'." >&2; exit 1; }
+  command -v claude >/dev/null 2>&1 || { echo "claude nicht gefunden." >&2; exit 1; }
+  local allowed="${CLAU_TG_ALLOWED_USER:-}"
+  echo "clau Telegram-Bot läuft (Gruppe ${CLAU_TG_GROUP_ID}). Strg-C zum Beenden."
+  [[ -z "$allowed" ]] && echo "⚠️  CLAU_TG_ALLOWED_USER nicht gesetzt — JEDER in der Gruppe kann Code ausführen! (clau --tg-whoami)"
+  _tg_send "" "🤖 clau-Bot online auf $(hostname). In ein Topic schreiben zum Entwickeln. /help für Befehle."
+  local offset=0 resp lines uid cid th fr txt
+  while true; do
+    resp="$(_tg_api getUpdates --data-urlencode "timeout=30" --data-urlencode "offset=${offset}" --data-urlencode 'allowed_updates=["message"]')" || { sleep 3; continue; }
+    lines="$(printf '%s' "$resp" | python3 -c '
+import sys, json
+try: d = json.load(sys.stdin)
+except Exception: sys.exit(0)
+for u in d.get("result", []):
+    m = u.get("message") or {}
+    ch = m.get("chat") or {}
+    th = m.get("message_thread_id") or 0
+    fr = (m.get("from") or {}).get("id", "")
+    txt = (m.get("text") or "").replace("\t", " ").replace("\n", " ")
+    row = [str(u.get("update_id", "")), str(ch.get("id", "")), str(th), str(fr), txt]
+    print("\t".join(row))
+' 2>/dev/null)"
+    [[ -n "$lines" ]] || continue
+    while IFS=$'\t' read -r uid cid th fr txt; do
+      [[ -n "$uid" ]] && offset=$((uid + 1))
+      [[ "$cid" == "${CLAU_TG_GROUP_ID}" ]] || continue
+      if [[ -n "$allowed" && "$fr" != "$allowed" ]]; then
+        _tg_send "$th" "⛔ Nicht autorisiert (User $fr)."; continue
+      fi
+      [[ -n "$txt" ]] || continue
+      _tg_bot_handle "$th" "$txt"
+    done <<< "$lines"
+  done
 }
 
 # claude über owlAPI-Proxy starten (interaktiv)
@@ -934,14 +1084,17 @@ Verwendung (interaktiv):
   clau --uninstall                Entfernt "clau" aus ~/.local/bin
   clau --self-update              Aktualisiert clau auf die neueste Version aus dem Git-Repo
 
-Telegram-Benachrichtigung (Handy):
+Telegram / Handy:
   clau --tg-setup                 Ermittelt & speichert die Gruppen-ID (Bot muss in der Gruppe sein)
   clau --tg-test                  Sendet eine Testnachricht in die Gruppe
-  Pro Session ein Topic in einer Supergruppe (Themen aktiviert). Meldet bei
-  Rückfrage/Fertig/Ende und schließt das Topic am Session-Ende.
+  clau --tg-whoami                Zeigt deine Telegram-User-ID (für CLAU_TG_ALLOWED_USER)
+  clau --tg-bot                   Bot-Poller: vom Handy entwickeln (Dauerprozess, tmux/systemd)
+                                  In einem Topic: /cd <pfad> setzen, dann Text = Anweisung an Claude.
+  Phase 1 (Benachrichtigung): pro Session ein Topic, meldet Rückfrage/Fertig/Ende.
   Config (lokal, geheim): ~/.config/clau/telegram.conf
     CLAU_TG_ENABLED=1  CLAU_TG_BOT_TOKEN=...  CLAU_TG_GROUP_ID=...
     CLAU_TG_EVENTS="notification,stop,sessionend"  (welche Events melden)
+    CLAU_TG_ALLOWED_USER="<id>"  (nur diese Telegram-ID darf per Bot Code ausführen)
 
 Headless / Projekt-Modus:
   clau --headless -p "Prompt"
@@ -2089,6 +2242,14 @@ parse_args() {
         ACTION="tg-test"
         shift
         ;;
+      --tg-whoami)
+        ACTION="tg-whoami"
+        shift
+        ;;
+      --tg-bot)
+        ACTION="tg-bot"
+        shift
+        ;;
       --tg-hook)
         ACTION="tg-hook"
         shift
@@ -2188,7 +2349,7 @@ fi
 
 # Update-Check nur für interaktive Läufe (nicht headless/CI/tg)
 case "${ACTION}" in
-  tg-setup|tg-test) : ;;
+  tg-setup|tg-test|tg-whoami|tg-bot) : ;;
   *) [[ "${HEADLESS:-0}" -eq 1 ]] || check_for_updates ;;
 esac
 
@@ -2209,6 +2370,12 @@ case "${ACTION}" in
     ;;
   tg-test)
     tg_test
+    ;;
+  tg-whoami)
+    tg_whoami
+    ;;
+  tg-bot)
+    tg_bot
     ;;
   new)
     if [[ "$HEADLESS" -eq 1 ]]; then

@@ -174,6 +174,50 @@ Die Benachrichtigung läuft über Claude-Code-Hooks (`Notification`/`Stop`/`Sess
 die clau beim Session-Start in `.claude/settings.json` einträgt. Ist Telegram nicht
 konfiguriert, passiert nichts (stiller No-Op). Token geleakt? → @BotFather `/revoke`.
 
+### Vom Handy entwickeln (`clau --tg-bot`)
+
+Ein Dauer-Poller macht aus jeder Telegram-Nachricht einen Claude-Code-Turn im
+Projektordner auf dem Server — die Antwort kommt zurück ins Topic. So entwickelst du
+vom Handy: im Topic `/cd <pfad>` setzen, dann einfach Anweisungen tippen. Der Kontext
+(Session) bleibt pro Topic erhalten.
+
+```bash
+# 1) Sicherheit: nur DEINE Telegram-ID darf Befehle ausführen (Bot kann Code laufen lassen!)
+clau --tg-whoami                 # zeigt deine User-ID
+#   → CLAU_TG_ALLOWED_USER="<id>" in ~/.config/clau/telegram.conf eintragen
+
+# 2) Bot starten (am besten in tmux, damit er weiterläuft):
+tmux new -d -s clau-bot 'clau --tg-bot'
+```
+
+Bot-Befehle im Topic:
+
+| Befehl | Wirkung |
+|--------|---------|
+| `/cd <pfad>` | Projektordner für dieses Topic setzen (neue Session) |
+| `/pwd` | aktuellen Ordner zeigen |
+| `/new` | Session zurücksetzen (frischer Kontext) |
+| *(Text)* | Anweisung an Claude im gesetzten Ordner |
+
+Als systemd-User-Service (läuft nach Reboot automatisch):
+
+```ini
+# ~/.config/systemd/user/clau-bot.service
+[Unit]
+Description=clau Telegram Bot
+[Service]
+ExecStart=%h/.local/bin/clau --tg-bot
+Restart=always
+[Install]
+WantedBy=default.target
+```
+```bash
+systemctl --user enable --now clau-bot   # (loginctl enable-linger $USER für Start ohne Login)
+```
+
+⚠️ Der Bot läuft mit `--dangerously-skip-permissions` (autonom). Setze unbedingt
+`CLAU_TG_ALLOWED_USER`, sonst könnte jeder in der Gruppe Code auf dem Server ausführen.
+
 ## Auto-Update-Check
 
 Beim interaktiven Start prüft clau (throttled, max. 1×/Tag) per `git fetch`, ob
