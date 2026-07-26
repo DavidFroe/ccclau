@@ -190,6 +190,26 @@ clau --tg-whoami                 # zeigt deine User-ID
 tmux new -d -s clau-bot 'clau --tg-bot'
 ```
 
+**Der Bot hat ein eigenes Hirn (Concierge).** Du musst dir keine Befehle merken —
+schreib einfach normal. Ein kleines Modell auf der vorhandenen QuiteQue-Infrastruktur
+(Default `gemma-12b-chat`, lokal & DE-optimiert) plaudert mit dir, listet Projekte,
+wechselt Ordner, holt deine PC-Session — und reicht **echte Coding-Aufträge an den
+großen Claude weiter**. So kostet das Navigieren nichts.
+
+```
+Du:  „was hab ich für projekte“      → Concierge antwortet direkt
+Du:  „lass uns im ccclau weiter“     → wechselt Ordner / holt PC-Session
+Du:  „füge Backups in die README“    → geht an Claude Code (echte Arbeit)
+```
+
+Konfigurierbar (auch im Menü unter *Telegram → Concierge-Modell*):
+
+```bash
+CLAU_TG_BRAIN="1"                      # 0 = aus, dann geht alles direkt an Claude
+CLAU_TG_BRAIN_MODEL="gemma-12b-chat"   # jede QuiteQue-Modell-ID, z.B. free, claude-opus-5
+CLAU_TG_PROJECT_ROOT="$HOME"           # wo nach Projekten gesucht wird
+```
+
 Bot-Befehle im Topic:
 
 | Befehl | Wirkung |
@@ -198,7 +218,9 @@ Bot-Befehle im Topic:
 | `/weiter` | die zuletzt am PC gelaufene Session in diesem Ordner **übernehmen** |
 | `/pwd` | aktuellen Ordner zeigen |
 | `/new` | Session zurücksetzen (frischer Kontext) |
-| *(Text)* | Anweisung an Claude im gesetzten Ordner |
+| `/projekte` | gefundene Projektordner auflisten |
+| `/opus <text>` | direkt an Claude (Concierge überspringen) |
+| *(Text)* | geht an den Concierge — der antwortet oder reicht an Claude weiter |
 
 **Am PC anfangen, auf dem Handy weiter:** clau merkt sich bei jeder PC-Session
 (über die Hooks) die Session-ID pro Ordner. Unterwegs im Topic `/cd <ordner>` →

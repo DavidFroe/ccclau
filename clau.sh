@@ -338,6 +338,10 @@ _tg_load() {
   [[ -f "$CLAU_TG_CONF" ]] && source "$CLAU_TG_CONF"
   : "${CLAU_TG_ENABLED:=0}"
   : "${CLAU_TG_EVENTS:=notification,stop,sessionend}"
+  # Concierge ("Bot-Hirn"): kleines Modell auf der vorhandenen QuiteQue-Infrastruktur
+  : "${CLAU_TG_BRAIN:=1}"
+  : "${CLAU_TG_BRAIN_MODEL:=gemma-12b-chat}"
+  : "${CLAU_TG_PROJECT_ROOT:=$HOME}"
 }
 
 # true, wenn Telegram voll konfiguriert ist (Token + Gruppe + aktiviert)
@@ -646,6 +650,75 @@ for uid, name in seen.items():
 
 _tg_bot_state() { echo "${CLAU_TG_STATE_DIR}/chat-${1:-0}"; }
 
+# ── Concierge ("Bot-Hirn") ──────────────────────────────────────────────────
+# Kleines Modell auf der vorhandenen QuiteQue-Infrastruktur (Default gemma-12b-chat).
+# Es plaudert, navigiert und entscheidet, wann an den grossen Claude uebergeben wird.
+# Kein Extra-Stack: gleiche Base-URL/Auth wie alle owl-Modelle.
+
+# Listet Projektordner (mit .clau.conf oder .git) unter CLAU_TG_PROJECT_ROOT
+_tg_projects() {
+  local root="${CLAU_TG_PROJECT_ROOT:-$HOME}"
+  find "$root" -maxdepth 2 \( -name .clau.conf -o -name .git \) -printf '%h\n' 2>/dev/null \
+    | sort -u | head -25
+}
+
+# Fragt das Concierge-Modell; gibt JSON auf stdout aus (leer bei Fehler)
+_tg_brain() {  # $1=userText $2=dir $3=sid
+  local user="$1" dir="$2" sid="$3"
+  local model="${CLAU_TG_BRAIN_MODEL:-gemma-12b-chat}"
+  local projects; projects="$(_tg_projects | paste -sd'; ' -)"
+  python3 - "$OWL_BASE_URL" "$QQ_USER" "$model" "$user" "$dir" "$sid" "$projects" <<'PY' 2>/dev/null
+import json, sys, urllib.request
+base, quser, model, user, cur_dir, sid, projects = sys.argv[1:8]
+system = (
+    "Du bist der clau-Concierge auf einem Entwickler-Server. Du hilfst David per Telegram, "
+    "in seine Coding-Sessions zu kommen. Antworte AUSSCHLIESSLICH mit einem JSON-Objekt, "
+    "ohne Markdown, ohne Erklaerung drumherum.\n"
+    "Felder:\n"
+    '  action: "reply" (nur plaudern/erklaeren) | "cd" (Projektordner setzen) | '
+    '"resume_pc" (zuletzt am PC gelaufene Session uebernehmen) | "new" (neue Session) | '
+    '"opus" (Anweisung an den grossen Claude Code weiterreichen)\n'
+    '  dir: absoluter Pfad (nur bei action "cd", sonst "")\n'
+    '  text: kurze Antwort auf Deutsch, locker und knapp\n'
+    "Regeln: Konkrete Programmier-/Datei-/Analyse-Auftraege -> action 'opus'. "
+    "Small Talk, Fragen zu Projekten/Status/Bedienung -> 'reply'. "
+    "Nur Ordner nennen ohne Auftrag -> 'cd'. Wenn er dort weitermachen will, wo er am PC "
+    "aufgehoert hat -> 'resume_pc'. Frischer Start -> 'new'.\n"
+    f"Verfuegbare Projekte: {projects or '(keine gefunden)'}\n"
+    f"Aktueller Ordner: {cur_dir or '(keiner gesetzt)'}\n"
+    f"Aktive Session: {'ja' if sid else 'nein'}"
+)
+body = json.dumps({
+    "model": model,
+    "messages": [{"role": "system", "content": system},
+                 {"role": "user", "content": user}],
+    "max_tokens": 400, "temperature": 0.3,
+}).encode()
+req = urllib.request.Request(
+    base.rstrip("/") + "/v1/chat/completions", data=body,
+    headers={"Content-Type": "application/json", "X-OwlTrail-User": quser})
+try:
+    with urllib.request.urlopen(req, timeout=120) as r:
+        c = json.load(r)["choices"][0]["message"]["content"]
+except Exception:
+    sys.exit(0)
+c = c.strip()
+if c.startswith("```"):                      # Markdown-Fences abstreifen
+    c = c.split("```")[1] if "```" in c[3:] else c.strip("`")
+    c = c[4:] if c.lower().startswith("json") else c
+i, j = c.find("{"), c.rfind("}")
+if i < 0 or j < 0:
+    print(json.dumps({"action": "reply", "dir": "", "text": c[:800]})); sys.exit(0)
+try:
+    d = json.loads(c[i:j+1])
+except Exception:
+    print(json.dumps({"action": "reply", "dir": "", "text": c[i:j+1][:800]})); sys.exit(0)
+print(json.dumps({"action": str(d.get("action") or "reply"),
+                  "dir": str(d.get("dir") or ""),
+                  "text": str(d.get("text") or "")}))
+PY
+}
+
 _tg_bind_set() {  # $1=thread $2=key $3=val
   local f; f="$(_tg_bot_state "$1")"; mkdir -p "$CLAU_TG_STATE_DIR"; touch "$f"
   python3 - "$f" "$2" "$3" <<'PY'
@@ -692,6 +765,42 @@ except Exception:
 }
 
 # Verarbeitet eine eingehende Nachricht in einem Topic
+_tg_pcfile() { echo "${CLAU_TG_STATE_DIR}/lastpc-$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_')"; }
+
+# Aktionen (von Slash-Befehlen UND vom Concierge genutzt)
+_tg_do_cd() {  # $1=thread $2=pfad
+  local th="$1" p="${2/#\~/$HOME}"
+  [[ -d "$p" ]] || { _tg_send "$th" "❌ Ordner nicht gefunden: $p"; return 1; }
+  p="$(cd "$p" 2>/dev/null && pwd)"   # kanonisch (matcht PC-Hook)
+  _tg_bind_set "$th" DIR "$p"; _tg_bind_set "$th" SID ""
+  local hint=""
+  [[ -s "$(_tg_pcfile "$p")" ]] && hint=$'\n▶️ Es gibt eine PC-Session hier — /weiter zum Übernehmen.'
+  _tg_send "$th" "📁 Ordner gesetzt: $p${hint}"
+}
+
+_tg_do_resume_pc() {  # $1=thread $2=dir → gibt uebernommene SID aus
+  local th="$1" dir="$2"
+  [[ -n "$dir" ]] || { _tg_send "$th" "❌ Erst Ordner setzen (/cd /pfad)."; return 1; }
+  local pcf; pcf="$(_tg_pcfile "$dir")"
+  if [[ -s "$pcf" ]]; then
+    local pcsid; pcsid="$(cat "$pcf")"
+    _tg_bind_set "$th" SID "$pcsid"
+    _tg_send "$th" "▶️ PC-Session übernommen ($pcsid). Schreib einfach weiter. (PC-Session vorher beenden!)"
+    printf '%s' "$pcsid"
+  else
+    _tg_send "$th" "Keine PC-Session für $dir gefunden. Arbeite erst am PC oder starte neu."
+    return 1
+  fi
+}
+
+_tg_do_opus() {  # $1=thread $2=dir $3=sid $4=prompt
+  local th="$1" dir="$2" sid="$3" prompt="$4"
+  [[ -n "$dir" ]] || { _tg_send "$th" "❌ Erst Ordner setzen:  /cd /pfad/zum/projekt"; return 1; }
+  _tg_send "$th" "⏳ arbeite ..."
+  local newsid; newsid="$(_tg_claude_turn "$th" "$dir" "$sid" "$prompt")"
+  [[ -n "$newsid" ]] && _tg_bind_set "$th" SID "$newsid"
+}
+
 _tg_bot_handle() {
   local th="$1" txt="$2"
   local DIR="" SID="" line
@@ -701,40 +810,53 @@ _tg_bot_handle() {
 
   case "$txt" in
     /help*|/start*)
-      _tg_send "$th" $'clau-Bot Befehle:\n/cd <pfad>  – Projektordner für dieses Topic setzen\n/weiter     – die zuletzt am PC gelaufene Session in diesem Ordner übernehmen\n/pwd        – aktuellen Ordner zeigen\n/new        – neue Session (Kontext zurücksetzen)\nsonst: Text = Anweisung an Claude (im gesetzten Ordner)'
+      _tg_send "$th" $'clau-Bot:\nEinfach normal schreiben — der Concierge hilft dir rein und reicht Coding-Aufträge an Claude weiter.\n\nShortcuts:\n/cd <pfad>  – Projektordner setzen\n/weiter     – PC-Session in diesem Ordner übernehmen\n/pwd        – aktueller Ordner\n/new        – neue Session\n/opus <txt> – direkt an Claude (Concierge überspringen)\n/projekte   – gefundene Projekte auflisten'
       return ;;
     "/cd "*|"/dir "*)
-      local p="${txt#* }"; p="${p/#\~/$HOME}"
-      [[ -d "$p" ]] || { _tg_send "$th" "❌ Ordner nicht gefunden: $p"; return; }
-      p="$(cd "$p" 2>/dev/null && pwd)"   # kanonischer absoluter Pfad (matcht PC-Hook)
-      _tg_bind_set "$th" DIR "$p"; _tg_bind_set "$th" SID ""
-      local pchint=""
-      [[ -s "${CLAU_TG_STATE_DIR}/lastpc-$(printf '%s' "$p" | tr -c 'A-Za-z0-9' '_')" ]] && pchint=$'\n▶️ Es gibt eine PC-Session hier — /weiter zum Übernehmen.'
-      _tg_send "$th" "📁 Ordner gesetzt: $p (neue Session)${pchint}"; return ;;
+      _tg_do_cd "$th" "${txt#* }"; return ;;
     /weiter*|/pc*)
-      [[ -n "$DIR" ]] || { _tg_send "$th" "❌ Erst /cd /pfad setzen."; return; }
-      local pcf="${CLAU_TG_STATE_DIR}/lastpc-$(printf '%s' "$DIR" | tr -c 'A-Za-z0-9' '_')"
-      if [[ -s "$pcf" ]]; then
-        local pcsid; pcsid="$(cat "$pcf")"
-        _tg_bind_set "$th" SID "$pcsid"
-        _tg_send "$th" "▶️ PC-Session übernommen ($pcsid). Schreib einfach weiter. (PC-Session vorher beenden!)"
-      else
-        _tg_send "$th" "Keine PC-Session für $DIR gefunden. Arbeite erst am PC oder nutze /new."
-      fi
-      return ;;
+      _tg_do_resume_pc "$th" "$DIR" >/dev/null; return ;;
     /pwd*)
-      _tg_send "$th" "📁 ${DIR:-<nicht gesetzt – erst /cd /pfad>}"; return ;;
+      _tg_send "$th" "📁 ${DIR:-<nicht gesetzt>}"; return ;;
     /new*)
       _tg_bind_set "$th" SID ""
       _tg_send "$th" "🔄 Neue Session im Ordner ${DIR:-<keiner>}"; return ;;
+    /projekte*|/projects*|/ls*)
+      local pl; pl="$(_tg_projects)"
+      _tg_send "$th" "📚 Projekte:"$'\n'"${pl:-<keine gefunden>}"; return ;;
+    "/opus "*)
+      _tg_do_opus "$th" "$DIR" "$SID" "${txt#* }"; return ;;
     /*)
       _tg_send "$th" "❓ Unbekannter Befehl. /help"; return ;;
   esac
 
-  [[ -n "$DIR" ]] || { _tg_send "$th" "❌ Erst Ordner setzen:  /cd /pfad/zum/projekt"; return; }
-  _tg_send "$th" "⏳ arbeite ..."
-  local newsid; newsid="$(_tg_claude_turn "$th" "$DIR" "$SID" "$txt")"
-  [[ -n "$newsid" ]] && _tg_bind_set "$th" SID "$newsid"
+  # Kein Slash-Befehl → Concierge entscheidet (falls aktiviert)
+  if [[ "${CLAU_TG_BRAIN:-1}" == "1" ]]; then
+    local j; j="$(_tg_brain "$txt" "$DIR" "$SID")"
+    if [[ -n "$j" ]]; then
+      local act bdir btext
+      act="$(printf '%s' "$j"  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("action",""))' 2>/dev/null)"
+      bdir="$(printf '%s' "$j" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("dir",""))' 2>/dev/null)"
+      btext="$(printf '%s' "$j"| python3 -c 'import sys,json;print(json.load(sys.stdin).get("text",""))' 2>/dev/null)"
+      case "$act" in
+        reply)     _tg_send "$th" "${btext:-…}"; return ;;
+        cd)        [[ -n "$btext" ]] && _tg_send "$th" "$btext"
+                   [[ -n "$bdir" ]] && _tg_do_cd "$th" "$bdir"; return ;;
+        new)       _tg_bind_set "$th" SID ""
+                   _tg_send "$th" "${btext:-🔄 Neue Session.}"; return ;;
+        resume_pc) [[ -n "$btext" ]] && _tg_send "$th" "$btext"
+                   # Ordner mitgeliefert → erst wechseln, dann PC-Session holen
+                   if [[ -n "$bdir" && -d "${bdir/#\~/$HOME}" ]]; then
+                     _tg_do_cd "$th" "$bdir" >/dev/null && DIR="$(cd "${bdir/#\~/$HOME}" && pwd)"
+                   fi
+                   local got; got="$(_tg_do_resume_pc "$th" "$DIR")" && SID="$got"; return ;;
+        opus)      [[ -n "$btext" ]] && _tg_send "$th" "$btext" ;;   # kurze Ansage, dann durchreichen
+        *)         : ;;
+      esac
+    fi
+  fi
+
+  _tg_do_opus "$th" "$DIR" "$SID" "$txt"
 }
 
 # clau --tg-bot : Dauer-Poller. Idealerweise in tmux oder als systemd-Service.
@@ -1151,6 +1273,9 @@ Telegram / Handy:
     CLAU_TG_ENABLED=1  CLAU_TG_BOT_TOKEN=...  CLAU_TG_GROUP_ID=...
     CLAU_TG_EVENTS="notification,stop,sessionend"  (welche Events melden)
     CLAU_TG_ALLOWED_USER="<id>"  (nur diese Telegram-ID darf per Bot Code ausführen)
+    CLAU_TG_BRAIN=1  CLAU_TG_BRAIN_MODEL="gemma-12b-chat"  (Concierge: kleines Modell,
+      das plaudert/navigiert und Coding-Aufträge an Claude weiterreicht; 0 = aus)
+    CLAU_TG_PROJECT_ROOT="$HOME"  (wo nach Projekten gesucht wird)
 
 Headless / Projekt-Modus:
   clau --headless -p "Prompt"
@@ -2014,6 +2139,31 @@ EOF
   )
 }
 
+choose_tg_brain() {
+  _tg_load
+  echo
+  echo "Concierge-Modell (das 'Hirn' des Bots, läuft über QuiteQue):"
+  echo "  aktuell: ${CLAU_TG_BRAIN_MODEL}  (${CLAU_TG_BRAIN:-1} = 1:an / 0:aus)"
+  echo "  1) gemma-12b-chat    lokal, DE-optimiert, schnell   [Standard]"
+  echo "  2) owl:free          Router, gratis"
+  echo "  3) claude-opus-5     stark, aber teuer fürs Plaudern"
+  echo "  4) eigene Modell-ID eingeben"
+  echo "  5) Concierge AUS (jede Nachricht geht direkt an Claude)"
+  echo "  6) Zurück"
+  printf "Auswahl [1-6, Enter=6]: "
+  read -r b
+  case "${b:-6}" in
+    1) _tg_conf_set CLAU_TG_BRAIN_MODEL "gemma-12b-chat"; _tg_conf_set CLAU_TG_BRAIN "1"; echo "✅ gemma-12b-chat" ;;
+    2) _tg_conf_set CLAU_TG_BRAIN_MODEL "free";           _tg_conf_set CLAU_TG_BRAIN "1"; echo "✅ free (Router)" ;;
+    3) _tg_conf_set CLAU_TG_BRAIN_MODEL "claude-opus-5";  _tg_conf_set CLAU_TG_BRAIN "1"; echo "✅ claude-opus-5" ;;
+    4) printf "Modell-ID (wie auf QuiteQue): "; read -r mid
+       [[ -n "$mid" ]] && { _tg_conf_set CLAU_TG_BRAIN_MODEL "$mid"; _tg_conf_set CLAU_TG_BRAIN "1"; echo "✅ $mid"; } ;;
+    5) _tg_conf_set CLAU_TG_BRAIN "0"; echo "Concierge AUS." ;;
+    6) return ;;
+    *) echo "Ungültige Auswahl." ;;
+  esac
+}
+
 choose_telegram_interactive() {
   while true; do
     _tg_load
@@ -2026,8 +2176,9 @@ choose_telegram_interactive() {
     echo "  3) Meine User-ID anzeigen & Allowlist setzen"
     echo "  4) Testnachricht senden"
     echo "  5) Bot starten – vom Handy entwickeln (Vordergrund, Strg-C beendet)"
-    echo "  6) Zurück"
-    printf "Auswahl [1-6, Enter=6]: "
+    echo "  6) Concierge-Modell  [${CLAU_TG_BRAIN_MODEL:-gemma-12b-chat}, $([[ "${CLAU_TG_BRAIN:-1}" == "1" ]] && echo AN || echo AUS)]"
+    echo "  7) Zurück"
+    printf "Auswahl [1-7, Enter=7]: "
     read -r c
     # Unterfunktionen in Subshell: ihr evtl. 'exit' beendet nur die Subshell, nicht clau
     case "${c:-6}" in
@@ -2036,7 +2187,8 @@ choose_telegram_interactive() {
       3) ( tg_whoami ) || true ;;
       4) ( tg_test )   || true ;;
       5) ( tg_bot )    || true ;;
-      6) return ;;
+      6) ( choose_tg_brain ) || true ;;
+      7) return ;;
       *) echo "Ungültige Auswahl." ;;
     esac
   done
