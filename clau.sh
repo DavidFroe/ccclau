@@ -572,15 +572,37 @@ for cid,(t,ty,forum) in seen.items():
   echo "Test mit:  clau --tg-test"
 }
 
-# clau --tg-whoami : eigene Telegram-User-ID ermitteln (für CLAU_TG_ALLOWED_USER)
+# clau --tg-token : Bot-Token einfach reinpasten, wird geprüft & gespeichert
+tg_token() {
+  _tg_load
+  printf "Bot-Token von @BotFather hier einfügen: "
+  read -r tok
+  tok="$(printf '%s' "$tok" | tr -d '[:space:]')"
+  [[ -n "$tok" ]] || { echo "Kein Token — abgebrochen." >&2; exit 1; }
+  local me
+  me="$(curl -fsS --max-time 10 "https://api.telegram.org/bot${tok}/getMe" 2>/dev/null)"
+  if ! printf '%s' "$me" | grep -q '"ok":true'; then
+    echo "❌ Token ungültig oder kein Netz. Antwort: ${me:-<leer>}" >&2; exit 1
+  fi
+  _tg_conf_set CLAU_TG_BOT_TOKEN "$tok"
+  _tg_conf_set CLAU_TG_ENABLED "1"
+  local uname
+  uname="$(printf '%s' "$me" | python3 -c 'import sys,json
+try: print(json.load(sys.stdin)["result"]["username"])
+except Exception: pass' 2>/dev/null)"
+  echo "✅ Token gespeichert (Bot @${uname:-?}) in $CLAU_TG_CONF."
+  echo "Weiter mit:  clau --tg-setup   (Gruppen-ID ermitteln)"
+}
+
+# clau --tg-whoami : eigene Telegram-User-ID ermitteln & optional als Allowlist speichern
 tg_whoami() {
   _tg_load
-  [[ -n "${CLAU_TG_BOT_TOKEN:-}" ]] || { echo "Erst 'clau --tg-setup'." >&2; exit 1; }
+  [[ -n "${CLAU_TG_BOT_TOKEN:-}" ]] || { echo "Erst 'clau --tg-token'." >&2; exit 1; }
   echo "Schreibe JETZT eine Nachricht in die Gruppe, dann [Enter] ..."
   read -r _
-  local resp
+  local resp out
   resp="$(_tg_api getUpdates)"
-  printf '%s' "$resp" | python3 -c '
+  out="$(printf '%s' "$resp" | python3 -c '
 import sys, json
 try: d = json.load(sys.stdin)
 except Exception: sys.exit(0)
@@ -590,13 +612,25 @@ for u in d.get("result", []):
     fr = m.get("from") or {}
     if fr.get("id"):
         seen[fr["id"]] = fr.get("username") or fr.get("first_name","?")
-if not seen:
-    print("Keine Nachricht gefunden — nochmal schreiben und erneut versuchen.")
 for uid, name in seen.items():
-    print(f"User-ID {uid}  ({name})")
-'
+    print(f"{uid}\t{name}")
+' 2>/dev/null)"
+  if [[ -z "$out" ]]; then
+    echo "Keine Nachricht gefunden — nochmal in die Gruppe schreiben und erneut versuchen." >&2
+    exit 1
+  fi
+  echo "Gefundene Absender:"
+  printf '%s\n' "$out" | while IFS=$'\t' read -r uid name; do printf "  %s  (%s)\n" "$uid" "$name"; done
   echo
-  echo "Trag deine ID in ~/.config/clau/telegram.conf ein:  CLAU_TG_ALLOWED_USER=\"<ID>\""
+  printf "Welche ID als erlaubt speichern (CLAU_TG_ALLOWED_USER)? [ID, mehrere mit Komma, Enter=überspringen]: "
+  read -r pick
+  pick="$(printf '%s' "$pick" | tr -d '[:space:]')"
+  if [[ -n "$pick" ]]; then
+    _tg_conf_set CLAU_TG_ALLOWED_USER "$pick"
+    echo "✅ Gespeichert: CLAU_TG_ALLOWED_USER=\"$pick\""
+  else
+    echo "Übersprungen. Später: CLAU_TG_ALLOWED_USER in $CLAU_TG_CONF eintragen."
+  fi
 }
 
 # ── Telegram Phase 2: Bot-Poller (vom Handy entwickeln) ─────────────────────
@@ -1086,6 +1120,7 @@ Verwendung (interaktiv):
   clau --self-update              Aktualisiert clau auf die neueste Version aus dem Git-Repo
 
 Telegram / Handy:
+  clau --tg-token                 Bot-Token reinpasten (wird geprüft & gespeichert)
   clau --tg-setup                 Ermittelt & speichert die Gruppen-ID (Bot muss in der Gruppe sein)
   clau --tg-test                  Sendet eine Testnachricht in die Gruppe
   clau --tg-whoami                Zeigt deine Telegram-User-ID (für CLAU_TG_ALLOWED_USER)
@@ -1959,6 +1994,34 @@ EOF
   )
 }
 
+choose_telegram_interactive() {
+  while true; do
+    _tg_load
+    local st="AUS / unvollständig"
+    _tg_ready && st="AN (Gruppe ${CLAU_TG_GROUP_ID})"
+    echo
+    echo "Telegram / Handy   [Status: $st]"
+    echo "  1) Bot-Token eingeben (einfach reinpasten)"
+    echo "  2) Gruppe verbinden (Gruppen-ID ermitteln)"
+    echo "  3) Meine User-ID anzeigen & Allowlist setzen"
+    echo "  4) Testnachricht senden"
+    echo "  5) Bot starten – vom Handy entwickeln (Vordergrund, Strg-C beendet)"
+    echo "  6) Zurück"
+    printf "Auswahl [1-6, Enter=6]: "
+    read -r c
+    # Unterfunktionen in Subshell: ihr evtl. 'exit' beendet nur die Subshell, nicht clau
+    case "${c:-6}" in
+      1) ( tg_token )  || true ;;
+      2) ( tg_setup )  || true ;;
+      3) ( tg_whoami ) || true ;;
+      4) ( tg_test )   || true ;;
+      5) ( tg_bot )    || true ;;
+      6) return ;;
+      *) echo "Ungültige Auswahl." ;;
+    esac
+  done
+}
+
 interactive_start() {
   ensure_model
 
@@ -1978,7 +2041,8 @@ interactive_start() {
   echo "  3) Modell wechseln"
   echo "  4) Bot-Einstellungen"
   echo "  5) Session komprimieren (custom-compact via QuiteQue)"
-  printf "Auswahl [1-5, Enter=2]: "
+  echo "  6) Telegram / Handy"
+  printf "Auswahl [1-6, Enter=2]: "
   read -r start_choice
 
   case "${start_choice:-2}" in
@@ -1987,6 +2051,7 @@ interactive_start() {
     3) choose_model_interactive; interactive_start ;;
     4) choose_bot_settings; interactive_start ;;
     5) run_compact ;;
+    6) choose_telegram_interactive; interactive_start ;;
     *) echo "Ungültige Auswahl."; exit 1 ;;
   esac
 }
@@ -2235,6 +2300,10 @@ parse_args() {
         ACTION="compact"
         shift
         ;;
+      --tg-token)
+        ACTION="tg-token"
+        shift
+        ;;
       --tg-setup)
         ACTION="tg-setup"
         shift
@@ -2350,7 +2419,7 @@ fi
 
 # Update-Check nur für interaktive Läufe (nicht headless/CI/tg)
 case "${ACTION}" in
-  tg-setup|tg-test|tg-whoami|tg-bot) : ;;
+  tg-token|tg-setup|tg-test|tg-whoami|tg-bot) : ;;
   *) [[ "${HEADLESS:-0}" -eq 1 ]] || check_for_updates ;;
 esac
 
@@ -2365,6 +2434,9 @@ case "${ACTION}" in
     ;;
   compact)
     run_compact
+    ;;
+  tg-token)
+    tg_token
     ;;
   tg-setup)
     tg_setup
