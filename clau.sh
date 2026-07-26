@@ -711,7 +711,8 @@ for u in d.get("result", []):
     while IFS=$'\t' read -r uid cid th fr txt; do
       [[ -n "$uid" ]] && offset=$((uid + 1))
       [[ "$cid" == "${CLAU_TG_GROUP_ID}" ]] || continue
-      if [[ -n "$allowed" && "$fr" != "$allowed" ]]; then
+      # Allowlist: eine oder mehrere IDs (kommagetrennt)
+      if [[ -n "$allowed" && ",${allowed//[[:space:]]/}," != *",${fr},"* ]]; then
         _tg_send "$th" "⛔ Nicht autorisiert (User $fr)."; continue
       fi
       [[ -n "$txt" ]] || continue
