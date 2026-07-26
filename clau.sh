@@ -83,7 +83,6 @@ owl_context_window() {
 # ── Effective Context Window (alle Modell-Typen) ─────────────────────────────
 # Gibt das Context-Window für ein beliebiges Modell zurück.
 # owl:X → OWL_CONTEXT_WINDOWS lookup
-# aider:X → OWL_CONTEXT_WINDOWS lookup (gleiche IDs)
 # Claude-Modelle → bekannte Werte
 # Gibt leer zurück, wenn nicht gefunden.
 effective_context_window() {
@@ -94,19 +93,17 @@ effective_context_window() {
 
   if [[ "$model" == owl:* ]]; then
     owl_id="${model#owl:}"
-  elif [[ "$model" == aider:* ]]; then
-    owl_id="${model#aider:}"
   elif [[ "$model" == "haiku" || "$model" == "claude-haiku"* ]]; then
     echo "200000"
     return
   elif [[ "$model" == "sonnet" || "$model" == "claude-sonnet"* ]]; then
-    echo "200000"
+    echo "1000000"   # Sonnet 5: 1M Kontext
     return
   elif [[ "$model" == "opus" || "$model" == "claude-opus"* ]]; then
-    echo "200000"
+    echo "1000000"   # Opus 5: 1M Kontext
     return
   elif [[ "$model" == "fable" || "$model" == "claude-fable"* ]]; then
-    echo "200000"
+    echo "1000000"   # Fable 5: 1M Kontext
     return
   fi
 
@@ -175,8 +172,6 @@ apply_timeout_for_model() {
   local owl_id=""
   if [[ "$model" == owl:* ]]; then
     owl_id="${model#owl:}"
-  elif [[ "$model" == aider:* ]]; then
-    owl_id="${model#aider:}"
   fi
 
   if [[ -n "$owl_id" ]]; then
@@ -330,79 +325,6 @@ _kill_owl_proxy() {
   printf '\e[?1000l\e[?1002l\e[?1003l\e[?1004l\e[?1006l\e[?1015l\e[?1016l' > /dev/tty 2>/dev/null || true
 }
 
-# ── Aider-Integration ─────────────────────────────────────────────────────────
-
-is_aider_model() {
-  [[ "${1:-}" == aider:* ]]
-}
-
-aider_model_id() {
-  echo "${1#aider:}"
-}
-
-_find_aider() {
-  # Nur workspace-lokal — kein globales Fallback
-  [[ -x "./aider/bin/aider" ]] && { echo "./aider/bin/aider"; return 0; }
-  return 1
-}
-
-_install_aider_local() {
-  echo "Aider: kein Binary gefunden — installiere lokal in ${PWD}/aider/ ..." >&2
-  if ! command -v python3 &>/dev/null; then
-    echo "Fehler: python3 nicht gefunden" >&2; return 1
-  fi
-  python3 -m venv "./aider" >&2
-  "./aider/bin/pip" install --upgrade aider-chat >&2
-  # aider/ in .gitignore eintragen wenn noch nicht drin
-  if [[ -f ".gitignore" ]] && ! grep -qE "^/?aider/?$" ".gitignore" 2>/dev/null; then
-    echo "/aider" >> ".gitignore"
-  fi
-  echo "./aider/bin/aider"
-}
-
-run_aider() {
-  local owl_id="$1"
-  shift
-  local aider_bin
-  if ! aider_bin="$(_find_aider)"; then
-    aider_bin="$(_install_aider_local)" || exit 1
-  fi
-  # Aider braucht git-getrackte Dateien für die Repo-Map
-  if git rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
-    local tracked; tracked=$(git ls-files | wc -l)
-    if [[ "$tracked" -eq 0 ]]; then
-      echo "Aider: git repo hat 0 getrackte Dateien — führe 'git add .' aus..."
-      git add .
-    fi
-  fi
-  local extra=()
-  [[ "${INTERACTION_LEVEL:-2}" -eq 0 ]] && extra+=(--yes)
-  "$aider_bin" \
-    --openai-api-base "${OWL_BASE_URL}/v1" \
-    --openai-api-key dummy \
-    --model "openai/${owl_id}" \
-    --no-show-model-warnings \
-    --edit-format diff \
-    "${extra[@]}" "$@"
-}
-
-run_aider_headless() {
-  local owl_id="$1"
-  local prompt="$2"
-  local aider_bin
-  if ! aider_bin="$(_find_aider)"; then
-    aider_bin="$(_install_aider_local)" || exit 1
-  fi
-  "$aider_bin" \
-    --openai-api-base "${OWL_BASE_URL}/v1" \
-    --openai-api-key dummy \
-    --model "openai/${owl_id}" \
-    --no-show-model-warnings \
-    --edit-format diff \
-    --yes \
-    --message "$prompt"
-}
-
 # claude über owlAPI-Proxy starten (interaktiv)
 run_owl_via_claude() {
   local owl_id="$1"
@@ -552,9 +474,9 @@ load_config() {
     # shellcheck disable=SC1090
     source "./$CONFIG_FILE"
   fi
-  : "${CLAU_MODEL:=aider:120}"
+  : "${CLAU_MODEL:=sonnet}"
   : "${CLAU_SESSION_ID:=}"
-  : "${CLAU_INTERACTION_LEVEL:=2}"
+  : "${CLAU_INTERACTION_LEVEL:=0}"
   : "${CLAU_EFFORT:=}"
   : "${CLAU_SESSION_NAME:=}"
   : "${CLAU_AUTO_COMPACT_ENABLED:=1}"
@@ -777,7 +699,7 @@ Headless-Optionen:
   --headless                      Claude im print/headless mode (nicht interaktiv)
   -p, --prompt TEXT               Prompt-Text für headless mode (erforderlich bei --headless)
   -f, --folder PATH               Zielverzeichnis für --new
-  -m, --mdl MODEL                 Modell: haiku | sonnet | opus | fable | owl:<ID> | aider:<ID>
+  -m, --mdl MODEL                 Modell: haiku | sonnet | opus | fable | owl:<ID>
       --effort LEVEL              low | medium | high | max
       --max-turns N               Max. agentische Schritte
       --max-budget-usd USD        Kostenlimit
@@ -796,10 +718,9 @@ Git-Helfer (Repo aus GitHub via SSH):
   clau --git-down NAME            Klont git@github.com:DavidFroe/NAME.git ins aktuelle Verzeichnis
 
 Model-Mappings:
-  Claude Code (agentisch):  1=haiku  2=sonnet  3=opus  4=fable
+  Claude Code (agentisch):  1=haiku(4.5)  2=sonnet(5)  3=opus(5)  4=fable(5)
   owlAPI (lokal/gratis):    5=owl:120  6=owl:243  7=owl:113(Grok)  8=owl:38(QwQ)  9=owl:316  0=owl:free
   owlAPI (günstig/stark):   a=owl:35  b=owl:350  c=owl:503  d=owl:21  e=owl:84  ee=owl:501
-  Aider (Editor-Modus):     f=aider:120  g=aider:350  i=aider:502(GemFlash)  j=aider:84(GPT-5)  k=aider:351(MiniMax)
   owlAPI direkt:            --model owl:35  oder  -m 350
 
 Token-Optimierung (in .clau.conf konfigurierbar):
@@ -812,8 +733,6 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_TIMEOUT_MAX="7200000"         Max Bash-Timeout in ms (120 Min = 7200000)
   CLAU_UPDATE_CHECK="1"              Beim Start gegen GitHub auf Updates prüfen (0 = aus)
   CLAU_UPDATE_CHECK_INTERVAL="86400" Prüf-Intervall in Sekunden (Default 1×/Tag)
-
-Aider direkt:             --model aider:120  oder  -m aider:243
 HELP_EOF
 }
 
@@ -829,10 +748,8 @@ model_from_number() {
     8) CLAU_MODEL="owl:38" ;;    # QwQ-Plus gratis
     9) CLAU_MODEL="owl:316" ;;   # Qwen3-Coder OR gratis
     0) CLAU_MODEL="owl:free" ;;  # free Router gratis
-    f) CLAU_MODEL="aider:120" ;; # Aider + PropellerA-27B
-    g) CLAU_MODEL="aider:350" ;; # Aider + DeepSeek-V4-Pro
     *)
-      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5-9/0/f-g=owlAPI/Aider)" >&2
+      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5-9/0=owlAPI)" >&2
       exit 1
       ;;
   esac
@@ -846,15 +763,12 @@ normalize_model_name() {
     owl:*)
       CLI_MODEL_OVERRIDE="$1"
       ;;
-    aider:*)
-      CLI_MODEL_OVERRIDE="$1"
-      ;;
     *)
       # Bare Zahl oder ID → als owl-Modell interpretieren
       if [[ "$1" =~ ^[0-9]+$ ]] || [[ "$1" =~ ^[a-z] ]]; then
         CLI_MODEL_OVERRIDE="owl:$1"
       else
-        echo "Ungültiges Modell: $1 (erlaubt: haiku|sonnet|opus oder owl:<ID>)" >&2
+        echo "Ungültiges Modell: $1 (erlaubt: haiku|sonnet|opus|fable oder owl:<ID>)" >&2
         exit 1
       fi
       ;;
@@ -871,11 +785,16 @@ effective_model() {
   fi
 }
 
-# Übersetzt den internen Claude-Modell-Kurznamen in den Namen, den die claude-CLI
-# erwartet. haiku/sonnet/opus sind gültige CLI-Aliase; fable braucht die volle ID.
+# Übersetzt den internen Claude-Modell-Kurznamen in die volle Modell-ID, die die
+# claude-CLI erwartet. Explizit gepinnt auf die aktuelle Generation (Stand 2026-07):
+#   haiku=Haiku 4.5, sonnet=Sonnet 5, opus=Opus 5, fable=Fable 5.
+# Bei neuer Generation hier einmalig aktualisieren.
 claude_cli_model() {
   case "${1:-}" in
-    fable) echo "claude-fable-5" ;;
+    haiku)  echo "claude-haiku-4-5" ;;
+    sonnet) echo "claude-sonnet-5" ;;
+    opus)   echo "claude-opus-5" ;;
+    fable)  echo "claude-fable-5" ;;
     *) echo "$1" ;;
   esac
 }
@@ -885,8 +804,6 @@ show_current() {
   local backend="Claude Code (agentisch)"
   if is_owl_model "${CLAU_MODEL:-}"; then
     backend="owlAPI Chat (${OWL_BASE_URL}, Modell $(owl_model_id "${CLAU_MODEL}"))"
-  elif is_aider_model "${CLAU_MODEL:-}"; then
-    backend="Aider direkt (${OWL_BASE_URL}/v1, Modell $(aider_model_id "${CLAU_MODEL}"))"
   fi
   echo "Aktuelles Verzeichnis : $(pwd)"
   echo "Konfiguriertes Modell : $mdl"
@@ -905,8 +822,7 @@ show_current() {
   echo "Artifacts deaktiviert : ${CLAU_DISABLE_ARTIFACT:-0}"
   echo "Agent-View deaktiviert: ${CLAU_DISABLE_AGENT_VIEW:-0}"
   local owl_id_for_preset=""
-  if [[ "${CLAU_MODEL:-}" == owl:* ]]; then owl_id_for_preset="${CLAU_MODEL#owl:}"
-  elif [[ "${CLAU_MODEL:-}" == aider:* ]]; then owl_id_for_preset="${CLAU_MODEL#aider:}"; fi
+  if [[ "${CLAU_MODEL:-}" == owl:* ]]; then owl_id_for_preset="${CLAU_MODEL#owl:}"; fi
   local preset_d="${TIMEOUT_PRESET_DEFAULT[$owl_id_for_preset]:-}"
   local preset_m="${TIMEOUT_PRESET_MAX[$owl_id_for_preset]:-}"
   local preset_indicator=""
@@ -924,10 +840,10 @@ choose_model_interactive() {
     echo
     echo "Modell wählen:"
     echo "  --- Standard Claude (agentisch, Datei-Editing + Shell) ---"
-    echo "  1) haiku              schnell, günstig"
-    echo "  2) sonnet             Standard                    [Enter]"
-    echo "  3) opus               stärker, teurer"
-    echo "  4) fable              neu, agentisch"
+    echo "  1) haiku              Haiku 4.5   schnell, günstig"
+    echo "  2) sonnet             Sonnet 5    Standard         [Enter]"
+    echo "  3) opus               Opus 5      stärker, teurer"
+    echo "  4) fable              Fable 5     stärkstes Modell"
     echo "  --- LiteLLM Modelle (via Proxy, ${OWL_BASE_URL}) ---"
     echo "  5) PropellerA-27B  lokal   tools+vision  GRATIS"
     echo "  6) Qwopus-9B       lokal   tools schnell GRATIS"
@@ -942,15 +858,7 @@ choose_model_interactive() {
     echo "  e) GPT-5           OAI     tools         \$1.25/\$10.00"
     echo "  ee) Gemini-2.5-Pro Goog    tools         \$1.25/\$10.00"
     echo "  o) LiteLLM ID direkt"
-    echo "  --- Aider Modelle (Editor-Modus, direkt OpenAI-Format) ---"
-    echo "  f) PropellerA-27B  lokal   GRATIS"
-    echo "  g) DeepSeek V4 Pro cloud   \$0.44/\$0.87"
-    echo "  h) free (Router)           GRATIS"
-    echo "  i) Gemini 2.5 Flash cloud  \$0.30/\$2.50"
-    echo "  j) GPT-5           OAI     \$1.25/\$10.00"
-    echo "  k) MiniMax M3      cloud   1M ctx"
-    echo "  p) Aider ID direkt"
-    printf "Auswahl [0-9, a-ee, f-k, o, p, Enter=2]: "
+    printf "Auswahl [0-9, a-ee, o, Enter=2]: "
     read -r choice
 
     case "${choice:-2}" in
@@ -970,26 +878,11 @@ choose_model_interactive() {
       d|D) CLAU_MODEL="owl:21"; break ;;
       e|E) CLAU_MODEL="owl:84"; break ;;
       ee|EE) CLAU_MODEL="owl:501"; break ;;
-      f|F) CLAU_MODEL="aider:120"; break ;;
-      g|G) CLAU_MODEL="aider:350"; break ;;
-      h|H) CLAU_MODEL="aider:free"; break ;;
-      i|I) CLAU_MODEL="aider:502"; break ;;
-      j|J) CLAU_MODEL="aider:84"; break ;;
-      k|K) CLAU_MODEL="aider:351"; break ;;
       o|O)
         printf "LiteLLM/owlAPI Modell-ID: "
         read -r tmp_id
         if [[ -n "$tmp_id" ]]; then
           CLAU_MODEL="owl:${tmp_id}"
-          break
-        fi
-        echo "Abgebrochen."
-        ;;
-      p|P)
-        printf "Aider Modell-ID: "
-        read -r tmp_id
-        if [[ -n "$tmp_id" ]]; then
-          CLAU_MODEL="aider:${tmp_id}"
           break
         fi
         echo "Abgebrochen."
@@ -1023,12 +916,12 @@ choose_interaction_interactive() {
   while true; do
     echo
     echo "Autonomie-Level wählen:"
-    echo "  0) Vollautomatisch – keine Nachfragen, alle Rechte, läuft stundenlang durch"
+    echo "  0) Vollautomatisch – keine Nachfragen, alle Rechte, läuft stundenlang durch  [Enter]"
     echo "  1) Halbautomatisch – fragt nur bei wesentlichen Dingen (Shellbefehle etc.)"
     echo "  2) Standard        – fragt bei Planung & architektonischen Änderungen"
-    printf "Auswahl [0-2, Enter=2]: "
+    printf "Auswahl [0-2, Enter=0]: "
     read -r choice
-    case "${choice:-2}" in
+    case "${choice:-0}" in
       0) CLAU_INTERACTION_LEVEL=0; INTERACTION_LEVEL=0; break ;;
       1) CLAU_INTERACTION_LEVEL=1; INTERACTION_LEVEL=1; break ;;
       2) CLAU_INTERACTION_LEVEL=2; INTERACTION_LEVEL=2; break ;;
@@ -1129,8 +1022,6 @@ choose_timeout_settings() {
     local owl_id=""
     if [[ "$mdl" == owl:* ]]; then
       owl_id="${mdl#owl:}"
-    elif [[ "$mdl" == aider:* ]]; then
-      owl_id="${mdl#aider:}"
     fi
 
     local preset_default="${TIMEOUT_PRESET_DEFAULT[$owl_id]:-}"
@@ -1419,10 +1310,6 @@ run_resume_picker() {
     run_owl_via_claude "$(owl_model_id "$mdl")" --resume
     return
   fi
-  if is_aider_model "$mdl"; then
-    run_aider "$(aider_model_id "$mdl")"
-    return
-  fi
   echo "Öffne Session-Auswahl (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   cleanup_tool_blocking
   unset_token_saver_env
@@ -1440,10 +1327,6 @@ run_saved_session() {
   fi
   if is_owl_model "$mdl"; then
     run_owl_via_claude "$(owl_model_id "$mdl")"
-    return
-  fi
-  if is_aider_model "$mdl"; then
-    run_aider "$(aider_model_id "$mdl")"
     return
   fi
   echo "Starte feste Session $CLAU_SESSION_ID (Modell: $mdl, Autonomie: $(interaction_label)) ..."
@@ -1465,10 +1348,6 @@ run_new_session() {
     run_owl_via_claude "$(owl_model_id "$mdl")" --force-context
     return
   fi
-  if is_aider_model "$mdl"; then
-    run_aider "$(aider_model_id "$mdl")"
-    return
-  fi
   echo "Starte neue Session (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   cleanup_tool_blocking
   unset_token_saver_env
@@ -1488,10 +1367,6 @@ run_resume_id() {
   if is_owl_model "$mdl"; then
     run_owl_via_claude "$(owl_model_id "$mdl")" --resume "$rid"
     return
-  fi
-  if is_aider_model "$mdl"; then
-    echo "Aider kann keine Claude-Session fortsetzen. Wähle ein Claude- oder owl-Modell." >&2
-    exit 1
   fi
   echo "Setze Session $rid fort (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   cleanup_tool_blocking
@@ -1599,14 +1474,6 @@ run_headless_here() {
     run_owl_headless_via_claude "$(owl_model_id "$mdl")" "$PROMPT_TEXT"
     return
   fi
-  if is_aider_model "$mdl"; then
-    if [[ -z "${PROMPT_TEXT:-}" ]]; then
-      echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
-      exit 1
-    fi
-    run_aider_headless "$(aider_model_id "$mdl")" "$PROMPT_TEXT"
-    return
-  fi
   build_headless_cmd
   echo "Starte headless im Verzeichnis: $(pwd)"
   exec "${CLAUDE_CMD[@]}"
@@ -1622,14 +1489,6 @@ run_headless_in_dir() {
       exit 1
     fi
     (cd "$dir"; run_owl_headless_via_claude "$(owl_model_id "$mdl")" "$PROMPT_TEXT")
-    return
-  fi
-  if is_aider_model "$mdl"; then
-    if [[ -z "${PROMPT_TEXT:-}" ]]; then
-      echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
-      exit 1
-    fi
-    (cd "$dir"; run_aider_headless "$(aider_model_id "$mdl")" "$PROMPT_TEXT")
     return
   fi
   echo "Projektverzeichnis bereit für headless: $dir"
@@ -1656,10 +1515,10 @@ run_new_project_interactive() {
       while true; do
         echo
         echo "Bitte Modell wählen:"
-        echo "  1) haiku   - schnell, günstig"
-        echo "  2) sonnet  - Standard"
-        echo "  3) opus    - stärker, teurer"
-        echo "  4) fable   - neu, agentisch"
+        echo "  1) haiku   Haiku 4.5   schnell, günstig"
+        echo "  2) sonnet  Sonnet 5    Standard"
+        echo "  3) opus    Opus 5      stärker, teurer"
+        echo "  4) fable   Fable 5     stärkstes Modell"
         printf "Auswahl [1-4, Enter=2]: "
         read -r choice
         case "${choice:-2}" in
@@ -1673,11 +1532,11 @@ run_new_project_interactive() {
       cat > "$CONFIG_FILE" <<EOF
 CLAU_MODEL="${CLAU_MODEL}"
 CLAU_SESSION_ID=""
-CLAU_INTERACTION_LEVEL="${CLAU_INTERACTION_LEVEL:-2}"
+CLAU_INTERACTION_LEVEL="${CLAU_INTERACTION_LEVEL:-0}"
 EOF
     fi
     echo "Starte neue Session im Projekt mit Modell ${CLAU_MODEL} ..."
-    if ! is_owl_model "${CLAU_MODEL}" && ! is_aider_model "${CLAU_MODEL}"; then
+    if ! is_owl_model "${CLAU_MODEL}"; then
       cleanup_tool_blocking
       unset_token_saver_env
     fi
@@ -1690,9 +1549,7 @@ interactive_start() {
 
   local mdl; mdl="$(effective_model)"
   local tag
-  if is_aider_model "$mdl"; then
-    tag="Aider:$(aider_model_id "$mdl")"
-  elif is_owl_model "$mdl"; then
+  if is_owl_model "$mdl"; then
     tag="LiteLLM:$(owl_model_id "$mdl")"
   else
     tag="Claude:$mdl"
@@ -1909,7 +1766,7 @@ parse_args() {
         ;;
       -m|--mdl)
         if [[ -z "${2:-}" ]]; then
-          echo "-m/--mdl erwartet ein Modell: haiku|sonnet|opus|fable|owl:<ID>|aider:<ID>" >&2
+          echo "-m/--mdl erwartet ein Modell: haiku|sonnet|opus|fable|owl:<ID>" >&2
           exit 1
         fi
         normalize_model_name "$2"

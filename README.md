@@ -1,16 +1,16 @@
 # ccclau
 
-Wrapper für Claude Code, Aider und eigene Modelle via QuiteQue.
+Wrapper für Claude Code und eigene Modelle via QuiteQue (opencode wird mitinstalliert).
 
 ## Features
 
 - **Modell pro Projektordner** in `.clau.conf` speichern
 - **Session-Auswahl** beim Start (Resume-Picker, neue Session, feste Session-ID)
-- **Drei Backends**:
-  - **Claude Code** (agentisch) — `haiku`, `sonnet`, `opus`, `fable`
+- **Zwei Backends**:
+  - **Claude Code** (agentisch) — `haiku` (4.5), `sonnet` (5), `opus` (5), `fable` (5)
   - **QuiteQue** (lokale/cloud-Modelle) — `owl:<ID>` (z.B. `owl:120` = PropellerA)
-  - **Aider** (Editor-Modus) — `aider:<ID>` (workspace-lokales venv, Auto-Install)
-- **opencode** wird beim `--install` automatisch mitinstalliert (spricht QuiteQue direkt im OpenAI-Format)
+- **Standard**: Modell `sonnet` (Sonnet 5), Autonomie-Level `0` (vollautomatisch/durchlaufen)
+- **opencode** wird beim `--install` automatisch mitinstalliert (eigenständiges Tool, spricht QuiteQue direkt im OpenAI-Format)
 - **Pre-Flight-Check**: Session-Größe vs. Modell-Context-Window vor Start
 - **Auto-Compact**: Konfigurierbarer Threshold (Prozent oder festes Token-Limit)
 - **Token-Optimierung**: Tools deaktivieren, Artifacts/Agent View ausschalten
@@ -51,9 +51,9 @@ clau --new                    # Neue Session
 clau --list                   # Resume-Picker
 clau --resume ID              # Bestimmte Session fortsetzen (ohne ID = Picker)
 clau --compact                # Session extern komprimieren (QuiteQue) + fortsetzen
-clau -m fable                 # Mit Claude Fable starten
-clau -m owl:120               # Mit eigenem Modell starten
-clau -m aider:120             # Mit Aider + PropellerA starten
+clau -m fable                 # Mit Claude Fable 5 starten
+clau -m opus                  # Mit Claude Opus 5 starten
+clau -m owl:120               # Mit eigenem Modell (QuiteQue) starten
 clau --headless -p "Prompt"   # Headless-Modus
 clau --current                # Aktuelle Config anzeigen
 clau --git-up                 # Commit & Push
@@ -64,13 +64,12 @@ clau --git-down               # Pull von origin
 
 | Taste | Backend | Modell |
 |-------|---------|--------|
-| 1-4 | Claude | haiku / sonnet / opus / fable |
+| 1-4 | Claude | haiku (4.5) / sonnet (5) / opus (5) / fable (5) |
 | 5 | QuiteQue | PropellerA-27B (lokal, gratis) |
 | 6 | QuiteQue | Qwopus-9B (lokal, gratis) |
 | 7-9 | QuiteQue | Grok, QwQ, Qwen3-Coder |
 | 0 | QuiteQue | free (Router) |
 | a-ee | QuiteQue | Qwen-Flash, DeepSeek V4, Gemini, Claude, GPT-5, Gemini-2.5-Pro |
-| f-k | Aider | PropellerA, DeepSeek, Gemini Flash, GPT-5, MiniMax |
 
 ## Custom Compact
 
