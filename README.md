@@ -195,9 +195,16 @@ Bot-Befehle im Topic:
 | Befehl | Wirkung |
 |--------|---------|
 | `/cd <pfad>` | Projektordner für dieses Topic setzen (neue Session) |
+| `/weiter` | die zuletzt am PC gelaufene Session in diesem Ordner **übernehmen** |
 | `/pwd` | aktuellen Ordner zeigen |
 | `/new` | Session zurücksetzen (frischer Kontext) |
 | *(Text)* | Anweisung an Claude im gesetzten Ordner |
+
+**Am PC anfangen, auf dem Handy weiter:** clau merkt sich bei jeder PC-Session
+(über die Hooks) die Session-ID pro Ordner. Unterwegs im Topic `/cd <ordner>` →
+`/weiter` → der Bot setzt **genau deine PC-Unterhaltung** fort (via `claude --resume`).
+Wichtig: die PC-Session vorher beenden (nicht zwei Prozesse gleichzeitig auf einer
+Session).
 
 Als systemd-User-Service (läuft nach Reboot automatisch):
 

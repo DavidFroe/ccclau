@@ -445,6 +445,12 @@ print("MSG=" + msg)
   done <<< "$parsed"
   [[ -n "$SID" ]] || exit 0
 
+  # PC-Session pro Ordner merken → Handy kann sie per /weiter übernehmen
+  if [[ -n "$CWD" ]]; then
+    mkdir -p "$CLAU_TG_STATE_DIR" 2>/dev/null || true
+    printf '%s' "$SID" > "${CLAU_TG_STATE_DIR}/lastpc-$(printf '%s' "$CWD" | tr -c 'A-Za-z0-9' '_')" 2>/dev/null || true
+  fi
+
   local key text
   case "$EV" in
     Notification) key="notification"; text="❓ ${MSG:-Claude braucht deine Eingabe}" ;;
@@ -695,13 +701,27 @@ _tg_bot_handle() {
 
   case "$txt" in
     /help*|/start*)
-      _tg_send "$th" $'clau-Bot Befehle:\n/cd <pfad>  – Projektordner für dieses Topic setzen\n/pwd        – aktuellen Ordner zeigen\n/new        – neue Session (Kontext zurücksetzen)\nsonst: Text = Anweisung an Claude (im gesetzten Ordner)'
+      _tg_send "$th" $'clau-Bot Befehle:\n/cd <pfad>  – Projektordner für dieses Topic setzen\n/weiter     – die zuletzt am PC gelaufene Session in diesem Ordner übernehmen\n/pwd        – aktuellen Ordner zeigen\n/new        – neue Session (Kontext zurücksetzen)\nsonst: Text = Anweisung an Claude (im gesetzten Ordner)'
       return ;;
     "/cd "*|"/dir "*)
       local p="${txt#* }"; p="${p/#\~/$HOME}"
       [[ -d "$p" ]] || { _tg_send "$th" "❌ Ordner nicht gefunden: $p"; return; }
+      p="$(cd "$p" 2>/dev/null && pwd)"   # kanonischer absoluter Pfad (matcht PC-Hook)
       _tg_bind_set "$th" DIR "$p"; _tg_bind_set "$th" SID ""
-      _tg_send "$th" "📁 Ordner gesetzt: $p (neue Session)"; return ;;
+      local pchint=""
+      [[ -s "${CLAU_TG_STATE_DIR}/lastpc-$(printf '%s' "$p" | tr -c 'A-Za-z0-9' '_')" ]] && pchint=$'\n▶️ Es gibt eine PC-Session hier — /weiter zum Übernehmen.'
+      _tg_send "$th" "📁 Ordner gesetzt: $p (neue Session)${pchint}"; return ;;
+    /weiter*|/pc*)
+      [[ -n "$DIR" ]] || { _tg_send "$th" "❌ Erst /cd /pfad setzen."; return; }
+      local pcf="${CLAU_TG_STATE_DIR}/lastpc-$(printf '%s' "$DIR" | tr -c 'A-Za-z0-9' '_')"
+      if [[ -s "$pcf" ]]; then
+        local pcsid; pcsid="$(cat "$pcf")"
+        _tg_bind_set "$th" SID "$pcsid"
+        _tg_send "$th" "▶️ PC-Session übernommen ($pcsid). Schreib einfach weiter. (PC-Session vorher beenden!)"
+      else
+        _tg_send "$th" "Keine PC-Session für $DIR gefunden. Arbeite erst am PC oder nutze /new."
+      fi
+      return ;;
     /pwd*)
       _tg_send "$th" "📁 ${DIR:-<nicht gesetzt – erst /cd /pfad>}"; return ;;
     /new*)
