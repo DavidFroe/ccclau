@@ -171,8 +171,15 @@ CLAU_TG_EVENTS="notification,stop,sessionend"    # welche Events melden
 ```
 
 Die Benachrichtigung läuft über Claude-Code-Hooks (`Notification`/`Stop`/`SessionEnd`),
-die clau beim Session-Start in `.claude/settings.json` einträgt. Ist Telegram nicht
-konfiguriert, passiert nichts (stiller No-Op). Token geleakt? → @BotFather `/revoke`.
+die clau in die **globalen** User-Settings `~/.claude/settings.json` einträgt. Global
+statt pro Projekt, damit es auch in Ordnern ohne Schreibrecht funktioniert (z.B. in
+einem fremden Home) — und damit jede Claude-Session meldet, nicht nur die per clau
+gestartete. Wieder loswerden: `clau --tg-hooks-off`. Ist Telegram nicht konfiguriert,
+passiert nichts (stiller No-Op). Token geleakt? → @BotFather `/revoke`.
+
+**Ordner ohne Schreibrecht:** Kann clau die `.clau.conf` im Projektordner nicht
+anlegen, merkt es die Einstellungen stattdessen unter
+`~/.config/clau/dirs/<pfad>.conf` — Modell/Autonomie bleiben also auch dort erhalten.
 
 ### Vom Handy entwickeln (`clau --tg-bot`)
 

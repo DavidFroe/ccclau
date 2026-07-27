@@ -473,13 +473,15 @@ print("MSG=" + msg)
   exit 0
 }
 
-# Schreibt die Telegram-Hooks in .claude/settings.json (idempotent)
+# Schreibt die Telegram-Hooks in die GLOBALEN User-Settings (~/.claude/settings.json).
+# Global statt pro Projekt: funktioniert dann auch in Ordnern ohne Schreibrecht
+# (z.B. fremdes Home) und muss nicht in jedem Projekt neu angelegt werden.
 apply_tg_hooks() {
   _tg_ready || return 0
-  _claude_dir_writable || return 0
-  local sf=".claude/settings.json"
-  mkdir -p .claude 2>/dev/null || return 0
+  local sf="${HOME}/.claude/settings.json"
+  mkdir -p "${HOME}/.claude" 2>/dev/null || return 0
   [[ -f "$sf" ]] || echo '{}' > "$sf" 2>/dev/null || return 0
+  [[ -w "$sf" ]] || return 0
   local cmd; cmd="$(command -v clau 2>/dev/null || echo clau) --tg-hook"
   python3 - "$sf" "$cmd" <<'PY' 2>/dev/null || true
 import sys, json
@@ -497,6 +499,33 @@ def ensure(evt):
 for e in ("Notification", "Stop", "SessionEnd"):
     ensure(e)
 json.dump(s, open(f, "w"), indent=2)
+PY
+}
+
+# clau --tg-hooks-off : entfernt die globalen clau-Telegram-Hooks wieder
+tg_hooks_off() {
+  local sf="${HOME}/.claude/settings.json"
+  [[ -f "$sf" ]] || { echo "Keine globalen Settings ($sf) — nichts zu tun."; return 0; }
+  python3 - "$sf" <<'PY' || { echo "Konnte $sf nicht ändern." >&2; exit 1; }
+import sys, json
+f = sys.argv[1]
+try: s = json.load(open(f))
+except Exception: sys.exit(1)
+hooks = s.get("hooks", {})
+removed = 0
+for evt in list(hooks):
+    keep = []
+    for grp in hooks[evt]:
+        hs = [h for h in grp.get("hooks", [])
+              if not str(h.get("command", "")).endswith("--tg-hook")]
+        removed += len(grp.get("hooks", [])) - len(hs)
+        if hs:
+            grp["hooks"] = hs; keep.append(grp)
+    if keep: hooks[evt] = keep
+    else: del hooks[evt]
+if not hooks: s.pop("hooks", None)
+json.dump(s, open(f, "w"), indent=2)
+print(f"{removed} clau-Hook(s) entfernt aus {f}")
 PY
 }
 
@@ -1040,12 +1069,23 @@ INTERACTION_LEVEL=""  # wird aus Config geladen; CLI --interaction überschreibt
 GIT_ACTION=""
 GIT_REPO_NAME=""
 
+# Ausweich-Ablage für Ordner ohne Schreibrecht: pro Verzeichnis eine Datei im Home.
+_conf_fallback_file() {
+  local d="${XDG_CONFIG_HOME:-$HOME/.config}/clau/dirs"
+  echo "${d}/$(pwd | tr -c 'A-Za-z0-9' '_').conf"
+}
+
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then
     # ./-Präfix: sonst durchsucht `source` erst $PATH (sourcepath) und lädt evtl.
     # eine fremde .clau.conf aus einem PATH-Verzeichnis statt der im aktuellen Ordner.
     # shellcheck disable=SC1090
     source "./$CONFIG_FILE"
+  else
+    # Keine lokale Config → ggf. Ausweich-Config aus dem Home laden
+    local fb; fb="$(_conf_fallback_file)"
+    # shellcheck disable=SC1090
+    [[ -f "$fb" ]] && source "$fb"
   fi
   : "${CLAU_MODEL:=sonnet}"
   : "${CLAU_SESSION_ID:=}"
@@ -1077,7 +1117,7 @@ _claude_dir_writable() {
   fi
   if [[ "$_CLAUDE_DIR_RO_WARNED" -eq 0 ]]; then
     _CLAUDE_DIR_RO_WARNED=1
-    echo "⚠️  clau: '.claude/settings.json' in $(pwd) nicht schreibbar – Tool-Blocking/Telegram-Hooks werden übersprungen." >&2
+    echo "⚠️  clau: '.claude/settings.json' in $(pwd) nicht schreibbar – Tool-Blocking wird übersprungen." >&2
   fi
   return 1
 }
@@ -1086,24 +1126,35 @@ _CONFIG_RO_WARNED=0
 _warn_config_readonly() {
   [[ "$_CONFIG_RO_WARNED" -eq 1 ]] && return 0
   _CONFIG_RO_WARNED=1
-  echo "⚠️  clau: '$CONFIG_FILE' in $(pwd) nicht beschreibbar – Einstellungen werden diesmal nicht gespeichert." >&2
-  echo "   (Die Session selbst wird normal in ~/.claude gespeichert und ist per --resume fortsetzbar.)" >&2
-  # Nur interaktiv auf Tastendruck warten – im Headless-/CI-Lauf nicht blockieren.
-  [[ "${HEADLESS:-0}" -eq 1 ]] && return 0
-  printf "   Weiter mit beliebiger Taste ... " >&2
-  read -r -n 1 _ 2>/dev/null || true
-  echo >&2
+  echo "⚠️  clau: '$CONFIG_FILE' in $(pwd) nicht beschreibbar und kein Ausweich-Pfad im Home nutzbar –" >&2
+  echo "   Einstellungen werden diesmal nicht gespeichert. (Session selbst läuft normal.)" >&2
+}
+
+# Einmaliger, unaufgeregter Hinweis: Config liegt im Home statt im Projektordner
+_CONFIG_FB_NOTED=0
+_note_config_fallback() {
+  [[ "$_CONFIG_FB_NOTED" -eq 1 ]] && return 0
+  _CONFIG_FB_NOTED=1
+  echo "ℹ️  Ordner nicht beschreibbar – Einstellungen werden stattdessen hier gemerkt:" >&2
+  echo "   $1" >&2
 }
 
 save_config() {
-  # Verzeichnis nicht beschreibbar (z.B. clau in fremdem Home gestartet)?
-  # Dann nur einmal warnen und weitermachen – nicht mit rohem Bash-Fehler abbrechen.
+  # Ziel: normalerweise ./.clau.conf. Ist der Ordner nicht beschreibbar
+  # (z.B. clau in fremdem Home), weichen wir auf eine Datei im eigenen Home aus,
+  # damit die Einstellungen trotzdem erhalten bleiben.
+  local target="$CONFIG_FILE" writable=1
   if [[ -e "$CONFIG_FILE" ]]; then
-    [[ -w "$CONFIG_FILE" ]] || { _warn_config_readonly; return 0; }
+    [[ -w "$CONFIG_FILE" ]] || writable=0
   else
-    [[ -w "." ]] || { _warn_config_readonly; return 0; }
+    [[ -w "." ]] || writable=0
   fi
-  cat > "$CONFIG_FILE" <<CONF_EOF
+  if [[ "$writable" -eq 0 ]]; then
+    target="$(_conf_fallback_file)"
+    mkdir -p "$(dirname "$target")" 2>/dev/null || { _warn_config_readonly; return 0; }
+    _note_config_fallback "$target"
+  fi
+  cat > "$target" <<CONF_EOF
 CLAU_MODEL="${CLAU_MODEL}"
 CLAU_SESSION_ID="${CLAU_SESSION_ID}"
 CLAU_INTERACTION_LEVEL="${CLAU_INTERACTION_LEVEL}"
@@ -1287,6 +1338,7 @@ Telegram / Handy:
   clau --tg-setup                 Ermittelt & speichert die Gruppen-ID (Bot muss in der Gruppe sein)
   clau --tg-test                  Sendet eine Testnachricht in die Gruppe
   clau --tg-whoami                Zeigt deine Telegram-User-ID (für CLAU_TG_ALLOWED_USER)
+  clau --tg-hooks-off             Entfernt die globalen Telegram-Hooks wieder
   clau --tg-bot                   Bot-Poller: vom Handy entwickeln (Dauerprozess, tmux/systemd)
                                   In einem Topic: /cd <pfad> setzen, dann Text = Anweisung an Claude.
   Phase 1 (Benachrichtigung): pro Session ein Topic, meldet Rückfrage/Fertig/Ende.
@@ -2513,6 +2565,10 @@ parse_args() {
         ACTION="tg-bot"
         shift
         ;;
+      --tg-hooks-off)
+        ACTION="tg-hooks-off"
+        shift
+        ;;
       --tg-hook)
         ACTION="tg-hook"
         shift
@@ -2612,7 +2668,7 @@ fi
 
 # Update-Check nur für interaktive Läufe (nicht headless/CI/tg)
 case "${ACTION}" in
-  tg-token|tg-setup|tg-test|tg-whoami|tg-bot) : ;;
+  tg-token|tg-setup|tg-test|tg-whoami|tg-bot|tg-hooks-off) : ;;
   *) [[ "${HEADLESS:-0}" -eq 1 ]] || check_for_updates ;;
 esac
 
@@ -2636,6 +2692,9 @@ case "${ACTION}" in
     ;;
   tg-test)
     tg_test
+    ;;
+  tg-hooks-off)
+    tg_hooks_off
     ;;
   tg-whoami)
     tg_whoami
