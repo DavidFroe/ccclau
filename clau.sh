@@ -476,9 +476,10 @@ print("MSG=" + msg)
 # Schreibt die Telegram-Hooks in .claude/settings.json (idempotent)
 apply_tg_hooks() {
   _tg_ready || return 0
+  _claude_dir_writable || return 0
   local sf=".claude/settings.json"
-  mkdir -p .claude
-  [[ -f "$sf" ]] || echo '{}' > "$sf"
+  mkdir -p .claude 2>/dev/null || return 0
+  [[ -f "$sf" ]] || echo '{}' > "$sf" 2>/dev/null || return 0
   local cmd; cmd="$(command -v clau 2>/dev/null || echo clau) --tg-hook"
   python3 - "$sf" "$cmd" <<'PY' 2>/dev/null || true
 import sys, json
@@ -1063,6 +1064,24 @@ load_config() {
   INTERACTION_LEVEL="$CLAU_INTERACTION_LEVEL"
 }
 
+# Prüft, ob im aktuellen Verzeichnis .claude/settings.json schreibbar (anlegbar) ist.
+# Gibt 1 zurück und warnt einmalig, wenn nicht (z.B. clau in fremdem Home gestartet).
+_CLAUDE_DIR_RO_WARNED=0
+_claude_dir_writable() {
+  if [[ -e ".claude/settings.json" ]]; then
+    [[ -w ".claude/settings.json" ]] && return 0
+  elif [[ -d ".claude" ]]; then
+    [[ -w ".claude" ]] && return 0
+  else
+    [[ -w "." ]] && return 0
+  fi
+  if [[ "$_CLAUDE_DIR_RO_WARNED" -eq 0 ]]; then
+    _CLAUDE_DIR_RO_WARNED=1
+    echo "⚠️  clau: '.claude/settings.json' in $(pwd) nicht schreibbar – Tool-Blocking/Telegram-Hooks werden übersprungen." >&2
+  fi
+  return 1
+}
+
 _CONFIG_RO_WARNED=0
 _warn_config_readonly() {
   [[ "$_CONFIG_RO_WARNED" -eq 1 ]] && return 0
@@ -1135,10 +1154,11 @@ auto_compact_status() {
 apply_tool_blocking() {
   local disable_tools="${CLAU_DISABLE_TOOLS:-}"
   [[ -n "$disable_tools" ]] || return 0
+  _claude_dir_writable || return 0
 
   local settings_dir=".claude"
   local settings_file="$settings_dir/settings.json"
-  mkdir -p "$settings_dir"
+  mkdir -p "$settings_dir" 2>/dev/null || return 0
 
   # Tools aus CLAU_DISABLE_TOOLS als JSON-Array
   local tools_json="["
@@ -1209,6 +1229,7 @@ cleanup_tool_blocking() {
   [[ -n "$disable_tools" ]] || return 0
   local settings_file=".claude/settings.json"
   [[ -f "$settings_file" ]] || return 0
+  [[ -w "$settings_file" ]] || return 0
 
   IFS=',' read -ra TOOL_LIST <<< "$disable_tools"
   local tools_to_remove=""
