@@ -833,10 +833,37 @@ _tg_do_opus() {  # $1=thread $2=dir $3=sid $4=prompt
 
 _tg_bot_handle() {
   local th="$1" txt="$2"
-  local DIR="" SID="" line
+  local DIR="" SID="" TMUXS="" line
   while IFS= read -r line; do
-    case "$line" in DIR=*) DIR="${line#DIR=}" ;; SID=*) SID="${line#SID=}" ;; esac
+    case "$line" in
+      DIR=*)  DIR="${line#DIR=}" ;;
+      SID=*)  SID="${line#SID=}" ;;
+      TMUX=*) TMUXS="${line#TMUX=}" ;;
+    esac
   done < <(cat "$(_tg_bot_state "$th")" 2>/dev/null)
+
+  # Mirror-Topic: direkt in die laufende tmux-Session tippen
+  if [[ -n "$TMUXS" ]] && command -v tmux >/dev/null 2>&1 \
+     && tmux has-session -t "$TMUXS" 2>/dev/null; then
+    case "$txt" in
+      /stop*|/quit*)
+        tmux kill-session -t "$TMUXS" 2>/dev/null || true
+        _tg_bind_set "$th" TMUX ""
+        _tg_send "$th" "⏹️ Live-Session beendet."; return ;;
+      /esc*)      tmux send-keys -t "$TMUXS" Escape;   _tg_send "$th" "⎋ Escape"; return ;;
+      /enter*)    tmux send-keys -t "$TMUXS" Enter;    _tg_send "$th" "⏎";        return ;;
+      "/ctrl "*)  tmux send-keys -t "$TMUXS" "C-${txt#/ctrl }"; _tg_send "$th" "Strg-${txt#/ctrl }"; return ;;
+      /screen*)   local snap
+                  snap="$(tmux capture-pane -p -t "$TMUXS" 2>/dev/null | sed -e 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' | grep -v '^[[:space:]]*$' | tail -30)"
+                  _tg_send_chunked "$th" "🖥️ Aktueller Bildschirm:"$'\n'"${snap:-<leer>}"; return ;;
+      /help*)     _tg_send "$th" $'Live-Session (Mirror):\nText = wird direkt getippt + Enter\n/enter /esc /ctrl c – Tasten senden\n/screen – aktuellen Bildschirm zeigen\n/stop – Session beenden'; return ;;
+    esac
+    tmux send-keys -t "$TMUXS" -l -- "$txt" 2>/dev/null || true
+    tmux send-keys -t "$TMUXS" Enter 2>/dev/null || true
+    return
+  fi
+  # tmux-Session verschwunden → Bindung aufräumen, normal weiter
+  [[ -n "$TMUXS" ]] && _tg_bind_set "$th" TMUX ""
 
   case "$txt" in
     /help*|/start*)
@@ -887,6 +914,146 @@ _tg_bot_handle() {
   fi
 
   _tg_do_opus "$th" "$DIR" "$SID" "$txt"
+}
+
+# ── Mirror-Modus: EINE Session gleichzeitig am Bildschirm und in Telegram ────
+# tmux haelt die echte, interaktive Claude-Session. `pipe-pane` spiegelt die
+# Ausgabe (ANSI-gefiltert) ins Topic, `send-keys` tippt Telegram-Nachrichten in
+# die laufende Session. Beide Seiten sehen und steuern dasselbe.
+
+_tg_mirror_session() { echo "clau-$(pwd | md5sum | cut -c1-10)"; }
+_tg_mirror_log()     { echo "${CLAU_TG_STATE_DIR}/mirror-${1}.log"; }
+
+# clau --tg-pump <thread> <logfile> <tmux-session> : intern, spiegelt Log → Topic
+tg_pump() {
+  _tg_ready || exit 0
+  local thread="$1" log="$2" sess="$3"
+  mkdir -p "$CLAU_TG_STATE_DIR"
+  python3 - "$log" "$thread" "$sess" "$CLAU_TG_BOT_TOKEN" "$CLAU_TG_GROUP_ID" <<'PY'
+import os, re, subprocess, sys, time, urllib.parse, urllib.request
+
+log, thread, sess, token, chat = sys.argv[1:6]
+API = f"https://api.telegram.org/bot{token}/sendMessage"
+
+ANSI  = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-Z\\-_]")
+CTRL  = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Zeilen, die nur aus Rahmen/Spinner/Leerzeichen bestehen -> raus
+NOISE = re.compile(r"^[\s─-╿⠀-⣿■-◿·▪▫●○◐◓◑◒⠁-⠿|/\\_\-=+*.]*$")
+SPIN  = re.compile(r"[⠀-⣿■-◿◐◓◑◒]+")   # Braille-Spinner & Bullets
+
+def send(text):
+    if not text.strip():
+        return
+    data = urllib.parse.urlencode({
+        "chat_id": chat, "message_thread_id": thread, "text": text[:3900],
+        "disable_notification": "true",
+    }).encode()
+    try:
+        urllib.request.urlopen(urllib.request.Request(API, data=data), timeout=15).read()
+    except Exception:
+        pass
+
+def alive():
+    return subprocess.run(["tmux", "has-session", "-t", sess],
+                          capture_output=True).returncode == 0
+
+recent, buf, last_flush = [], [], time.time()
+FLUSH_SECS, MAX_CHARS = 4.0, 3000
+
+def flush():
+    global buf, last_flush
+    if buf:
+        send("\n".join(buf))
+        buf = []
+    last_flush = time.time()
+
+# auf Logdatei warten, dann wie `tail -f` lesen
+for _ in range(100):
+    if os.path.exists(log):
+        break
+    time.sleep(0.3)
+f = open(log, "r", errors="replace") if os.path.exists(log) else None
+if f is None:
+    sys.exit(0)
+
+gone_since = None
+while True:
+    chunk = f.readline()
+    if not chunk:
+        if buf and time.time() - last_flush > FLUSH_SECS:
+            flush()
+        if not alive():
+            gone_since = gone_since or time.time()
+            if time.time() - gone_since > 3:
+                flush()
+                send("⏹️ Session beendet (tmux weg).")
+                break
+        else:
+            gone_since = None
+        time.sleep(0.4)
+        continue
+
+    line = CTRL.sub("", ANSI.sub("", chunk)).replace("\r", "").rstrip()
+    if not line or NOISE.match(line):
+        continue
+    line = SPIN.sub("", line)                    # Spinner-Glyphen entfernen
+    line = line.strip(" \t│|┃┆┇┊┋╎╏─━═╭╮╯╰┌┐└┘")  # Rahmen an den Raendern weg
+    line = re.sub(r"[ \t]{3,}", "  ", line).strip()
+    if len(line) < 2:
+        continue
+    if line in recent:          # TUI-Redraws / Spinner-Wiederholungen unterdruecken
+        continue
+    recent.append(line)
+    del recent[:-80]
+    buf.append(line)
+    if sum(len(x) + 1 for x in buf) >= MAX_CHARS:
+        flush()
+    elif time.time() - last_flush > FLUSH_SECS:
+        flush()
+PY
+}
+
+# clau --mirror : Session in tmux starten, parallel am Bildschirm und in Telegram
+tg_mirror() {
+  _tg_ready || { echo "Telegram nicht konfiguriert — erst 'clau --tg-setup'." >&2; exit 1; }
+  command -v tmux >/dev/null 2>&1 || { echo "tmux fehlt. Installieren:  sudo apt install tmux" >&2; exit 1; }
+  local sess; sess="$(_tg_mirror_session)"
+  local log;  log="$(_tg_mirror_log "$sess")"
+  local proj; proj="$(basename "$(pwd)")"
+  mkdir -p "$CLAU_TG_STATE_DIR"
+
+  if tmux has-session -t "$sess" 2>/dev/null; then
+    echo "Mirror-Session läuft schon — hänge mich dran (Strg-b d zum Loslösen)."
+    exec tmux attach -t "$sess"
+  fi
+
+  local mdl; mdl="$(effective_model)"
+  [[ -n "$mdl" ]] || { ensure_model; mdl="$(effective_model)"; }
+  if is_owl_model "$mdl"; then
+    echo "Mirror-Modus unterstützt derzeit nur Claude-Modelle (nicht owl:*)." >&2; exit 1
+  fi
+
+  # Topic anlegen und an die tmux-Session binden (damit der Bot dorthin tippt)
+  local thread; thread="$(_tg_topic_for "mirror-${sess}" "🖥️ ${proj} · live")"
+  _tg_bind_set "${thread:-0}" DIR "$(pwd)"
+  _tg_bind_set "${thread:-0}" TMUX "$sess"
+
+  : > "$log"
+  cleanup_tool_blocking; unset_token_saver_env; apply_tg_hooks
+  local extra; extra="$(_interaction_args)"
+  # shellcheck disable=SC2086
+  tmux new-session -d -s "$sess" -c "$(pwd)" \
+    "claude --model '$(claude_cli_model "$mdl")' $extra"
+  tmux pipe-pane -t "$sess" -o "cat >> '$log'"
+
+  # Pump losschicken (ueberlebt das Ablegen des Terminals)
+  setsid nohup "$0" --tg-pump "${thread:-0}" "$log" "$sess" >/dev/null 2>&1 &
+  _tg_send "${thread:-}" "🖥️ Live-Session gestartet in ${proj} (Modell ${mdl}). Schreib hier rein — es wird direkt getippt. /stop beendet."
+
+  echo "Mirror läuft: tmux-Session '$sess', Topic '🖥️ ${proj} · live'."
+  echo "Bildschirm + Telegram parallel. Loslösen: Strg-b d   Wieder ran: clau --mirror"
+  sleep 1
+  exec tmux attach -t "$sess"
 }
 
 # clau --tg-bot : Dauer-Poller. Idealerweise in tmux oder als systemd-Service.
@@ -1339,6 +1506,9 @@ Telegram / Handy:
   clau --tg-test                  Sendet eine Testnachricht in die Gruppe
   clau --tg-whoami                Zeigt deine Telegram-User-ID (für CLAU_TG_ALLOWED_USER)
   clau --tg-hooks-off             Entfernt die globalen Telegram-Hooks wieder
+  clau --mirror                   LIVE-Modus: Session in tmux, parallel am Bildschirm
+                                  UND im Telegram-Topic – in beide Richtungen bedienbar
+                                  (Loslösen: Strg-b d, wieder ran: clau --mirror)
   clau --tg-bot                   Bot-Poller: vom Handy entwickeln (Dauerprozess, tmux/systemd)
                                   In einem Topic: /cd <pfad> setzen, dann Text = Anweisung an Claude.
   Phase 1 (Benachrichtigung): pro Session ein Topic, meldet Rückfrage/Fertig/Ende.
@@ -1801,6 +1971,16 @@ _ensure_claude_code() {
 }
 
 # Installiert opencode falls nicht vorhanden (native Installer, npm-Fallback)
+_ensure_tmux() {
+  _have tmux && return 0
+  echo "tmux fehlt (für --mirror/Bot im Hintergrund) — installiere ..."
+  if _have apt-get; then sudo apt-get install -y tmux >/dev/null 2>&1 || return 1
+  elif _have dnf; then sudo dnf install -y tmux >/dev/null 2>&1 || return 1
+  elif _have pacman; then sudo pacman -S --noconfirm tmux >/dev/null 2>&1 || return 1
+  else echo "  → bitte tmux manuell installieren" >&2; return 1; fi
+  _have tmux && echo "tmux installiert."
+}
+
 _ensure_opencode() {
   if _have opencode; then
     echo "  opencode: bereits vorhanden ($(command -v opencode))"
@@ -1833,6 +2013,7 @@ install_self() {
   echo "Prüfe/Installiere Abhängigkeiten ..."
   _ensure_claude_code || true
   _ensure_opencode || true
+  _ensure_tmux || true
 
   case ":$PATH:" in
     *":${INSTALL_DIR}:"*)
@@ -2249,9 +2430,10 @@ choose_telegram_interactive() {
     echo "  3) Meine User-ID anzeigen & Allowlist setzen"
     echo "  4) Testnachricht senden"
     echo "  5) Bot starten – vom Handy entwickeln (Vordergrund, Strg-C beendet)"
-    echo "  6) Concierge-Modell  [${CLAU_TG_BRAIN_MODEL:-gemma-12b-chat}, $([[ "${CLAU_TG_BRAIN:-1}" == "1" ]] && echo AN || echo AUS)]"
-    echo "  7) Zurück"
-    printf "Auswahl [1-7, Enter=7]: "
+    echo "  6) LIVE-Session starten (Bildschirm + Telegram parallel, tmux)"
+    echo "  7) Concierge-Modell  [${CLAU_TG_BRAIN_MODEL:-gemma-12b-chat}, $([[ "${CLAU_TG_BRAIN:-1}" == "1" ]] && echo AN || echo AUS)]"
+    echo "  8) Zurück"
+    printf "Auswahl [1-8, Enter=8]: "
     read -r c
     # Unterfunktionen in Subshell: ihr evtl. 'exit' beendet nur die Subshell, nicht clau
     case "${c:-6}" in
@@ -2260,8 +2442,9 @@ choose_telegram_interactive() {
       3) ( tg_whoami ) || true ;;
       4) ( tg_test )   || true ;;
       5) ( tg_bot )    || true ;;
-      6) ( choose_tg_brain ) || true ;;
-      7) return ;;
+      6) tg_mirror ;;
+      7) ( choose_tg_brain ) || true ;;
+      8) return ;;
       *) echo "Ungültige Auswahl." ;;
     esac
   done
@@ -2565,6 +2748,15 @@ parse_args() {
         ACTION="tg-bot"
         shift
         ;;
+      --mirror)
+        ACTION="mirror"
+        shift
+        ;;
+      --tg-pump)
+        ACTION="tg-pump"
+        TG_PUMP_ARGS=("${2:-}" "${3:-}" "${4:-}")
+        shift 4 || shift $#
+        ;;
       --tg-hooks-off)
         ACTION="tg-hooks-off"
         shift
@@ -2656,9 +2848,15 @@ parse_args() {
 
 ACTION="interactive"
 RESUME_SESSION_ID=""
+TG_PUMP_ARGS=("" "" "")
 
 load_config
 parse_args "$@"
+
+if [[ "${ACTION}" == "tg-pump" ]]; then
+  tg_pump "${TG_PUMP_ARGS[0]}" "${TG_PUMP_ARGS[1]}" "${TG_PUMP_ARGS[2]}"
+  exit 0
+fi
 
 # Telegram-Hook: sofort abarbeiten (kein Update-Check, kein Menü) — muss schnell sein
 if [[ "${ACTION}" == "tg-hook" ]]; then
@@ -2668,7 +2866,7 @@ fi
 
 # Update-Check nur für interaktive Läufe (nicht headless/CI/tg)
 case "${ACTION}" in
-  tg-token|tg-setup|tg-test|tg-whoami|tg-bot|tg-hooks-off) : ;;
+  tg-token|tg-setup|tg-test|tg-whoami|tg-bot|tg-hooks-off|mirror|tg-pump) : ;;
   *) [[ "${HEADLESS:-0}" -eq 1 ]] || check_for_updates ;;
 esac
 
@@ -2695,6 +2893,9 @@ case "${ACTION}" in
     ;;
   tg-hooks-off)
     tg_hooks_off
+    ;;
+  mirror)
+    tg_mirror
     ;;
   tg-whoami)
     tg_whoami

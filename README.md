@@ -181,6 +181,37 @@ passiert nichts (stiller No-Op). Token geleakt? → @BotFather `/revoke`.
 anlegen, merkt es die Einstellungen stattdessen unter
 `~/.config/clau/dirs/<pfad>.conf` — Modell/Autonomie bleiben also auch dort erhalten.
 
+### LIVE-Session: Bildschirm und Telegram parallel (`clau --mirror`)
+
+Die eine Session, gleichzeitig an beiden Enden — kein Hin- und Herschalten:
+
+```bash
+clau --mirror        # startet die Session in tmux und hängt dich dran
+#   Strg-b d         → loslösen (Session läuft weiter)
+#   clau --mirror    → wieder dran (im gleichen Ordner)
+```
+
+- **Ausgabe** geht auf den Bildschirm **und** ins Telegram-Topic `🖥️ <projekt> · live`
+  (ANSI/Spinner werden gefiltert, Zeilen gebündelt alle ~4s gesendet).
+- **Eingabe** funktioniert von beiden Seiten: was du im Topic schreibst, wird direkt
+  in die laufende Session getippt — als hättest du es auf der Tastatur eingegeben.
+
+Extra-Befehle im Live-Topic:
+
+| Befehl | Wirkung |
+|--------|---------|
+| *(Text)* | wird in die Session getippt + Enter |
+| `/screen` | aktuellen Bildschirminhalt als Text schicken |
+| `/enter`, `/esc`, `/ctrl c` | einzelne Tasten senden |
+| `/stop` | Live-Session beenden |
+
+Braucht `tmux` (wird von `clau --install` mitinstalliert). Nur für Claude-Modelle,
+nicht für `owl:*`.
+
+**Mirror vs. Bot:** Der Mirror spiegelt eine *interaktive* Session (du siehst das
+echte TUI-Geschehen). Der Bot-Modus unten arbeitet auftragsweise (saubere
+Frage/Antwort-Paare, kein tmux nötig). Beides lässt sich parallel nutzen.
+
 ### Vom Handy entwickeln (`clau --tg-bot`)
 
 Ein Dauer-Poller macht aus jeder Telegram-Nachricht einen Claude-Code-Turn im
