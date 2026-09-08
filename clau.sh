@@ -247,6 +247,33 @@ else:
 PYEOF
 }
 
+# Komprimiert eine konkrete Session-Datei via cc_compact.py (--session sorgt
+# dafür, dass wirklich DIESE Datei komprimiert wird, nicht "die neueste im
+# Verzeichnis" — bei vielen parallelen Sessions im selben Projekt-Bucket
+# sonst nicht verlässlich). Gibt die neue Session-ID auf stdout aus,
+# leer bei Fehler.
+_compact_session_file() {
+  local sf="$1" target_model="$2"
+  local tmpf; tmpf="$(mktemp)"
+  python3 "$CC_COMPACT_SCRIPT" --session "$sf" --model "$target_model" >"$tmpf" 2>&1
+  local rc=$?
+  cat "$tmpf" >&2
+  if [[ "$rc" -ne 0 ]]; then
+    rm -f "$tmpf"
+    return 1
+  fi
+  local new_id
+  new_id="$(sed -n 's/.*Neue Session-ID:[[:space:]]*\([0-9a-fA-F-]*\).*/\1/p' "$tmpf" | tail -1)"
+  rm -f "$tmpf"
+  [[ -n "$new_id" ]] || return 1
+  echo "$new_id"
+}
+
+# Wird von _pre_flight_check gesetzt, wenn automatisch komprimiert wurde —
+# der Aufrufer soll dann auf diese Session-ID umlenken statt auf der zu
+# großen weiterzumachen.
+PRE_FLIGHT_RESUME_ID=""
+
 _pre_flight_check() {
   local owl_id="$1"
   local cw; cw="$(owl_context_window "$owl_id")"
@@ -274,15 +301,28 @@ _pre_flight_check() {
   Diese Session ist zu groß für das gewählte Modell. claude-CLI wird
   beim Start einen API-Error geben, weil das Backend den Input nicht
   verarbeiten kann.
+EOF
+    if ask_yes_no "Jetzt automatisch komprimieren (Tokenverlust) und auf der neuen Session mit owl:$owl_id fortsetzen?"; then
+      echo "Komprimiere $sf_name (Ziel: owl:$owl_id) ..." >&2
+      local new_id
+      new_id="$(_compact_session_file "$sf" "$owl_id")"
+      if [[ -n "$new_id" ]]; then
+        echo "✓ Komprimiert → neue Session: $new_id" >&2
+        PRE_FLIGHT_RESUME_ID="$new_id"
+        return 0
+      fi
+      echo "✗ Komprimieren fehlgeschlagen." >&2
+    fi
+    cat >&2 <<EOF
 
-  Empfehlung (eine davon):
+  Alternativen:
     1) Größeres Modell wählen, z.B.:
          clau -m owl:351    (MiniMax M3, 1M ctx)
          clau -m owl:361    (Qwen3.7 Max, 1M ctx)
          clau -m owl:379    (DeepSeek V4 Flash, 1M ctx)
     2) Neue Session starten (alte verwerfen):
          clau --new -m owl:$owl_id
-    3) Erst /compact in alter Session, dann hier weitermachen.
+    3) Später manuell komprimieren: clau → Menüpunkt 5
 
   Override mit --force-context, wenn du es trotzdem versuchen willst.
 EOF
@@ -1115,7 +1155,21 @@ run_owl_via_claude() {
     [[ "$arg" == "--force-context" ]] && force_ctx=1
   done
   if [[ "$force_ctx" -eq 0 ]]; then
+    PRE_FLIGHT_RESUME_ID=""
     _pre_flight_check "$owl_id" || exit 1
+    if [[ -n "$PRE_FLIGHT_RESUME_ID" ]]; then
+      # Pre-Flight hat die zu große Session automatisch komprimiert —
+      # auf die neue Session umlenken statt auf der alten weiterzumachen.
+      # Ein evtl. vorhandenes --resume [id] aus den Original-Args entfernen,
+      # damit es nicht mit dem neuen --resume kollidiert.
+      local filtered=() skip_next=0 a
+      for a in "$@"; do
+        if [[ "$skip_next" -eq 1 ]]; then skip_next=0; continue; fi
+        if [[ "$a" == "--resume" ]]; then skip_next=1; continue; fi
+        filtered+=("$a")
+      done
+      set -- "${filtered[@]}" --resume "$PRE_FLIGHT_RESUME_ID"
+    fi
   fi
 
   # Auto-Compact-Threshold: konfigurierbar via CLAU_AUTO_COMPACT_WINDOW (fester Wert)
