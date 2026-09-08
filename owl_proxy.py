@@ -175,8 +175,12 @@ class StreamTranslator:
     def __init__(self, model_name):
         self.model = model_name
         self.msg_id = "msg_" + uuid.uuid4().hex[:24]
+        self.next_index = 0
+        self.thinking_started = False
+        self.thinking_closed = False
+        self.thinking_index = None
         self.text_started = False
-        self.text_index = 0
+        self.text_index = None
         self.tool_buffers = {}   # oai_index → {id, name, args, block_index}
         self.output_tokens = 0
 
@@ -211,11 +215,37 @@ class StreamTranslator:
         delta = choice.get("delta", {})
         finish_reason = choice.get("finish_reason")
 
-        # Text — some models (DeepSeek reasoning variants) put output in reasoning_content
-        text = delta.get("content") or delta.get("reasoning_content") or ""
+        # Thinking-Modelle (wie 120) senden ihr internes Grübeln separat in
+        # reasoning_content -- das ist NICHT die Antwort und gehört nicht als
+        # normaler Text in den Chat (führte sonst zu rohem Modell-"Labern"
+        # in der Ausgabe). Als echten thinking-Block übersetzen, den Claude
+        # Code eingeklappt/abgesetzt darstellt statt als Fließtext.
+        reasoning = delta.get("reasoning_content") or ""
+        if reasoning:
+            if not self.thinking_started:
+                self.thinking_started = True
+                self.thinking_index = self.next_index
+                self.next_index += 1
+                out.append(self._evt("content_block_start", {
+                    "type": "content_block_start", "index": self.thinking_index,
+                    "content_block": {"type": "thinking", "thinking": ""}
+                }))
+            out.append(self._evt("content_block_delta", {
+                "type": "content_block_delta", "index": self.thinking_index,
+                "delta": {"type": "thinking_delta", "thinking": reasoning}
+            }))
+
+        text = delta.get("content") or ""
         if text:
+            if self.thinking_started and not self.thinking_closed:
+                self.thinking_closed = True
+                out.append(self._evt("content_block_stop", {
+                    "type": "content_block_stop", "index": self.thinking_index
+                }))
             if not self.text_started:
                 self.text_started = True
+                self.text_index = self.next_index
+                self.next_index += 1
                 out.append(self._evt("content_block_start", {
                     "type": "content_block_start", "index": self.text_index,
                     "content_block": {"type": "text", "text": ""}
@@ -228,9 +258,10 @@ class StreamTranslator:
         # Tool calls
         for tc in delta.get("tool_calls", []):
             oai_idx = tc.get("index", 0)
-            block_idx = (1 if self.text_started else 0) + oai_idx
 
             if oai_idx not in self.tool_buffers:
+                block_idx = self.next_index
+                self.next_index += 1
                 tid = tc.get("id") or ("call_" + uuid.uuid4().hex[:8])
                 tname = (tc.get("function") or {}).get("name") or ""
                 self.tool_buffers[oai_idx] = {"id": tid, "name": tname, "args": "", "bidx": block_idx}
@@ -255,9 +286,16 @@ class StreamTranslator:
 
         # Finish
         if finish_reason in ("stop", "tool_calls", "length"):
+            if self.thinking_started and not self.thinking_closed:
+                self.thinking_closed = True
+                out.append(self._evt("content_block_stop", {
+                    "type": "content_block_stop", "index": self.thinking_index
+                }))
             # Empty response fallback — model returned nothing (content filter / refusal)
             if not self.text_started and not self.tool_buffers:
                 self.text_started = True
+                self.text_index = self.next_index
+                self.next_index += 1
                 out.append(self._evt("content_block_start", {
                     "type": "content_block_start", "index": self.text_index,
                     "content_block": {"type": "text", "text": ""}
@@ -478,7 +516,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _stream_abort(self, tr, message, write_lock):
         try:
             evts = []
+            if tr.thinking_started and not tr.thinking_closed:
+                tr.thinking_closed = True
+                evts.append(tr._evt("content_block_stop", {
+                    "type": "content_block_stop", "index": tr.thinking_index
+                }))
             if not tr.text_started:
+                tr.text_started = True
+                tr.text_index = tr.next_index
+                tr.next_index += 1
                 evts.append(tr._evt("content_block_start", {
                     "type": "content_block_start", "index": tr.text_index,
                     "content_block": {"type": "text", "text": ""}
