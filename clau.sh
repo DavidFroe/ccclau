@@ -2470,7 +2470,8 @@ interactive_start() {
   echo "  4) Bot-Einstellungen"
   echo "  5) Session komprimieren (custom-compact via QuiteQue)"
   echo "  6) Telegram / Handy"
-  printf "Auswahl [1-6, Enter=2]: "
+  echo "  7) Update von GitHub (self-update)"
+  printf "Auswahl [1-7, Enter=2]: "
   read -r start_choice
 
   case "${start_choice:-2}" in
@@ -2480,6 +2481,12 @@ interactive_start() {
     4) choose_bot_settings; interactive_start ;;
     5) run_compact ;;
     6) choose_telegram_interactive; interactive_start ;;
+    7)
+      self_update
+      echo
+      echo "Bitte 'clau' erneut starten, um die neue Version zu nutzen."
+      exit 0
+      ;;
     *) echo "Ungültige Auswahl."; exit 1 ;;
   esac
 }
