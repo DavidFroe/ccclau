@@ -22,6 +22,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 import urllib.error
 import uuid as uuidlib
@@ -150,11 +151,18 @@ def normalize_model_id(model: str) -> str:
     return m
 
 
+QQ_RETRIES = 3
+QQ_RETRY_DELAYS = (5, 15)  # Sekunden zwischen Versuch 1→2 und 2→3
+
+
 def call_quiteque(
     qq_url: str, user: str, model: str, system: str, user_msg: str,
-    max_tokens: int, timeout: int = 600
+    max_tokens: int, timeout: int = 1200
 ) -> str:
-    """Sendet einen Chat-Completion-Request an QuiteQue und gibt den Text zurück."""
+    """Sendet einen Chat-Completion-Request an QuiteQue und gibt den Text zurück.
+    Bei transienten Backend-Fehlern (5xx, z.B. Watchdog-Timeout eines Slots)
+    wird mit Backoff erneut versucht -- ein 4xx (falsche Anfrage) dagegen nie,
+    das wird sich beim nächsten Versuch nicht ändern."""
     model = normalize_model_id(model)
     payload = {
         "model": model,
@@ -175,9 +183,20 @@ def call_quiteque(
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return data["choices"][0]["message"]["content"]
+    last_err = None
+    for attempt in range(QQ_RETRIES):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code < 500 or attempt == QQ_RETRIES - 1:
+                raise
+            print(f"[cc_compact] QuiteQue {e.code} (Versuch {attempt+1}/{QQ_RETRIES}), "
+                  f"retry in {QQ_RETRY_DELAYS[attempt]}s...", file=sys.stderr)
+            time.sleep(QQ_RETRY_DELAYS[attempt])
+    raise last_err
 
 
 # -------------------------------------------------------------------
@@ -234,7 +253,8 @@ def build_combine_prompt(chunk_summaries: list[str]) -> str:
 
 
 def summarize_session(
-    msgs: list[dict], qq_url: str, user: str, model: str, target_tokens: int
+    msgs: list[dict], qq_url: str, user: str, model: str, target_tokens: int,
+    timeout: int = 600,
 ) -> str:
     """Fasst die Session zusammen. Chunked falls nötig. Liefert finale Zusammenfassung."""
     model = normalize_model_id(model)
@@ -249,7 +269,7 @@ def summarize_session(
         # Reserve für Summary-Output: max was geht, aber gedeckelt
         out_tokens = min(target_tokens, 20_000)
         try:
-            s = call_quiteque(qq_url, user, model, SYSTEM_PROMPT, prompt, out_tokens)
+            s = call_quiteque(qq_url, user, model, SYSTEM_PROMPT, prompt, out_tokens, timeout=timeout)
         except urllib.error.HTTPError as e:
             err = e.read().decode("utf-8", errors="replace")[:500]
             print(f"[cc_compact] HTTP error on chunk {i+1}: {e.code} {err}", file=sys.stderr)
@@ -264,7 +284,7 @@ def summarize_session(
     print(f"[cc_compact] Combining {len(chunk_summaries)} chunk summaries...", file=sys.stderr)
     combined_prompt = build_combine_prompt(chunk_summaries)
     out_tokens = min(target_tokens, 20_000)
-    final = call_quiteque(qq_url, user, model, SYSTEM_PROMPT, combined_prompt, out_tokens)
+    final = call_quiteque(qq_url, user, model, SYSTEM_PROMPT, combined_prompt, out_tokens, timeout=timeout)
     print(f"[cc_compact] Final summary: {estimate_tokens(final)} Tokens", file=sys.stderr)
     return final
 
@@ -408,6 +428,9 @@ def main():
     ap.add_argument("--target-tokens", type=int, default=DEFAULTS["target_output_tokens"],
                     help=f"Output-Ziel Tokens (default: {DEFAULTS['target_output_tokens']})")
     ap.add_argument("--session", help="Pfad zur Session-JSONL (default: latest im aktuellen Projekt)")
+    ap.add_argument("--timeout", type=int, default=1200,
+                    help="Timeout pro QuiteQue-Request in Sekunden (default: 1200 = 20 Min -- "
+                         "lokale Modelle können bei großem Input langsam sein)")
     ap.add_argument("--dry-run", action="store_true", help="Nur parsen + planen, keine API-Calls")
     args = ap.parse_args()
     args.model = normalize_model_id(args.model)
@@ -462,7 +485,8 @@ def main():
 
     # Summary
     summary = summarize_session(
-        msgs, args.qq_url, args.user, args.model, args.target_tokens
+        msgs, args.qq_url, args.user, args.model, args.target_tokens,
+        timeout=args.timeout,
     )
     summary_tokens = estimate_tokens(summary)
     print(f"[cc_compact] Finale Zusammenfassung: {summary_tokens} Tokens ({len(summary)} chars)", file=sys.stderr)
