@@ -314,6 +314,7 @@ _start_owl_proxy() {
   local port
   port="$(_free_port)"
   OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
+    OWL_PROXY_TIMEOUT="${CLAU_OWL_TIMEOUT:-1800}" \
     python3 "$OWL_PROXY_SCRIPT" "$port" >/dev/null 2>&1 &
   echo "$!" > "$_OWL_PID_FILE"
   echo "$port"
@@ -1562,6 +1563,7 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
   CLAU_TIMEOUT_DEFAULT="1800000"     Default Bash-Timeout in ms (30 Min = 1800000)
   CLAU_TIMEOUT_MAX="7200000"         Max Bash-Timeout in ms (120 Min = 7200000)
+  CLAU_OWL_TIMEOUT="1800"            owlAPI-Request-Timeout in Sekunden (Default 1800 = 30 Min)
   CLAU_UPDATE_CHECK="1"              Beim Start gegen GitHub auf Updates prüfen (0 = aus)
   CLAU_UPDATE_CHECK_INTERVAL="86400" Prüf-Intervall in Sekunden (Default 1×/Tag)
 HELP_EOF

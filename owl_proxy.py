@@ -358,6 +358,42 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     pass
         except BrokenPipeError:
             pass
+        except requests.exceptions.RequestException as e:
+            # Backend-Verbindung riss mitten im Stream ab (Timeout, Reset, ...) —
+            # sauberen Fehlertext + Stream-Ende senden statt Client mit toter
+            # Verbindung hängen zu lassen (führte sonst zu doppeltem Retry + 502).
+            self._stream_abort(tr, f"[owlAPI-Verbindung abgebrochen: {e}]")
+        finally:
+            try:
+                owl_resp.close()
+            except Exception:
+                pass
+
+    def _stream_abort(self, tr, message):
+        try:
+            evts = []
+            if not tr.text_started:
+                evts.append(tr._evt("content_block_start", {
+                    "type": "content_block_start", "index": tr.text_index,
+                    "content_block": {"type": "text", "text": ""}
+                }))
+            evts.append(tr._evt("content_block_delta", {
+                "type": "content_block_delta", "index": tr.text_index,
+                "delta": {"type": "text_delta", "text": message}
+            }))
+            evts.append(tr._evt("content_block_stop", {
+                "type": "content_block_stop", "index": tr.text_index
+            }))
+            evts.append(tr._evt("message_delta", {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"output_tokens": tr.output_tokens}
+            }))
+            evts.append(tr._evt("message_stop", {"type": "message_stop"}))
+            self.wfile.write("".join(evts).encode())
+            self.wfile.flush()
+        except BrokenPipeError:
+            pass
 
     def _json(self, code, obj):
         self._json_raw(code, json.dumps(obj).encode())
