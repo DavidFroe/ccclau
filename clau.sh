@@ -1140,6 +1140,27 @@ for u in d.get("result", []):
   done
 }
 
+# ── Schlankes Tool-Set für owlAPI-Sessions ───────────────────────────────────
+# CLAU_DISABLE_TOOLS (apply_tool_blocking) setzt nur permissions.deny in
+# .claude/settings.json -- das blockiert die AUSFÜHRUNG, aber claude-CLI
+# schickt das volle Tool-Schema (inkl. aller MCP-Tools wie Gmail/Calendar/
+# Drive) trotzdem in jedem einzelnen Request mit. Bei einem echten 400 vom
+# Backend (Request-Payload-Dump zeigte ein riesiges tools-Array mit vollem
+# JSON-Schema für praktisch jedes eingebaute Tool + alle MCP-Server) ist das
+# ein Verdächtiger: lokale Tool-Calling-Backends (vLLM u.ä.) sind bei so viel
+# Schema-Komplexität empfindlich. --tools/--strict-mcp-config wirken dagegen
+# auf das tatsächlich gesendete Schema, nicht nur auf Ausführungsrechte.
+CLAU_OWL_TOOLS_DEFAULT="Bash,Edit,Write,Read,AskUserQuestion,TaskCreate,TaskGet,TaskList,TaskUpdate,EnterPlanMode,ExitPlanMode"
+
+_owl_minimal_tool_args() {
+  [[ "${CLAU_OWL_MINIMAL_TOOLS:-1}" == "1" ]] || return 0
+  echo "--tools"
+  echo "${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}"
+  echo "--strict-mcp-config"
+  echo "--mcp-config"
+  echo '{"mcpServers":{}}'
+}
+
 # claude über owlAPI-Proxy starten (interaktiv)
 run_owl_via_claude() {
   local owl_id="$1"
@@ -1223,10 +1244,12 @@ run_owl_via_claude() {
   for arg in "$@"; do
     [[ "$arg" != "--force-context" ]] && real_args+=("$arg")
   done
+  local tool_args=()
+  while IFS= read -r line; do tool_args+=("$line"); done < <(_owl_minimal_tool_args)
   # shellcheck disable=SC2086
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
   ANTHROPIC_API_KEY="sk-ant-api03-owl-dummy-key-not-real" \
-  claude --model "claude-sonnet-4-6" $extra "${real_args[@]}" || true
+  claude --model "claude-sonnet-4-6" $extra "${tool_args[@]}" "${real_args[@]}" || true
 
   _kill_owl_proxy
   trap - EXIT INT TERM
@@ -1273,9 +1296,11 @@ run_owl_headless_via_claude() {
     echo "Hinweis: Modell $owl_id hat $cw Token Kontext."
   fi
 
+  local tool_args=()
+  while IFS= read -r line; do tool_args+=("$line"); done < <(_owl_minimal_tool_args)
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
   ANTHROPIC_API_KEY="sk-owl" \
-  claude -p "$prompt" --model "claude-sonnet-4-6" || true
+  claude -p "$prompt" --model "claude-sonnet-4-6" "${tool_args[@]}" || true
 
   _kill_owl_proxy
   trap - EXIT INT TERM
@@ -1624,6 +1649,8 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_TIMEOUT_MAX="7200000"         Max Bash-Timeout in ms (120 Min = 7200000)
   CLAU_OWL_TIMEOUT="1800"            owlAPI-Request-Timeout in Sekunden (Default 1800 = 30 Min)
   owlAPI-Proxy-Log: ~/.cache/clau/owl_proxy.log (wird bei jedem Start überschrieben)
+  CLAU_OWL_MINIMAL_TOOLS="1"         Schlankes Tool-Set + keine MCP-Server für owlAPI (Default an)
+  CLAU_OWL_TOOLS="Bash,Edit,..."     Eigene Tool-Allowlist statt des Defaults (s.o.)
   CLAU_UPDATE_CHECK="1"              Beim Start gegen GitHub auf Updates prüfen (0 = aus)
   CLAU_UPDATE_CHECK_INTERVAL="86400" Prüf-Intervall in Sekunden (Default 1×/Tag)
 HELP_EOF
