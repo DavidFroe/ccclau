@@ -21,6 +21,23 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
 
 
+def _dump_request_payload(payload):
+    """Sichert den vollen Request-Body neben dem Proxy-Log, wenn das Backend
+    mit 4xx ablehnt -- die Backend-Fehlermeldung allein (nur 'Client error
+    400 Bad Request') sagt nicht, WAS am Request falsch war. Gibt den Pfad
+    zurück, leer bei Fehler."""
+    try:
+        cache_dir = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+        out_dir = os.path.join(cache_dir, "clau")
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"owl_proxy_reject_{time.strftime('%Y%m%d_%H%M%S')}.json")
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        return path
+    except Exception:
+        return ""
+
+
 OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.13:7077/v1")
 OWL_MODEL = os.environ.get("OWL_MODEL", "120")
 OWL_USER = os.environ.get("OWL_PROXY_USER", "opencode")
@@ -323,7 +340,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         n_msgs = len(oai_payload["messages"])
         t0 = time.monotonic()
-        log(f"→ POST {OWL_BASE}/chat/completions model={OWL_MODEL} stream={stream} messages={n_msgs}")
+        roles_summary = ", ".join(
+            f"{m.get('role','?')}({len(str(m.get('content') or ''))}c)"
+            for m in oai_payload["messages"]
+        )
+        log(f"→ POST {OWL_BASE}/chat/completions model={OWL_MODEL} stream={stream} messages={n_msgs} [{roles_summary}]")
         try:
             resp = requests.post(
                 f"{OWL_BASE}/chat/completions",
@@ -348,6 +369,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             status = e.response.status_code if e.response is not None else 502
             body_text = (e.response.text or "")[:2000] if e.response is not None else str(e)
             log(f"✗ Backend HTTP {status} nach {time.monotonic()-t0:.1f}s: {body_text!r}")
+            if 400 <= status < 500:
+                dump_path = _dump_request_payload(oai_payload)
+                if dump_path:
+                    log(f"  Request-Payload gesichert: {dump_path}")
             self._error_json(status, f"owlAPI backend {status}: {body_text}")
             return
         except requests.exceptions.RequestException as e:
