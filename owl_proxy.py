@@ -333,9 +333,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 timeout=REQUEST_TIMEOUT
             )
             resp.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            # Backend hat mit einem echten HTTP-Fehlerstatus geantwortet (4xx/5xx).
+            # Statuscode + Body 1:1 durchreichen statt pauschal als 502 zu maskieren —
+            # sonst hält claude CLI z.B. ein 400 (Client-Fehler, nie erneut versuchen)
+            # für einen transienten Serverfehler und wiederholt ihn sinnlos.
+            status = e.response.status_code if e.response is not None else 502
+            body_text = (e.response.text or "")[:2000] if e.response is not None else str(e)
+            log(f"✗ Backend HTTP {status} nach {time.monotonic()-t0:.1f}s: {body_text!r}")
+            self._error_json(status, f"owlAPI backend {status}: {body_text}")
+            return
         except requests.exceptions.RequestException as e:
+            # Kein HTTP-Response da (Verbindungsabbruch, Timeout, ...) — das ist
+            # tatsächlich transient, 502 bleibt hier angemessen.
             log(f"✗ Request-Fehler nach {time.monotonic()-t0:.1f}s: {e!r}")
-            self.send_error(502, f"owlAPI error: {e}")
+            self._error_json(502, f"owlAPI error: {e}")
             return
         log(f"← Header nach {time.monotonic()-t0:.1f}s, status={resp.status_code}")
 
@@ -394,7 +406,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if data == b"[DONE]":
                     break
                 try:
-                    out = tr.chunk(json.loads(data))
+                    payload = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict) and payload.get("error"):
+                    # Backend meldet einen Fehler innerhalb des Streams (z.B. bei
+                    # Kontextlängen-Überschreitung mitten in der Antwort) — bisher
+                    # wurde das stillschweigend verworfen, weil es kein "choices"-
+                    # Feld hat. Stattdessen sichtbar machen und Stream sauber beenden.
+                    err = payload["error"]
+                    err_msg = err.get("message") if isinstance(err, dict) else str(err)
+                    log(f"  Backend-Fehler im Stream nach {time.monotonic()-t0:.1f}s: {err_msg!r}")
+                    self._stream_abort(tr, f"[owlAPI Fehler: {err_msg}]", write_lock)
+                    return
+                try:
+                    out = tr.chunk(payload)
                     if out:
                         with write_lock:
                             self.wfile.write(out.encode())
@@ -446,6 +472,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _json(self, code, obj):
         self._json_raw(code, json.dumps(obj).encode())
+
+    def _error_json(self, status, message):
+        err_type = "invalid_request_error" if 400 <= status < 500 else "api_error"
+        self._json_raw(status, json.dumps({
+            "type": "error",
+            "error": {"type": err_type, "message": message}
+        }).encode())
 
     def _json_raw(self, code, body):
         self.send_response(code)
