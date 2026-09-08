@@ -159,7 +159,8 @@ def _read_sse_text(resp) -> str:
     """Liest eine OpenAI-kompatible SSE-Chat-Completion-Antwort und gibt den
     zusammengesetzten Text zurück. Wirft RuntimeError bei einem Fehlerobjekt
     im Stream (kein 'choices'-Feld)."""
-    chunks = []
+    content_chunks = []
+    reasoning_chunks = []
     while True:
         raw = resp.readline()
         if not raw:
@@ -182,10 +183,19 @@ def _read_sse_text(resp) -> str:
         if not choices:
             continue
         delta = choices[0].get("delta") or {}
-        text = delta.get("content") or delta.get("reasoning_content") or ""
-        if text:
-            chunks.append(text)
-    return "".join(chunks)
+        # "content" und "reasoning_content" GETRENNT sammeln, nicht pro Chunk
+        # zusammenwerfen -- bei echten Thinking-Modellen (wie 120) ist
+        # reasoning_content das interne Grübeln, nicht die Antwort. Das gehört
+        # nicht in die Zusammenfassung. Nur wenn am Ende GAR kein content da
+        # ist (manche Backends routen wirklich alles über reasoning_content),
+        # reasoning_content als Fallback nehmen statt leer zurückzugeben.
+        if delta.get("content"):
+            content_chunks.append(delta["content"])
+        elif delta.get("reasoning_content"):
+            reasoning_chunks.append(delta["reasoning_content"])
+    if content_chunks:
+        return "".join(content_chunks)
+    return "".join(reasoning_chunks)
 
 
 def call_quiteque(
