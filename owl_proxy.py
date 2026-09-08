@@ -10,6 +10,7 @@ import os
 
 import sys
 import uuid
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
@@ -20,6 +21,11 @@ OWL_USER = os.environ.get("OWL_PROXY_USER", "opencode")
 PORT = int(os.environ.get("OWL_PROXY_PORT", "8325"))
 # Timeout: lang genug für langsame Modelle (PropellerA etc.)
 REQUEST_TIMEOUT = int(os.environ.get("OWL_PROXY_TIMEOUT", "600"))
+# Heartbeat: Client-seitige SSE-Verbindung (claude CLI ↔ dieser Proxy) hat ihr
+# eigenes Idle-Timeout, unabhängig von REQUEST_TIMEOUT zum Backend. Langsame
+# Backends liefern oft minutenlang kein einziges Byte, bevor das erste Token
+# kommt — ohne Keep-Alive hält claude CLI die Verbindung dann für tot.
+HEARTBEAT_INTERVAL = float(os.environ.get("OWL_PROXY_HEARTBEAT", "15"))
 # ── Format-Konvertierung ───────────────────────────────────────────────────────
 
 def content_to_str(content):
@@ -340,9 +346,27 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         tr = StreamTranslator(model_name)
+        write_lock = threading.Lock()
+        stop_heartbeat = threading.Event()
+
+        def heartbeat():
+            # Solange das (evtl. langsame) Backend noch kein Datenpaket
+            # geschickt hat, hier regelmäßig pingen, damit claude CLI die
+            # Verbindung nicht wegen Inaktivität als tot ansieht.
+            while not stop_heartbeat.wait(HEARTBEAT_INTERVAL):
+                try:
+                    with write_lock:
+                        self.wfile.write(tr._evt("ping", {"type": "ping"}).encode())
+                        self.wfile.flush()
+                except Exception:
+                    return
+
+        hb_thread = threading.Thread(target=heartbeat, daemon=True)
         try:
-            self.wfile.write(tr.start().encode())
-            self.wfile.flush()
+            with write_lock:
+                self.wfile.write(tr.start().encode())
+                self.wfile.flush()
+            hb_thread.start()
             for line in owl_resp.iter_lines():
                 if not line or not line.startswith(b"data: "):
                     continue
@@ -352,8 +376,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 try:
                     out = tr.chunk(json.loads(data))
                     if out:
-                        self.wfile.write(out.encode())
-                        self.wfile.flush()
+                        with write_lock:
+                            self.wfile.write(out.encode())
+                            self.wfile.flush()
                 except (json.JSONDecodeError, KeyError):
                     pass
         except BrokenPipeError:
@@ -362,14 +387,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # Backend-Verbindung riss mitten im Stream ab (Timeout, Reset, ...) —
             # sauberen Fehlertext + Stream-Ende senden statt Client mit toter
             # Verbindung hängen zu lassen (führte sonst zu doppeltem Retry + 502).
-            self._stream_abort(tr, f"[owlAPI-Verbindung abgebrochen: {e}]")
+            self._stream_abort(tr, f"[owlAPI-Verbindung abgebrochen: {e}]", write_lock)
         finally:
+            stop_heartbeat.set()
             try:
                 owl_resp.close()
             except Exception:
                 pass
 
-    def _stream_abort(self, tr, message):
+    def _stream_abort(self, tr, message, write_lock):
         try:
             evts = []
             if not tr.text_started:
@@ -390,8 +416,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 "usage": {"output_tokens": tr.output_tokens}
             }))
             evts.append(tr._evt("message_stop", {"type": "message_stop"}))
-            self.wfile.write("".join(evts).encode())
-            self.wfile.flush()
+            with write_lock:
+                self.wfile.write("".join(evts).encode())
+                self.wfile.flush()
         except BrokenPipeError:
             pass
 
