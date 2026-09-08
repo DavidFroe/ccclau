@@ -155,15 +155,54 @@ QQ_RETRIES = 3
 QQ_RETRY_DELAYS = (5, 15)  # Sekunden zwischen Versuch 1→2 und 2→3
 
 
+def _read_sse_text(resp) -> str:
+    """Liest eine OpenAI-kompatible SSE-Chat-Completion-Antwort und gibt den
+    zusammengesetzten Text zurück. Wirft RuntimeError bei einem Fehlerobjekt
+    im Stream (kein 'choices'-Feld)."""
+    chunks = []
+    while True:
+        raw = resp.readline()
+        if not raw:
+            break
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line.startswith("data: "):
+            continue
+        data = line[6:]
+        if data == "[DONE]":
+            break
+        try:
+            obj = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and obj.get("error"):
+            err = obj["error"]
+            msg = err.get("message") if isinstance(err, dict) else str(err)
+            raise RuntimeError(f"QuiteQue-Fehler im Stream: {msg}")
+        choices = obj.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        text = delta.get("content") or delta.get("reasoning_content") or ""
+        if text:
+            chunks.append(text)
+    return "".join(chunks)
+
+
 def call_quiteque(
     qq_url: str, user: str, model: str, system: str, user_msg: str,
     max_tokens: int, timeout: int = 1200
 ) -> str:
-    """Sendet einen Chat-Completion-Request an QuiteQue und gibt den Text zurück.
+    """Sendet einen Chat-Completion-Request an QuiteQue (gestreamt -- laut
+    QuiteQue-Betreiber ist ein Request dieser Größe ohne Streaming
+    "Glückssache") und gibt den zusammengesetzten Text zurück.
     Bei transienten Backend-Fehlern (5xx, z.B. Watchdog-Timeout eines Slots)
     wird mit Backoff erneut versucht -- ein 4xx (falsche Anfrage) dagegen nie,
     das wird sich beim nächsten Versuch nicht ändern."""
     model = normalize_model_id(model)
+    # X-Owl-Max-Wait: wie lange QuiteQue serverseitig auf diesen Request warten
+    # darf (inkl. eines evtl. internen Retries), etwas unter unserem eigenen
+    # Socket-Timeout, damit der bei uns nicht zuerst zuschlägt.
+    max_wait = max(60, timeout - 60)
     payload = {
         "model": model,
         "messages": [
@@ -172,6 +211,8 @@ def call_quiteque(
         ],
         "max_tokens": max_tokens,
         "temperature": 0.3,
+        "stream": True,
+        "stream_options": {"include_usage": True},
     }
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -180,6 +221,7 @@ def call_quiteque(
         headers={
             "Content-Type": "application/json",
             "X-OwlTrail-User": user,
+            "X-Owl-Max-Wait": str(max_wait),
         },
         method="POST",
     )
@@ -187,15 +229,21 @@ def call_quiteque(
     for attempt in range(QQ_RETRIES):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            return data["choices"][0]["message"]["content"]
+                return _read_sse_text(resp)
         except urllib.error.HTTPError as e:
             last_err = e
             if e.code < 500 or attempt == QQ_RETRIES - 1:
                 raise
+            delay = QQ_RETRY_DELAYS[min(attempt, len(QQ_RETRY_DELAYS) - 1)]
+            retry_after = e.headers.get("Retry-After") if e.headers else None
+            if retry_after:
+                try:
+                    delay = float(retry_after)
+                except ValueError:
+                    pass
             print(f"[cc_compact] QuiteQue {e.code} (Versuch {attempt+1}/{QQ_RETRIES}), "
-                  f"retry in {QQ_RETRY_DELAYS[attempt]}s...", file=sys.stderr)
-            time.sleep(QQ_RETRY_DELAYS[attempt])
+                  f"retry in {delay:.0f}s...", file=sys.stderr)
+            time.sleep(delay)
     raise last_err
 
 

@@ -328,7 +328,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
             resp = requests.post(
                 f"{OWL_BASE}/chat/completions",
                 json=oai_payload,
-                headers={"Content-Type": "application/json", "X-OwlTrail-User": OWL_USER},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-OwlTrail-User": OWL_USER,
+                    # Wie lange QuiteQue serverseitig auf diesen Request warten darf
+                    # (inkl. eines evtl. internen Retries bei Watchdog-Timeout),
+                    # etwas unter unserem eigenen Timeout.
+                    "X-Owl-Max-Wait": str(max(60, REQUEST_TIMEOUT - 60)),
+                },
                 stream=stream,
                 timeout=REQUEST_TIMEOUT
             )
