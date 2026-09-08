@@ -9,11 +9,17 @@ import json
 import os
 
 import sys
+import time
 import uuid
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
+
+
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
+
 
 OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.13:7077/v1")
 OWL_MODEL = os.environ.get("OWL_MODEL", "120")
@@ -314,6 +320,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             oai_payload["tools"] = tools
         if stream:
             oai_payload["stream_options"] = {"include_usage": True}
+
+        n_msgs = len(oai_payload["messages"])
+        t0 = time.monotonic()
+        log(f"→ POST {OWL_BASE}/chat/completions model={OWL_MODEL} stream={stream} messages={n_msgs}")
         try:
             resp = requests.post(
                 f"{OWL_BASE}/chat/completions",
@@ -324,8 +334,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             )
             resp.raise_for_status()
         except requests.exceptions.RequestException as e:
+            log(f"✗ Request-Fehler nach {time.monotonic()-t0:.1f}s: {e!r}")
             self.send_error(502, f"owlAPI error: {e}")
             return
+        log(f"← Header nach {time.monotonic()-t0:.1f}s, status={resp.status_code}")
 
         if stream:
             self._stream(resp, model_name)
@@ -348,6 +360,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         tr = StreamTranslator(model_name)
         write_lock = threading.Lock()
         stop_heartbeat = threading.Event()
+        t0 = time.monotonic()
+        n_lines = 0
+        n_pings = [0]
 
         def heartbeat():
             # Solange das (evtl. langsame) Backend noch kein Datenpaket
@@ -358,7 +373,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     with write_lock:
                         self.wfile.write(tr._evt("ping", {"type": "ping"}).encode())
                         self.wfile.flush()
-                except Exception:
+                    n_pings[0] += 1
+                except Exception as e:
+                    log(f"  heartbeat write fehlgeschlagen nach {time.monotonic()-t0:.1f}s: {e!r}")
                     return
 
         hb_thread = threading.Thread(target=heartbeat, daemon=True)
@@ -368,6 +385,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             hb_thread.start()
             for line in owl_resp.iter_lines():
+                if n_lines == 0:
+                    log(f"  erste Zeile vom Backend nach {time.monotonic()-t0:.1f}s ({n_pings[0]} Pings gesendet)")
+                n_lines += 1
                 if not line or not line.startswith(b"data: "):
                     continue
                 data = line[6:]
@@ -381,12 +401,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             self.wfile.flush()
                 except (json.JSONDecodeError, KeyError):
                     pass
+            log(f"  Stream fertig nach {time.monotonic()-t0:.1f}s, {n_lines} Zeilen, {n_pings[0]} Pings")
         except BrokenPipeError:
-            pass
+            log(f"  Client trennte Verbindung nach {time.monotonic()-t0:.1f}s ({n_lines} Zeilen, {n_pings[0]} Pings)")
         except requests.exceptions.RequestException as e:
             # Backend-Verbindung riss mitten im Stream ab (Timeout, Reset, ...) —
             # sauberen Fehlertext + Stream-Ende senden statt Client mit toter
             # Verbindung hängen zu lassen (führte sonst zu doppeltem Retry + 502).
+            log(f"  Backend-Verbindung riss nach {time.monotonic()-t0:.1f}s ab ({n_lines} Zeilen, {n_pings[0]} Pings): {e!r}")
             self._stream_abort(tr, f"[owlAPI-Verbindung abgebrochen: {e}]", write_lock)
         finally:
             stop_heartbeat.set()

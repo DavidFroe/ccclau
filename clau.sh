@@ -308,14 +308,19 @@ _free_port() {
 
 # Proxy starten: port + pid in Temp-Datei, gibt Port zurück
 _OWL_PID_FILE="/tmp/.clau_owl_proxy_$$.pid"
+OWL_PROXY_LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/clau"
+OWL_PROXY_LOG_FILE="${OWL_PROXY_LOG_DIR}/owl_proxy.log"
 
 _start_owl_proxy() {
   local owl_id="$1"
   local port
   port="$(_free_port)"
+  mkdir -p "$OWL_PROXY_LOG_DIR" 2>/dev/null || true
+  # Log-Datei bei jedem Start kappen statt endlos wachsen zu lassen
+  : > "$OWL_PROXY_LOG_FILE" 2>/dev/null || true
   OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
     OWL_PROXY_TIMEOUT="${CLAU_OWL_TIMEOUT:-1800}" \
-    python3 "$OWL_PROXY_SCRIPT" "$port" >/dev/null 2>&1 &
+    python3 "$OWL_PROXY_SCRIPT" "$port" >>"$OWL_PROXY_LOG_FILE" 2>&1 &
   echo "$!" > "$_OWL_PID_FILE"
   echo "$port"
 }
@@ -1564,6 +1569,7 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_TIMEOUT_DEFAULT="1800000"     Default Bash-Timeout in ms (30 Min = 1800000)
   CLAU_TIMEOUT_MAX="7200000"         Max Bash-Timeout in ms (120 Min = 7200000)
   CLAU_OWL_TIMEOUT="1800"            owlAPI-Request-Timeout in Sekunden (Default 1800 = 30 Min)
+  owlAPI-Proxy-Log: ~/.cache/clau/owl_proxy.log (wird bei jedem Start überschrieben)
   CLAU_UPDATE_CHECK="1"              Beim Start gegen GitHub auf Updates prüfen (0 = aus)
   CLAU_UPDATE_CHECK_INTERVAL="86400" Prüf-Intervall in Sekunden (Default 1×/Tag)
 HELP_EOF
