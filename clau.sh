@@ -2203,6 +2203,119 @@ _interaction_args() {
   echo "${parts[*]}"
 }
 
+# Erste sinnvolle User-Message (gekürzt) als Wiedererkennungs-Hinweis in der
+# Session-Liste -- sonst sind alle Einträge nur eine UUID.
+_session_preview() {
+  local sf="$1"
+  python3 - "$sf" <<'PYEOF' 2>/dev/null
+import json, sys
+sf = sys.argv[1]
+try:
+    with open(sf) as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if d.get("isMeta") or d.get("isSidechain"):
+                continue
+            msg = d.get("message") or {}
+            if msg.get("role") != "user":
+                continue
+            c = msg.get("content")
+            text = ""
+            if isinstance(c, str):
+                text = c
+            elif isinstance(c, list):
+                for block in c:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        break
+            text = text.strip().replace("\n", " ")
+            if text:
+                print(text[:70])
+                break
+except Exception:
+    pass
+PYEOF
+}
+
+# Listet die letzten Sessions im aktuellen Projekt mit Größe/Token-Schätzung
+# und Inhalts-Vorschau, lässt eine auswählen, und fragt dann: fortsetzen
+# oder komprimieren (auf genau dieser gewählten Datei, nicht "die neueste").
+choose_session_interactive() {
+  local mdl; mdl="$(effective_model)"
+  if [[ -z "$mdl" ]]; then
+    ensure_model
+    mdl="$(effective_model)"
+  fi
+  local owl_id="" cw=""
+  if is_owl_model "$mdl"; then
+    owl_id="$(owl_model_id "$mdl")"
+    cw="$(owl_context_window "$owl_id")"
+  fi
+
+  local proj_dir; proj_dir="$(_claude_projects_dir)/$(_project_hash_for)"
+  local files=()
+  if [[ -d "$proj_dir" ]]; then
+    while IFS= read -r f; do files+=("$f"); done < <(ls -1t "$proj_dir"/*.jsonl 2>/dev/null | head -20)
+  fi
+  if [[ "${#files[@]}" -eq 0 ]]; then
+    echo "Keine Sessions in diesem Projekt gefunden."
+    return 1
+  fi
+
+  echo
+  echo "Letzte Sessions in diesem Projekt (neueste zuerst, max. 20):"
+  local i=1 f tok pct preview sizeh
+  for f in "${files[@]}"; do
+    tok="$(_estimate_session_tokens "$f")"
+    tok="${tok:-0}"
+    preview="$(_session_preview "$f")"
+    sizeh="$(du -h "$f" 2>/dev/null | cut -f1)"
+    if [[ -n "$cw" && "$cw" -gt 0 && "$tok" -gt 0 ]]; then
+      pct=$(( tok * 100 / cw ))
+      printf "  %2d) %s Tok (%s%% v. %s, %s)  %s\n" "$i" "$tok" "$pct" "owl:$owl_id" "$sizeh" "${preview:-<leer>}"
+    else
+      printf "  %2d) %s Tok (%s)  %s\n" "$i" "$tok" "$sizeh" "${preview:-<leer>}"
+    fi
+    ((i++))
+  done
+  printf "Auswahl [1-%d, Enter=Abbrechen]: " "${#files[@]}"
+  local sel; read -r sel
+  [[ -n "$sel" && "$sel" =~ ^[0-9]+$ && "$sel" -ge 1 && "$sel" -le "${#files[@]}" ]] || { echo "Abgebrochen."; return 0; }
+  local chosen="${files[$((sel-1))]}"
+  local chosen_id; chosen_id="$(basename "$chosen" .jsonl)"
+
+  echo
+  echo "Gewählt: $chosen_id"
+  echo "  1) Fortsetzen"
+  echo "  2) Komprimieren (und danach fortsetzen)"
+  echo "  3) Abbrechen"
+  printf "Auswahl [1-3, Enter=1]: "
+  local action; read -r action
+  case "${action:-1}" in
+    2)
+      if [[ -z "$owl_id" ]]; then
+        echo "Komprimieren ist aktuell nur für owlAPI-Modelle verdrahtet (Modell wechseln, z.B. owl:120)." >&2
+        return 1
+      fi
+      echo "Komprimiere $chosen_id (Ziel: owl:$owl_id) ..."
+      local new_id
+      new_id="$(_compact_session_file "$chosen" "$owl_id")"
+      if [[ -n "$new_id" ]]; then
+        echo "✓ Komprimiert → neue Session: $new_id"
+        run_resume_id "$new_id"
+      else
+        echo "✗ Komprimieren fehlgeschlagen." >&2
+        return 1
+      fi
+      ;;
+    3) echo "Abgebrochen." ;;
+    *) run_resume_id "$chosen_id" ;;
+  esac
+}
+
 run_resume_picker() {
   local mdl
   mdl="$(effective_model)"
@@ -2526,7 +2639,7 @@ interactive_start() {
   echo
   echo "clau — $(basename "$(pwd)")  [$tag]"
   [[ -n "${CLAU_SESSION_NAME:-}" ]] && echo "  Session: ${CLAU_SESSION_NAME}"
-  echo "  1) Verfügbare Sessions auswählen"
+  echo "  1) Session auswählen (fortsetzen oder komprimieren)"
   echo "  2) Neue Session beginnen        [Enter]"
   echo "  3) Modell wechseln"
   echo "  4) Bot-Einstellungen"
@@ -2537,7 +2650,7 @@ interactive_start() {
   read -r start_choice
 
   case "${start_choice:-2}" in
-    1) run_resume_picker ;;
+    1) choose_session_interactive; interactive_start ;;
     2) run_new_session_named ;;
     3) choose_model_interactive; interactive_start ;;
     4) choose_bot_settings; interactive_start ;;
