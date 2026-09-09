@@ -291,19 +291,33 @@ class StreamTranslator:
                 out.append(self._evt("content_block_stop", {
                     "type": "content_block_stop", "index": self.thinking_index
                 }))
-            # Empty response fallback — model returned nothing (content filter / refusal)
+            # Empty response fallback — model returned nothing. Grund unterscheiden:
+            # Token-Limit beim Denken erreicht (finish_reason=length, aber schon
+            # gedacht) ist etwas anderes als ein Inhaltsfilter/Refusal.
             if not self.text_started and not self.tool_buffers:
                 self.text_started = True
                 self.text_index = self.next_index
                 self.next_index += 1
+                if finish_reason == "length" and self.thinking_started:
+                    fallback_text = (
+                        f"[Modell {OWL_MODEL} hat das Token-Limit erreicht, während es noch "
+                        f"nachgedacht hat, und keinen Antworttext geschrieben — kein Inhaltsfilter. "
+                        f"Anfrage evtl. aufteilen/vereinfachen, oder max_tokens erhöhen.]"
+                    )
+                elif finish_reason == "length":
+                    fallback_text = f"[Modell {OWL_MODEL} hat das Token-Limit erreicht, ohne Text zu schreiben.]"
+                else:
+                    fallback_text = (
+                        f"[Modell {OWL_MODEL} hat leere Antwort zurückgegeben — möglicherweise "
+                        f"Inhaltsfilter. Bitte Anfrage umformulieren.]"
+                    )
                 out.append(self._evt("content_block_start", {
                     "type": "content_block_start", "index": self.text_index,
                     "content_block": {"type": "text", "text": ""}
                 }))
                 out.append(self._evt("content_block_delta", {
                     "type": "content_block_delta", "index": self.text_index,
-                    "delta": {"type": "text_delta",
-                              "text": f"[Modell {OWL_MODEL} hat leere Antwort zurückgegeben — möglicherweise Inhaltsfilter. Bitte Anfrage umformulieren.]"}
+                    "delta": {"type": "text_delta", "text": fallback_text}
                 }))
             if self.text_started:
                 out.append(self._evt("content_block_stop", {
