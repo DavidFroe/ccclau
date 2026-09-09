@@ -352,6 +352,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.send_error(400, "Bad JSON")
             return
+        except (ConnectionResetError, BrokenPipeError) as e:
+            # Client (claude CLI) hat die Verbindung gekappt, während wir noch
+            # gelesen haben -- z.B. wenn der Rechner mitten im Request in den
+            # Suspend geht. Kein Fehler unsererseits, sauber loggen statt
+            # Traceback.
+            log(f"✗ Client trennte Verbindung beim Lesen des Requests: {e!r}")
+            return
         # Pfad ohne Query-String prüfen (claude sendet ?beta=true etc.)
         if not self._base_path().endswith("/messages"):
             self.send_error(404, f"Unknown: {self.path}")
