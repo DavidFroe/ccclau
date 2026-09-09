@@ -38,6 +38,24 @@ def _dump_request_payload(payload):
         return ""
 
 
+def _estimate_input_tokens(payload):
+    """Grobe Token-Schätzung des Request-Inputs (~3.5 chars/Token). Nur um bei
+    einem Backend-400 zu erkennen, ob die Session so groß ist, dass das
+    Context-Window-Overflow die wahrscheinlichste Ursache ist."""
+    total = 0
+    for m in payload.get("messages", []):
+        c = m.get("content")
+        if isinstance(c, str):
+            total += len(c)
+        elif isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict):
+                    total += len(str(b.get("text", "")))
+                    total += len(str(b.get("input", "")))
+                    total += len(str(b.get("content", "")))
+    return total // 3
+
+
 OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.13:7077/v1")
 OWL_MODEL = os.environ.get("OWL_MODEL", "120")
 OWL_USER = os.environ.get("OWL_PROXY_USER", "opencode")
@@ -432,7 +450,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 dump_path = _dump_request_payload(oai_payload)
                 if dump_path:
                     log(f"  Request-Payload gesichert: {dump_path}")
-            self._error_json(status, f"owlAPI backend {status}: {body_text}")
+            # Der Backend-Fehler-Body ist oft nur "Client error 400 Bad Request"
+            # und sagt nicht, WAS falsch war. Häufigste Ursache bei großen
+            # Sessions: der Prompt überschreitet das Modell-Context-Window.
+            # Dann den User direkt auf clau --compact hinweisen statt ihn
+            # raten zu lassen.
+            msg = f"owlAPI backend {status}: {body_text}"
+            if status == 400 and _estimate_input_tokens(oai_payload) > 60000:
+                msg += ("  [Kontext-Window des Modells wahrscheinlich überschritten — "
+                        "Session ist zu groß. Beende die Session und starte "
+                        "`clau --compact`, um sie zu komprimieren und fortzusetzen.]")
+            self._error_json(status, msg)
             return
         except requests.exceptions.RequestException as e:
             # Kein HTTP-Response da (Verbindungsabbruch, Timeout, ...) — das ist
