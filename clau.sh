@@ -2294,17 +2294,18 @@ choose_session_interactive() {
 
   echo
   echo "Letzte Sessions in diesem Projekt (neueste zuerst, max. 20):"
-  local i=1 f tok pct preview sizeh
+  local i=1 f tok pct preview sizeh mtime
   for f in "${files[@]}"; do
     tok="$(_estimate_session_tokens "$f")"
     tok="${tok:-0}"
     preview="$(_session_preview "$f")"
     sizeh="$(du -h "$f" 2>/dev/null | cut -f1)"
+    mtime="$(date -r "$f" '+%d.%m. %H:%M' 2>/dev/null)"
     if [[ -n "$cw" && "$cw" -gt 0 && "$tok" -gt 0 ]]; then
       pct=$(( tok * 100 / cw ))
-      printf "  %2d) %s Tok (%s%% v. %s, %s)  %s\n" "$i" "$tok" "$pct" "owl:$owl_id" "$sizeh" "${preview:-<leer>}"
+      printf "  %2d) [%s] %s Tok (%s%% v. %s, %s)  %s\n" "$i" "$mtime" "$tok" "$pct" "owl:$owl_id" "$sizeh" "${preview:-<leer>}"
     else
-      printf "  %2d) %s Tok (%s)  %s\n" "$i" "$tok" "$sizeh" "${preview:-<leer>}"
+      printf "  %2d) [%s] %s Tok (%s)  %s\n" "$i" "$mtime" "$tok" "$sizeh" "${preview:-<leer>}"
     fi
     ((i++))
   done
