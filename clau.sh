@@ -214,6 +214,16 @@ _latest_session_file() {
   ls -1t "$proj_dir"/*.jsonl 2>/dev/null | head -1
 }
 
+# Session-Datei zu einer konkreten Session-ID im Projekt-Bucket von $PWD.
+_session_file_for_id() {
+  local sid="${1:-}"
+  [[ -n "$sid" ]] || return 1
+  local ph; ph="$(_project_hash_for "${2:-$PWD}")"
+  local sf; sf="$(_claude_projects_dir)/${ph}/${sid}.jsonl"
+  [[ -f "$sf" ]] || return 1
+  echo "$sf"
+}
+
 _estimate_session_tokens() {
   # Liest die letzte usage-Zeile und gibt geschätzte Kontext-Tokens zurück
   # (= input_tokens + cache_read_input_tokens + cache_creation_input_tokens).
@@ -317,10 +327,18 @@ PRE_FLIGHT_RESUME_ID=""
 
 _pre_flight_check() {
   local owl_id="$1"
+  local session_id="${2:-}"
   local cw; cw="$(owl_context_window "$owl_id")"
   [[ -n "$cw" && "$cw" -gt 0 ]] || return 0  # kein Check möglich (z.B. Claude direkt)
 
-  local sf; sf="$(_latest_session_file 2>/dev/null)"
+  # Wird eine bestimmte Session fortgesetzt, muss GENAU die geprüft werden —
+  # die neueste Datei im Projekt-Bucket ist bei --resume oft eine andere
+  # (und meldete dann fälschlich "leere Session").
+  local sf
+  if [[ -n "$session_id" ]]; then
+    sf="$(_session_file_for_id "$session_id" 2>/dev/null)"
+  fi
+  [[ -n "$sf" ]] || sf="$(_latest_session_file 2>/dev/null)"
   [[ -n "$sf" && -f "$sf" ]] || { echo "✓ Pre-Flight: keine Session gefunden, starte neu"; return 0; }
 
   local tokens; tokens="$(_estimate_session_tokens "$sf")"
@@ -1218,7 +1236,12 @@ run_owl_via_claude() {
   done
   if [[ "$force_ctx" -eq 0 ]]; then
     PRE_FLIGHT_RESUME_ID=""
-    _pre_flight_check "$owl_id" || exit 1
+    local resume_id="" prev=""
+    for arg in "$@"; do
+      if [[ "$prev" == "--resume" ]]; then resume_id="$arg"; break; fi
+      prev="$arg"
+    done
+    _pre_flight_check "$owl_id" "$resume_id" || exit 1
     if [[ -n "$PRE_FLIGHT_RESUME_ID" ]]; then
       # Pre-Flight hat die zu große Session automatisch komprimiert —
       # auf die neue Session umlenken statt auf der alten weiterzumachen.
