@@ -1219,10 +1219,14 @@ CLAU_OWL_TOOLS_DEFAULT="Bash,Edit,Write,Read,AskUserQuestion,TaskCreate,TaskGet,
 # nicht, ein lokales Modell hätte sonst gar keinen Weg ins Netz.
 _owl_mcp_config() {
   if [[ "${CLAU_WEBSEARCH:-1}" == "1" && -f "$WEBSEARCH_MCP_SCRIPT" ]]; then
-    printf '{"mcpServers":{"websearch":{"type":"stdio","command":"python3","args":["%s"],"env":{"QUITEQUE_URL":"%s","OWL_PROXY_USER":"%s"}}}}' \
+    # Zeilenumbruch ist Pflicht: der Aufrufer liest die Argumente mit
+    # "while read", und read verwirft die letzte Zeile ohne \n — dann stünde
+    # --mcp-config ohne Wert da und würde die folgenden Argumente
+    # (--resume <id>) als Config-Dateien schlucken.
+    printf '{"mcpServers":{"websearch":{"type":"stdio","command":"python3","args":["%s"],"env":{"QUITEQUE_URL":"%s","OWL_PROXY_USER":"%s"}}}}\n' \
       "$WEBSEARCH_MCP_SCRIPT" "$OWL_BASE_URL" "$QQ_USER"
   else
-    printf '{"mcpServers":{}}'
+    printf '{"mcpServers":{}}\n'
   fi
 }
 
