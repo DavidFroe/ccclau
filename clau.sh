@@ -216,34 +216,75 @@ _latest_session_file() {
 
 _estimate_session_tokens() {
   # Liest die letzte usage-Zeile und gibt geschätzte Kontext-Tokens zurück
-  # (= input_tokens + cache_read_input_tokens + cache_creation_input_tokens)
+  # (= input_tokens + cache_read_input_tokens + cache_creation_input_tokens).
+  # Meldet das Backend keine input_tokens (alte owl_proxy-Versionen schrieben
+  # dort immer 0), wird stattdessen aus der Session-Datei geschätzt — sonst
+  # sieht der Pre-Flight-Check eine 100k-Session als "leer" an.
   local sf="${1:-}"
   [[ -f "$sf" ]] || { echo "0"; return 1; }
   # Wir nehmen die letzte Zeile mit non-empty usage
   python3 - "$sf" <<'PYEOF' 2>/dev/null || echo "0"
 import json, sys
+
+# Fallback-Schätzung, wenn keine echten usage-Zahlen in der Session stehen.
+# System-Prompt + Tool-Definitionen liegen nicht in der Session-Datei, gehen
+# aber bei jedem Request mit ans Modell — grober Aufschlag dafür.
+OVERHEAD_TOKENS = 20000
+CHARS_PER_TOKEN = 3.5
+
 sf = sys.argv[1]
 last_in = 0
 last_cache_read = 0
 last_cache_creation = 0
-found = False
+rows = []
 with open(sf) as f:
     for line in f:
         try:
             d = json.loads(line)
         except Exception:
             continue
-        msg = d.get('message', {})
-        u = msg.get('usage') or {}
+        rows.append(d)
+        u = (d.get('message') or {}).get('usage') or {}
         if u:
             last_in = u.get('input_tokens', 0) or 0
             last_cache_read = u.get('cache_read_input_tokens', 0) or 0
             last_cache_creation = u.get('cache_creation_input_tokens', 0) or 0
-            found = True
-if not found:
-    print("0")
+
+total = last_in + last_cache_read + last_cache_creation
+if total > 0:
+    print(total)
+    sys.exit(0)
+
+
+def block_chars(b):
+    # thinking-Blöcke stehen zwar in der Session, werden aber nie wieder ans
+    # Modell geschickt — sie zählen nicht zum Kontext des nächsten Requests.
+    if isinstance(b, dict) and b.get('type') in ('thinking', 'redacted_thinking'):
+        return 0
+    return len(json.dumps(b, ensure_ascii=False))
+
+
+# Alles vor der letzten Compact-Grenze ist bereits zusammengefasst und wird
+# nicht mehr mitgeschickt.
+start = 0
+for i, d in enumerate(rows):
+    if d.get('subtype') == 'compact_boundary':
+        start = i
+
+chars = 0
+for d in rows[start:]:
+    if d.get('isSidechain') or d.get('type') not in ('user', 'assistant'):
+        continue
+    content = (d.get('message') or {}).get('content')
+    if isinstance(content, str):
+        chars += len(content)
+    elif isinstance(content, list):
+        chars += sum(block_chars(b) for b in content)
+
+if chars > 0:
+    print(int(chars / CHARS_PER_TOKEN) + OVERHEAD_TOKENS)
 else:
-    print(last_in + last_cache_read + last_cache_creation)
+    print("0")
 PYEOF
 }
 

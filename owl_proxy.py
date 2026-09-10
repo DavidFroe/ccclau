@@ -39,21 +39,25 @@ def _dump_request_payload(payload):
 
 
 def _estimate_input_tokens(payload):
-    """Grobe Token-Schätzung des Request-Inputs (~3.5 chars/Token). Nur um bei
-    einem Backend-400 zu erkennen, ob die Session so groß ist, dass das
-    Context-Window-Overflow die wahrscheinlichste Ursache ist."""
-    total = 0
-    for m in payload.get("messages", []):
-        c = m.get("content")
-        if isinstance(c, str):
-            total += len(c)
-        elif isinstance(c, list):
-            for b in c:
-                if isinstance(b, dict):
-                    total += len(str(b.get("text", "")))
-                    total += len(str(b.get("input", "")))
-                    total += len(str(b.get("content", "")))
-    return total // 3
+    """Grobe Token-Schätzung des Request-Inputs (~3.5 chars/Token).
+
+    Zwei Aufgaben:
+      1. Bei einem Backend-400 erkennen, ob ein Context-Window-Overflow die
+         wahrscheinlichste Ursache ist.
+      2. Der claude-CLI überhaupt einen input_tokens-Wert liefern. Das Backend
+         meldet prompt_tokens erst am Ende der Antwort, message_start braucht
+         den Wert aber schon vorher — ohne ihn steht die Kontext-Anzeige der
+         CLI dauerhaft bei 0 und Auto-Compact löst nie aus, bis das Backend
+         die zu große Session hart mit 400 ablehnt.
+
+    Zählt bewusst den kompletten Payload inklusive System-Prompt und
+    Tool-Definitionen: die machen bei Claude Code zusammen leicht 15-20k
+    Tokens aus und fehlten in der alten, rein message-basierten Schätzung.
+    """
+    try:
+        return int(len(json.dumps(payload, ensure_ascii=False)) / 3.5)
+    except Exception:
+        return 0
 
 
 OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.13:7077/v1")
@@ -147,7 +151,7 @@ def tools_ant_to_oai(tools):
     } for t in tools]
 
 
-def oai_resp_to_ant(oai_resp, model_name):
+def oai_resp_to_ant(oai_resp, model_name, est_input_tokens=0):
     choice = oai_resp.get("choices", [{}])[0]
     message = choice.get("message", {})
     content = []
@@ -181,7 +185,9 @@ def oai_resp_to_ant(oai_resp, model_name):
         "stop_reason": stop_reason,
         "stop_sequence": None,
         "usage": {
-            "input_tokens": usage.get("prompt_tokens", 0),
+            # Fällt das Backend ohne usage zurück, lieber die Schätzung als 0 —
+            # 0 würde die Kontext-Anzeige der CLI wieder blind machen.
+            "input_tokens": usage.get("prompt_tokens") or est_input_tokens,
             "output_tokens": usage.get("completion_tokens", 0)
         }
     }
@@ -190,8 +196,11 @@ def oai_resp_to_ant(oai_resp, model_name):
 # ── Streaming-Übersetzer ───────────────────────────────────────────────────────
 
 class StreamTranslator:
-    def __init__(self, model_name):
+    def __init__(self, model_name, input_tokens=0):
         self.model = model_name
+        # Schätzung bis das Backend echte prompt_tokens liefert (kommt erst
+        # im letzten Chunk, message_start braucht den Wert aber sofort).
+        self.input_tokens = input_tokens
         self.msg_id = "msg_" + uuid.uuid4().hex[:24]
         self.next_index = 0
         self.thinking_started = False
@@ -201,6 +210,10 @@ class StreamTranslator:
         self.text_index = None
         self.tool_buffers = {}   # oai_index → {id, name, args, block_index}
         self.output_tokens = 0
+        self.text_closed = False
+        self.tools_closed = False
+        self.stop_reason = None
+        self.ended = False
 
     def _evt(self, name, data):
         return f"event: {name}\ndata: {json.dumps(data)}\n\n"
@@ -213,7 +226,7 @@ class StreamTranslator:
                     "id": self.msg_id, "type": "message", "role": "assistant",
                     "content": [], "model": self.model,
                     "stop_reason": None, "stop_sequence": None,
-                    "usage": {"input_tokens": 0, "output_tokens": 0}
+                    "usage": {"input_tokens": self.input_tokens, "output_tokens": 0}
                 }
             }) +
             self._evt("ping", {"type": "ping"})
@@ -225,6 +238,8 @@ class StreamTranslator:
 
         if data.get("usage"):
             self.output_tokens = data["usage"].get("completion_tokens", self.output_tokens)
+            # Echte prompt_tokens ersetzen die Schätzung, sobald sie da sind.
+            self.input_tokens = data["usage"].get("prompt_tokens") or self.input_tokens
 
         if not choices:
             return ""
@@ -337,22 +352,57 @@ class StreamTranslator:
                     "type": "content_block_delta", "index": self.text_index,
                     "delta": {"type": "text_delta", "text": fallback_text}
                 }))
-            if self.text_started:
+            if self.text_started and not self.text_closed:
+                self.text_closed = True
                 out.append(self._evt("content_block_stop", {
                     "type": "content_block_stop", "index": self.text_index
                 }))
+            if not self.tools_closed:
+                self.tools_closed = True
+                for buf in self.tool_buffers.values():
+                    out.append(self._evt("content_block_stop", {
+                        "type": "content_block_stop", "index": buf["bidx"]
+                    }))
+            self.stop_reason = "tool_use" if (finish_reason == "tool_calls" or self.tool_buffers) else "end_turn"
+            # message_delta/message_stop bewusst NICHT hier: den usage-Chunk mit
+            # prompt_tokens/completion_tokens schickt das Backend erst NACH dem
+            # Chunk mit finish_reason. Wer hier abschließt, verliert beide Werte —
+            # genau daran war die Kontext-Anzeige der CLI blind (input_tokens: 0).
+            # Den Abschluss übernimmt finish() am Ende des Streams.
+
+        return "".join(out)
+
+    def finish(self):
+        """Schlussereignisse des Streams. Idempotent — wird am Stream-Ende
+        gerufen, auch wenn nie ein finish_reason kam (Backend brach ab)."""
+        if self.ended:
+            return ""
+        self.ended = True
+        out = []
+        if self.thinking_started and not self.thinking_closed:
+            self.thinking_closed = True
+            out.append(self._evt("content_block_stop", {
+                "type": "content_block_stop", "index": self.thinking_index
+            }))
+        if self.text_started and not self.text_closed:
+            self.text_closed = True
+            out.append(self._evt("content_block_stop", {
+                "type": "content_block_stop", "index": self.text_index
+            }))
+        if not self.tools_closed:
+            self.tools_closed = True
             for buf in self.tool_buffers.values():
                 out.append(self._evt("content_block_stop", {
                     "type": "content_block_stop", "index": buf["bidx"]
                 }))
-            stop_reason = "tool_use" if (finish_reason == "tool_calls" or self.tool_buffers) else "end_turn"
-            out.append(self._evt("message_delta", {
-                "type": "message_delta",
-                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                "usage": {"output_tokens": self.output_tokens}
-            }))
-            out.append(self._evt("message_stop", {"type": "message_stop"}))
-
+        out.append(self._evt("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": self.stop_reason or "end_turn",
+                      "stop_sequence": None},
+            "usage": {"input_tokens": self.input_tokens,
+                      "output_tokens": self.output_tokens}
+        }))
+        out.append(self._evt("message_stop", {"type": "message_stop"}))
         return "".join(out)
 
 
@@ -416,6 +466,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             oai_payload["stream_options"] = {"include_usage": True}
 
         n_msgs = len(oai_payload["messages"])
+        est_input_tokens = _estimate_input_tokens(oai_payload)
         t0 = time.monotonic()
         roles_summary = ", ".join(
             f"{m.get('role','?')}({len(str(m.get('content') or ''))}c)"
@@ -456,7 +507,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # Dann den User direkt auf clau --compact hinweisen statt ihn
             # raten zu lassen.
             msg = f"owlAPI backend {status}: {body_text}"
-            if status == 400 and _estimate_input_tokens(oai_payload) > 60000:
+            if status == 400 and est_input_tokens > 60000:
                 msg += ("  [Kontext-Window des Modells wahrscheinlich überschritten — "
                         "Session ist zu groß. Beende die Session und starte "
                         "`clau --compact`, um sie zu komprimieren und fortzusetzen.]")
@@ -471,24 +522,25 @@ class ProxyHandler(BaseHTTPRequestHandler):
         log(f"← Header nach {time.monotonic()-t0:.1f}s, status={resp.status_code}")
 
         if stream:
-            self._stream(resp, model_name)
+            self._stream(resp, model_name, est_input_tokens)
         else:
-            self._single(resp, model_name)
+            self._single(resp, model_name, est_input_tokens)
 
-    def _single(self, owl_resp, model_name):
+    def _single(self, owl_resp, model_name, est_input_tokens=0):
         try:
-            body = json.dumps(oai_resp_to_ant(owl_resp.json(), model_name)).encode()
+            body = json.dumps(oai_resp_to_ant(owl_resp.json(), model_name,
+                                              est_input_tokens)).encode()
         except Exception:
             self.send_error(502, "Bad owlAPI response")
             return
         self._json_raw(200, body)
 
-    def _stream(self, owl_resp, model_name):
+    def _stream(self, owl_resp, model_name, est_input_tokens=0):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        tr = StreamTranslator(model_name)
+        tr = StreamTranslator(model_name, est_input_tokens)
         write_lock = threading.Lock()
         stop_heartbeat = threading.Event()
         t0 = time.monotonic()
@@ -546,7 +598,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             self.wfile.flush()
                 except (json.JSONDecodeError, KeyError):
                     pass
-            log(f"  Stream fertig nach {time.monotonic()-t0:.1f}s, {n_lines} Zeilen, {n_pings[0]} Pings")
+            end_evts = tr.finish()
+            if end_evts:
+                with write_lock:
+                    self.wfile.write(end_evts.encode())
+                    self.wfile.flush()
+            log(f"  Stream fertig nach {time.monotonic()-t0:.1f}s, {n_lines} Zeilen, "
+                f"{n_pings[0]} Pings, in={tr.input_tokens} out={tr.output_tokens} Tokens")
         except BrokenPipeError:
             log(f"  Client trennte Verbindung nach {time.monotonic()-t0:.1f}s ({n_lines} Zeilen, {n_pings[0]} Pings)")
         except requests.exceptions.RequestException as e:
@@ -588,9 +646,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             evts.append(tr._evt("message_delta", {
                 "type": "message_delta",
                 "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                "usage": {"output_tokens": tr.output_tokens}
+                "usage": {"input_tokens": tr.input_tokens,
+                          "output_tokens": tr.output_tokens}
             }))
             evts.append(tr._evt("message_stop", {"type": "message_stop"}))
+            tr.ended = True  # finish() soll nicht nochmal abschließen
             with write_lock:
                 self.wfile.write("".join(evts).encode())
                 self.wfile.flush()
