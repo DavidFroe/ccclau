@@ -31,6 +31,7 @@ toggle_sudo() {
 # QuiteQue hier auf 11.0.0.13 (diese Stack) — User "opencode" für vLLM/Claude-Backends
 OWL_PROXY_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/owl_proxy.py"
 CC_COMPACT_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc_compact.py"
+WEBSEARCH_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/websearch_mcp.py"
 OWL_BASE_URL="http://11.0.0.13:7077"
 QQ_USER="opencode"
 
@@ -1211,13 +1212,27 @@ for u in d.get("result", []):
 # auf das tatsächlich gesendete Schema, nicht nur auf Ausführungsrechte.
 CLAU_OWL_TOOLS_DEFAULT="Bash,Edit,Write,Read,AskUserQuestion,TaskCreate,TaskGet,TaskList,TaskUpdate,EnterPlanMode,ExitPlanMode"
 
+# MCP-Config für den owlAPI-Pfad. Normalerweise leer (--strict-mcp-config
+# blendet damit alle sonstigen MCP-Server aus, spart Tokens). Mit
+# CLAU_WEBSEARCH=1 kommt die lokale QuiteQue-Websuche als einziges MCP-Tool
+# dazu — das serverseitige WebSearch der Anthropic-API gibt es über owlAPI
+# nicht, ein lokales Modell hätte sonst gar keinen Weg ins Netz.
+_owl_mcp_config() {
+  if [[ "${CLAU_WEBSEARCH:-1}" == "1" && -f "$WEBSEARCH_MCP_SCRIPT" ]]; then
+    printf '{"mcpServers":{"websearch":{"type":"stdio","command":"python3","args":["%s"],"env":{"QUITEQUE_URL":"%s","OWL_PROXY_USER":"%s"}}}}' \
+      "$WEBSEARCH_MCP_SCRIPT" "$OWL_BASE_URL" "$QQ_USER"
+  else
+    printf '{"mcpServers":{}}'
+  fi
+}
+
 _owl_minimal_tool_args() {
   [[ "${CLAU_OWL_MINIMAL_TOOLS:-1}" == "1" ]] || return 0
   echo "--tools"
   echo "${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}"
   echo "--strict-mcp-config"
   echo "--mcp-config"
-  echo '{"mcpServers":{}}'
+  _owl_mcp_config
 }
 
 # claude über owlAPI-Proxy starten (interaktiv)
@@ -1414,6 +1429,7 @@ load_config() {
   : "${CLAU_DISABLE_TOOLS:=}"
   : "${CLAU_DISABLE_ARTIFACT:=0}"
   : "${CLAU_DISABLE_AGENT_VIEW:=0}"
+  : "${CLAU_WEBSEARCH:=1}"
   # Timeout: in ms, für Claude Code Bash-Tool + Modell-Inferenz
   : "${CLAU_TIMEOUT_DEFAULT:=1800000}"
   : "${CLAU_TIMEOUT_MAX:=7200000}"
@@ -1482,6 +1498,7 @@ CLAU_AUTO_COMPACT_PCT="${CLAU_AUTO_COMPACT_PCT:-80}"
 CLAU_DISABLE_TOOLS="${CLAU_DISABLE_TOOLS:-}"
 CLAU_DISABLE_ARTIFACT="${CLAU_DISABLE_ARTIFACT:-0}"
 CLAU_DISABLE_AGENT_VIEW="${CLAU_DISABLE_AGENT_VIEW:-0}"
+CLAU_WEBSEARCH="${CLAU_WEBSEARCH:-1}"
 CLAU_TIMEOUT_DEFAULT="${CLAU_TIMEOUT_DEFAULT:-1800000}"
 CLAU_TIMEOUT_MAX="${CLAU_TIMEOUT_MAX:-7200000}"
 CONF_EOF
@@ -1709,6 +1726,7 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_TOOLS="WebFetch,Agent"  Tools aus System-Prompt entfernen (kommagetrennt)
   CLAU_DISABLE_ARTIFACT="1"          Artifacts deaktivieren (spart ~2-3K Tokens)
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
+  CLAU_WEBSEARCH="1"                 Lokale QuiteQue-Websuche als MCP-Tool (Default an, ~300 Tokens)
   CLAU_TIMEOUT_DEFAULT="1800000"     Default Bash-Timeout in ms (30 Min = 1800000)
   CLAU_TIMEOUT_MAX="7200000"         Max Bash-Timeout in ms (120 Min = 7200000)
   CLAU_OWL_TIMEOUT="1800"            owlAPI-Request-Timeout in Sekunden (Default 1800 = 30 Min)
@@ -1805,6 +1823,7 @@ show_current() {
   echo "Blockierte Tools      : ${CLAU_DISABLE_TOOLS:-<keine>}"
   echo "Artifacts deaktiviert : ${CLAU_DISABLE_ARTIFACT:-0}"
   echo "Agent-View deaktiviert: ${CLAU_DISABLE_AGENT_VIEW:-0}"
+  echo "Websuche (MCP)        : $([[ "${CLAU_WEBSEARCH:-1}" == "1" ]] && echo "an (depth=speed)" || echo "aus")"
   local owl_id_for_preset=""
   if [[ "${CLAU_MODEL:-}" == owl:* ]]; then owl_id_for_preset="${CLAU_MODEL#owl:}"; fi
   local preset_d="${TIMEOUT_PRESET_DEFAULT[$owl_id_for_preset]:-}"

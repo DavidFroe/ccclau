@@ -113,6 +113,7 @@ CLAU_DISABLE_AGENT_VIEW="1"
 | `CLAU_DISABLE_TOOLS` | Tools aus System-Prompt entfernen (~25K Token sparen) |
 | `CLAU_DISABLE_ARTIFACT` | Artifacts deaktivieren (`1` = an) |
 | `CLAU_DISABLE_AGENT_VIEW` | Background Agent Views deaktivieren (`1` = an) |
+| `CLAU_WEBSEARCH` | Lokale Websuche als MCP-Tool (`1` = an, Default; kostet ~300 Token) |
 | `CLAU_TIMEOUT_DEFAULT` | Default-Bash-Timeout in ms (Default `1800000` = 30 Min) |
 | `CLAU_TIMEOUT_MAX` | Max-Bash-Timeout in ms (Default `7200000` = 120 Min) |
 
@@ -124,6 +125,27 @@ CLAU_DISABLE_TOOLS="WebFetch,ToolSearch,DesignSync,CronCreate,CronDelete,CronLis
 CLAU_DISABLE_ARTIFACT="1"
 CLAU_DISABLE_AGENT_VIEW="1"
 ```
+
+## Websuche
+
+Über owlAPI gibt es das serverseitige `WebSearch` der Anthropic-API nicht — ein
+lokales Modell käme sonst gar nicht ins Netz. `websearch_mcp.py` reicht deshalb
+QuiteQues eigene Such-Pipeline (SearXNG + Volltext + Rerank + Citation- und
+Halluzinations-Check) als MCP-Tool durch. Bei owl-Modellen ist es per Default an:
+
+```bash
+CLAU_WEBSEARCH="1"    # in .clau.conf, "0" schaltet es ab
+```
+
+Das Tool heißt in der Session `mcp__websearch__websearch` und nimmt
+`query`, `depth` (`speed` ~15s / `balanced` ~25s / `quality` ~40s) und
+`max_sources`. Die Antwort enthält nur, was in den Quellen steht, plus die
+Quellen-URLs.
+
+**Nicht** über `/v1/chat/completions` mit `model=websearch-*` gehen: das ist der
+Chat-Pfad, der die Query nie an die Suche weiterreicht — das Modell antwortet
+dann blind aus dem Trainingswissen und erfindet Quellen dazu. Der richtige
+Endpoint ist `POST /websearch`.
 
 ## Timeout-Konfiguration
 
