@@ -63,6 +63,26 @@ def _estimate_input_tokens(payload):
 OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.13:7077/v1")
 OWL_MODEL = os.environ.get("OWL_MODEL", "120")
 OWL_USER = os.environ.get("OWL_PROXY_USER", "opencode")
+
+# Freiwillige Aktivitäts-Header fürs PropellerA-Panel (power-activity.jsonl):
+# wer/was/wofür fragt an. Fehlt einer, zeigt das Panel "unbekannt" -- daher
+# hier nur mitschicken wenn tatsächlich gesetzt.
+def _activity_headers():
+    headers = {}
+    mapping = {
+        "OWL_HDR_AGENT_TOOL": "X-Agent-Tool",
+        "OWL_HDR_REQUEST_CONTEXT": "X-Request-Context",
+        "OWL_HDR_PROJECT": "X-Project",
+        "OWL_HDR_USER": "X-User",
+    }
+    for env_key, header_name in mapping.items():
+        val = os.environ.get(env_key, "")
+        if val:
+            headers[header_name] = val
+    return headers
+
+
+ACTIVITY_HEADERS = _activity_headers()
 PORT = int(os.environ.get("OWL_PROXY_PORT", "8325"))
 # Timeout: lang genug für langsame Modelle (PropellerA etc.)
 REQUEST_TIMEOUT = int(os.environ.get("OWL_PROXY_TIMEOUT", "600"))
@@ -484,6 +504,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     # (inkl. eines evtl. internen Retries bei Watchdog-Timeout),
                     # etwas unter unserem eigenen Timeout.
                     "X-Owl-Max-Wait": str(max(60, REQUEST_TIMEOUT - 60)),
+                    **ACTIVITY_HEADERS,
                 },
                 stream=stream,
                 timeout=REQUEST_TIMEOUT

@@ -307,7 +307,10 @@ PYEOF
 _compact_session_file() {
   local sf="$1" target_model="$2"
   local tmpf; tmpf="$(mktemp)"
-  python3 "$CC_COMPACT_SCRIPT" --session "$sf" --model "$target_model" >"$tmpf" 2>&1
+  _owl_activity_env "compact"
+  OWL_HDR_AGENT_TOOL="$OWL_HDR_AGENT_TOOL" OWL_HDR_REQUEST_CONTEXT="$OWL_HDR_REQUEST_CONTEXT" \
+  OWL_HDR_PROJECT="$OWL_HDR_PROJECT" OWL_HDR_USER="$OWL_HDR_USER" \
+    python3 "$CC_COMPACT_SCRIPT" --session "$sf" --model "$target_model" >"$tmpf" 2>&1
   local rc=$?
   cat "$tmpf" >&2
   if [[ "$rc" -ne 0 ]]; then
@@ -418,8 +421,11 @@ _start_owl_proxy() {
   mkdir -p "$OWL_PROXY_LOG_DIR" 2>/dev/null || true
   # Log-Datei bei jedem Start kappen statt endlos wachsen zu lassen
   : > "$OWL_PROXY_LOG_FILE" 2>/dev/null || true
+  _owl_activity_env "chat"
   OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
     OWL_PROXY_TIMEOUT="${CLAU_OWL_TIMEOUT:-1800}" \
+    OWL_HDR_AGENT_TOOL="$OWL_HDR_AGENT_TOOL" OWL_HDR_REQUEST_CONTEXT="$OWL_HDR_REQUEST_CONTEXT" \
+    OWL_HDR_PROJECT="$OWL_HDR_PROJECT" OWL_HDR_USER="$OWL_HDR_USER" \
     python3 "$OWL_PROXY_SCRIPT" "$port" >>"$OWL_PROXY_LOG_FILE" 2>&1 &
   echo "$!" > "$_OWL_PID_FILE"
   echo "$port"
@@ -1219,12 +1225,14 @@ CLAU_OWL_TOOLS_DEFAULT="Bash,Edit,Write,Read,AskUserQuestion,TaskCreate,TaskGet,
 # nicht, ein lokales Modell hätte sonst gar keinen Weg ins Netz.
 _owl_mcp_config() {
   if [[ "${CLAU_WEBSEARCH:-1}" == "1" && -f "$WEBSEARCH_MCP_SCRIPT" ]]; then
+    _owl_activity_env "websearch"
     # Zeilenumbruch ist Pflicht: der Aufrufer liest die Argumente mit
     # "while read", und read verwirft die letzte Zeile ohne \n — dann stünde
     # --mcp-config ohne Wert da und würde die folgenden Argumente
     # (--resume <id>) als Config-Dateien schlucken.
-    printf '{"mcpServers":{"websearch":{"type":"stdio","command":"python3","args":["%s"],"env":{"QUITEQUE_URL":"%s","OWL_PROXY_USER":"%s"}}}}\n' \
-      "$WEBSEARCH_MCP_SCRIPT" "$OWL_BASE_URL" "$QQ_USER"
+    printf '{"mcpServers":{"websearch":{"type":"stdio","command":"python3","args":["%s"],"env":{"QUITEQUE_URL":"%s","OWL_PROXY_USER":"%s","OWL_HDR_AGENT_TOOL":"%s","OWL_HDR_REQUEST_CONTEXT":"%s","OWL_HDR_PROJECT":"%s","OWL_HDR_USER":"%s"}}}}\n' \
+      "$WEBSEARCH_MCP_SCRIPT" "$OWL_BASE_URL" "$QQ_USER" \
+      "$OWL_HDR_AGENT_TOOL" "$OWL_HDR_REQUEST_CONTEXT" "$OWL_HDR_PROJECT" "$OWL_HDR_USER"
   else
     printf '{"mcpServers":{}}\n'
   fi
@@ -1437,7 +1445,23 @@ load_config() {
   # Timeout: in ms, für Claude Code Bash-Tool + Modell-Inferenz
   : "${CLAU_TIMEOUT_DEFAULT:=1800000}"
   : "${CLAU_TIMEOUT_MAX:=7200000}"
+  # Aktivitäts-Tags fürs PropellerA-Panel (power-activity.jsonl) -- freiwillig,
+  # siehe _owl_activity_env().
+  : "${CLAU_AGENT_TOOL:=ccclau-$(whoami)}"
+  : "${CLAU_USER_TAG:=$(whoami)}"
   INTERACTION_LEVEL="$CLAU_INTERACTION_LEVEL"
+}
+
+# Setzt die 4 freiwilligen Aktivitäts-Header (X-Agent-Tool, X-Request-Context,
+# X-Project, X-User) als OWL_HDR_*-Env-Vars für den aufrufenden Scope. Werden
+# von owl_proxy.py, cc_compact.py und websearch_mcp.py bei jeder Inferenz-
+# Anfrage mitgeschickt, damit PropellerAs Panel sieht wer/was/wofür anfragt.
+# $1 = Request-Context (chat|compact|websearch)
+_owl_activity_env() {
+  OWL_HDR_AGENT_TOOL="$CLAU_AGENT_TOOL"
+  OWL_HDR_REQUEST_CONTEXT="$1"
+  OWL_HDR_PROJECT="${CLAU_SESSION_NAME:-$(basename "$PWD")}"
+  OWL_HDR_USER="$CLAU_USER_TAG"
 }
 
 # Prüft, ob im aktuellen Verzeichnis .claude/settings.json schreibbar (anlegbar) ist.
@@ -2527,7 +2551,10 @@ run_compact() {
   fi
   echo "Starte custom-compact (Summary-Modell: $sum_id) im Projekt $(pwd) ..."
   local tmpf; tmpf="$(mktemp)"
-  python3 "$CC_COMPACT_SCRIPT" --model "$sum_id" 2>&1 | tee "$tmpf"
+  _owl_activity_env "compact"
+  OWL_HDR_AGENT_TOOL="$OWL_HDR_AGENT_TOOL" OWL_HDR_REQUEST_CONTEXT="$OWL_HDR_REQUEST_CONTEXT" \
+  OWL_HDR_PROJECT="$OWL_HDR_PROJECT" OWL_HDR_USER="$OWL_HDR_USER" \
+    python3 "$CC_COMPACT_SCRIPT" --model "$sum_id" 2>&1 | tee "$tmpf"
   local rc=${PIPESTATUS[0]}
   if [[ "$rc" -ne 0 ]]; then
     rm -f "$tmpf"

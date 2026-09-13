@@ -35,6 +35,20 @@ TIMEOUT = int(os.environ.get("WEBSEARCH_TIMEOUT", "300"))
 
 PROTOCOL_FALLBACK = "2024-11-05"
 
+
+def _activity_headers():
+    """Freiwillige Aktivitäts-Header fürs PropellerA-Panel (power-activity.jsonl).
+    clau.sh setzt sie als OWL_HDR_*-Env-Vars beim Spawnen dieses MCP-Servers;
+    fehlt einer, zeigt das Panel "unbekannt" -- daher hier nur mitschicken
+    wenn gesetzt."""
+    mapping = {
+        "OWL_HDR_AGENT_TOOL": "X-Agent-Tool",
+        "OWL_HDR_REQUEST_CONTEXT": "X-Request-Context",
+        "OWL_HDR_PROJECT": "X-Project",
+        "OWL_HDR_USER": "X-User",
+    }
+    return {h: os.environ[e] for e, h in mapping.items() if os.environ.get(e)}
+
 TOOL = {
     "name": "websearch",
     "description": (
@@ -105,6 +119,7 @@ def do_search(query, depth, max_sources):
             "Content-Type": "application/json",
             "X-OwlTrail-User": USER,
             "Accept": "text/event-stream",
+            **_activity_headers(),
         },
         method="POST",
     )

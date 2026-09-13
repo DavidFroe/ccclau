@@ -47,6 +47,19 @@ DEFAULTS = {
 RESERVE_TOKENS = 27_000
 
 
+def _activity_headers() -> dict:
+    """Freiwillige Aktivitäts-Header fürs PropellerA-Panel (power-activity.jsonl).
+    clau.sh setzt sie als OWL_HDR_*-Env-Vars vor jedem Aufruf; fehlt einer,
+    zeigt das Panel "unbekannt" -- daher hier nur mitschicken wenn gesetzt."""
+    mapping = {
+        "OWL_HDR_AGENT_TOOL": "X-Agent-Tool",
+        "OWL_HDR_REQUEST_CONTEXT": "X-Request-Context",
+        "OWL_HDR_PROJECT": "X-Project",
+        "OWL_HDR_USER": "X-User",
+    }
+    return {h: os.environ[e] for e, h in mapping.items() if os.environ.get(e)}
+
+
 # -------------------------------------------------------------------
 # Token-Schätzung (grob aber OK)
 # -------------------------------------------------------------------
@@ -232,6 +245,7 @@ def call_quiteque(
             "Content-Type": "application/json",
             "X-OwlTrail-User": user,
             "X-Owl-Max-Wait": str(max_wait),
+            **_activity_headers(),
         },
         method="POST",
     )
