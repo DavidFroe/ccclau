@@ -2343,7 +2343,13 @@ _opencode_sync_config() {
   local mdl="$1"
   local model_arg; model_arg="$(_opencode_model_arg "$mdl")"
   if is_owl_model "$mdl"; then
-    python3 - "$model_arg" "${OWL_BASE_URL}/v1" "$(owl_model_id "$mdl")" "$QQ_USER" <<'PY'
+    # QuiteQue verlangt X-Request-Context/X-Agent-Tool/X-Project inzwischen
+    # als Pflicht-Header (GPU-Last-Zuordnung) -- opencode spricht QuiteQue
+    # HIER direkt an (kein owl_proxy.py dazwischen), die Header müssen also
+    # in genau diesem Provider-Block stehen, nicht nur beim Claude-Code-Pfad.
+    _owl_activity_env "agent"
+    python3 - "$model_arg" "${OWL_BASE_URL}/v1" "$(owl_model_id "$mdl")" "$QQ_USER" \
+      "$OWL_HDR_AGENT_TOOL" "$OWL_HDR_REQUEST_CONTEXT" "$OWL_HDR_PROJECT" <<'PY'
 import json
 import sys
 
@@ -2353,7 +2359,7 @@ try:
         cfg = json.load(f)
 except Exception:
     cfg = {}
-model_arg, base_url, owl_id, qq_user = sys.argv[1:5]
+model_arg, base_url, owl_id, qq_user, agent_tool, request_context, project = sys.argv[1:8]
 cfg.setdefault("$schema", "https://opencode.ai/config.json")
 cfg["model"] = model_arg
 cfg.setdefault("provider", {})["owl"] = {
@@ -2361,7 +2367,12 @@ cfg.setdefault("provider", {})["owl"] = {
     "name": "QuiteQue/PropellerA (owl)",
     "options": {
         "baseURL": base_url,
-        "headers": {"X-OwlTrail-User": qq_user},
+        "headers": {
+            "X-OwlTrail-User": qq_user,
+            "X-Agent-Tool": agent_tool,
+            "X-Request-Context": request_context,
+            "X-Project": project,
+        },
     },
     "models": {owl_id: {"name": f"owl:{owl_id}"}},
 }
