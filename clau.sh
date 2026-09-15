@@ -2793,6 +2793,42 @@ print(new_id)
 PY
 }
 
+# Importiert eine .md-Datei als Session-Start, backend-abhängig:
+# - claude: synthetische Session-JSONL (_session_import_md) + normales
+#   --resume -- eine echte, fortsetzbare Claude-Code-Session.
+# - opencode: Claude-Code-Session-Format ist dort nicht ladbar. Statt eine
+#   JSONL zu erzeugen die dann von run_opencode_session() ignoriert würde
+#   (genau das ist David passiert -- Import "erfolgreich", aber opencode
+#   startete komplett leer), geht der Inhalt direkt als --prompt in den
+#   TUI-Start.
+run_import_md() {
+  local md_file="$1"
+  [[ -f "$md_file" ]] || { echo "Datei nicht gefunden: $md_file" >&2; return 1; }
+  local mdl; mdl="$(effective_model)"
+  if [[ -z "$mdl" ]]; then
+    ensure_model
+    mdl="$(effective_model)"
+  fi
+  if [[ "$(effective_backend)" == "opencode" ]]; then
+    _ensure_opencode_runtime || exit 1
+    _opencode_sync_config "$mdl"
+    local model_arg; model_arg="$(_opencode_model_arg "$mdl")"
+    local content; content="$(cat "$md_file")"
+    echo "Starte opencode mit $md_file als Startprompt ..."
+    cleanup_tool_blocking
+    unset_token_saver_env
+    exec opencode --model "$model_arg" --prompt "$content"
+  fi
+  local new_id; new_id="$(_session_import_md "$md_file")"
+  if [[ -n "$new_id" ]]; then
+    echo "✓ Session aus $md_file erzeugt: $new_id"
+    run_resume_id "$new_id"
+  else
+    echo "✗ Import fehlgeschlagen." >&2
+    return 1
+  fi
+}
+
 # Listet die letzten Sessions im aktuellen Projekt mit Größe/Token-Schätzung
 # und Inhalts-Vorschau, lässt eine auswählen, und fragt dann: fortsetzen
 # oder komprimieren (auf genau dieser gewählten Datei, nicht "die neueste").
@@ -3343,15 +3379,7 @@ interactive_start() {
         interactive_start
         return
       fi
-      ensure_model
-      local new_id; new_id="$(_session_import_md "$md_path")"
-      if [[ -n "$new_id" ]]; then
-        echo "✓ Session aus $md_path erzeugt: $new_id"
-        run_resume_id "$new_id"
-      else
-        echo "✗ Import fehlgeschlagen." >&2
-        interactive_start
-      fi
+      run_import_md "$md_path" || interactive_start
       ;;
     *) echo "Ungültige Auswahl."; exit 1 ;;
   esac
@@ -3773,15 +3801,7 @@ case "${ACTION}" in
     run_compact
     ;;
   import-md)
-    ensure_model
-    new_id="$(_session_import_md "$IMPORT_MD_FILE")"
-    if [[ -n "$new_id" ]]; then
-      echo "✓ Session aus $IMPORT_MD_FILE erzeugt: $new_id"
-      run_resume_id "$new_id"
-    else
-      echo "✗ Import fehlgeschlagen." >&2
-      exit 1
-    fi
+    run_import_md "$IMPORT_MD_FILE" || exit 1
     ;;
   tg-token)
     tg_token
