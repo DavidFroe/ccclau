@@ -3316,8 +3316,28 @@ interactive_start() {
       ;;
     8) choose_backend_interactive; interactive_start ;;
     9)
-      printf "Pfad zur .md-Datei: "
-      local md_path; read -r md_path
+      local md_files=()
+      while IFS= read -r f; do md_files+=("$f"); done < <(ls -1 ./*.md 2>/dev/null)
+      local md_path=""
+      if [[ "${#md_files[@]}" -gt 0 ]]; then
+        echo
+        echo ".md-Dateien in diesem Verzeichnis:"
+        local mi=1 mf
+        for mf in "${md_files[@]}"; do
+          printf "  %2d) %s\n" "$mi" "$mf"
+          ((mi++))
+        done
+        printf "Auswahl [1-%d] oder eigener Pfad, Enter=Abbrechen: " "${#md_files[@]}"
+        local md_choice; read -r md_choice
+        if [[ "$md_choice" =~ ^[0-9]+$ && "$md_choice" -ge 1 && "$md_choice" -le "${#md_files[@]}" ]]; then
+          md_path="${md_files[$((md_choice-1))]}"
+        else
+          md_path="$md_choice"
+        fi
+      else
+        printf "Pfad zur .md-Datei: "
+        read -r md_path
+      fi
       if [[ -z "$md_path" || ! -f "$md_path" ]]; then
         echo "Datei nicht gefunden: $md_path" >&2
         interactive_start
