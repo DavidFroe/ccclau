@@ -225,6 +225,62 @@ _session_file_for_id() {
   echo "$sf"
 }
 
+# ── User-Session-Titel ───────────────────────────────────────────────────────
+# Sidecar-JSON pro Projekt-Bucket ({"<sessionId>": "Titeltext"}) statt neuer
+# Zeilentyp in der Claude-Code-JSONL selbst -- das Format liest `claude
+# --resume` direkt, ein Sidecar ist risikofrei und leicht aufzuräumen.
+_session_titles_file() {
+  echo "${1}/.clau-session-titles.json"
+}
+
+_get_session_title() {
+  local proj_dir="$1" sid="$2"
+  local tf; tf="$(_session_titles_file "$proj_dir")"
+  [[ -f "$tf" ]] || return 0
+  python3 - "$tf" "$sid" <<'PY' 2>/dev/null
+import json
+import sys
+
+path, sid = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        titles = json.load(f)
+except Exception:
+    titles = {}
+print(titles.get(sid, ""))
+PY
+}
+
+_set_session_title() {
+  local proj_dir="$1" sid="$2" title="$3"
+  local tf; tf="$(_session_titles_file "$proj_dir")"
+  python3 - "$tf" "$sid" "$title" <<'PY'
+import json
+import sys
+
+path, sid, title = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path) as f:
+        titles = json.load(f)
+except Exception:
+    titles = {}
+if title:
+    titles[sid] = title
+else:
+    titles.pop(sid, None)
+with open(path, "w") as f:
+    json.dump(titles, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+PY
+}
+
+_delete_session_title() {
+  local proj_dir="$1" sid="$2"
+  local tf; tf="$(_session_titles_file "$proj_dir")"
+  [[ -f "$tf" ]] || return 0
+  _set_session_title "$proj_dir" "$sid" ""
+}
+
 _estimate_session_tokens() {
   # Liest die letzte usage-Zeile und gibt geschätzte Kontext-Tokens zurück
   # (= input_tokens + cache_read_input_tokens + cache_creation_input_tokens).
@@ -809,9 +865,16 @@ _tg_brain() {  # $1=userText $2=dir $3=sid
   local user="$1" dir="$2" sid="$3"
   local model="${CLAU_TG_BRAIN_MODEL:-gemma-12b-chat}"
   local projects; projects="$(_tg_projects | paste -sd'; ' -)"
-  python3 - "$OWL_BASE_URL" "$QQ_USER" "$model" "$user" "$dir" "$sid" "$projects" <<'PY' 2>/dev/null
+  # QuiteQue verlangt X-Request-Context/X-Agent-Tool/X-Project inzwischen als
+  # Pflicht-Header (GPU-Last-Zuordnung) -- ohne die schlägt jede Anfrage mit
+  # 400 fehl. Dieser Call ging bisher direkt an QuiteQue, an
+  # _owl_activity_env() vorbei.
+  _owl_activity_env "tg-brain"
+  python3 - "$OWL_BASE_URL" "$QQ_USER" "$model" "$user" "$dir" "$sid" "$projects" \
+    "$OWL_HDR_AGENT_TOOL" "$OWL_HDR_REQUEST_CONTEXT" "$OWL_HDR_PROJECT" "$OWL_HDR_USER" <<'PY' 2>/dev/null
 import json, sys, urllib.request
 base, quser, model, user, cur_dir, sid, projects = sys.argv[1:8]
+hdr_agent_tool, hdr_request_context, hdr_project, hdr_user = sys.argv[8:12]
 system = (
     "Du bist der clau-Concierge auf einem Entwickler-Server. Du hilfst David per Telegram, "
     "in seine Coding-Sessions zu kommen. Antworte AUSSCHLIESSLICH mit einem JSON-Objekt, "
@@ -836,9 +899,17 @@ body = json.dumps({
                  {"role": "user", "content": user}],
     "max_tokens": 400, "temperature": 0.3,
 }).encode()
+headers = {"Content-Type": "application/json", "X-OwlTrail-User": quser}
+if hdr_agent_tool:
+    headers["X-Agent-Tool"] = hdr_agent_tool
+if hdr_request_context:
+    headers["X-Request-Context"] = hdr_request_context
+if hdr_project:
+    headers["X-Project"] = hdr_project
+if hdr_user:
+    headers["X-User"] = hdr_user
 req = urllib.request.Request(
-    base.rstrip("/") + "/v1/chat/completions", data=body,
-    headers={"Content-Type": "application/json", "X-OwlTrail-User": quser})
+    base.rstrip("/") + "/v1/chat/completions", data=body, headers=headers)
 try:
     with urllib.request.urlopen(req, timeout=120) as r:
         c = json.load(r)["choices"][0]["message"]["content"]
@@ -1461,10 +1532,15 @@ load_config() {
 # Anfrage mitgeschickt, damit PropellerAs Panel sieht wer/was/wofür anfragt.
 # $1 = Request-Context (chat|compact|websearch)
 _owl_activity_env() {
-  OWL_HDR_AGENT_TOOL="$CLAU_AGENT_TOOL"
-  OWL_HDR_REQUEST_CONTEXT="$1"
+  # Inline-Fallbacks statt reiner Abhängigkeit von load_config(): QuiteQue
+  # verlangt diese Header inzwischen als PFLICHT (GPU-Last-Zuordnung) --
+  # ein leerer Wert (z.B. weil load_config() für dieses Verzeichnis nie lief,
+  # wie im Telegram-Bot-Poller der über viele Projektordner zyklisch läuft)
+  # würde denselben 400-Fehler reproduzieren, den wir gerade beheben.
+  OWL_HDR_AGENT_TOOL="${CLAU_AGENT_TOOL:-ccclau-$(whoami)}"
+  OWL_HDR_REQUEST_CONTEXT="${1:-chat}"
   OWL_HDR_PROJECT="${CLAU_SESSION_NAME:-$(basename "$PWD")}"
-  OWL_HDR_USER="$CLAU_USER_TAG"
+  OWL_HDR_USER="${CLAU_USER_TAG:-$(whoami)}"
 }
 
 # Prüft, ob im aktuellen Verzeichnis .claude/settings.json schreibbar (anlegbar) ist.
@@ -2512,38 +2588,75 @@ _interaction_args() {
 
 # Erste sinnvolle User-Message (gekürzt) als Wiedererkennungs-Hinweis in der
 # Session-Liste -- sonst sind alle Einträge nur eine UUID.
-_session_preview() {
+# Ein Scan pro Session-Datei statt mehrerer: Erstellungs-Timestamp (erste
+# Zeile), Komprimiert-Herkunft (compactMetadata, siehe cc_compact.py
+# write_new_session) und Vorschau (erste echte User-Nachricht, bei
+# komprimierten Sessions ohne die Boilerplate-Einleitung). Gibt eine
+# TAB-getrennte Zeile aus: created_ts \t is_compact \t orig_id \t orig_count \t preview
+_session_meta() {
   local sf="$1"
   python3 - "$sf" <<'PYEOF' 2>/dev/null
 import json, sys
+
 sf = sys.argv[1]
 try:
     with open(sf) as f:
-        for line in f:
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            if d.get("isMeta") or d.get("isSidechain"):
-                continue
-            msg = d.get("message") or {}
-            if msg.get("role") != "user":
-                continue
-            c = msg.get("content")
-            text = ""
-            if isinstance(c, str):
-                text = c
-            elif isinstance(c, list):
-                for block in c:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text", "")
-                        break
-            text = text.strip().replace("\n", " ")
-            if text:
-                print(text[:70])
-                break
+        lines = f.readlines()
 except Exception:
-    pass
+    lines = []
+
+parsed = []
+for line in lines:
+    try:
+        parsed.append(json.loads(line))
+    except Exception:
+        parsed.append(None)
+
+created = ""
+for d in parsed:
+    if d and d.get("timestamp"):
+        created = d["timestamp"]
+        break
+
+is_compact = "0"
+orig_id = ""
+orig_count = ""
+for d in parsed:
+    if d and d.get("type") == "system" and d.get("subtype") == "compact":
+        meta = d.get("compactMetadata") or {}
+        is_compact = "1"
+        orig_id = meta.get("originalSessionId", "")
+        orig_count = str(meta.get("originalMessageCount", ""))
+        break
+
+preview = ""
+boilerplate_marker = "\n\n---\n\n"
+for d in parsed:
+    if not d or d.get("isMeta") or d.get("isSidechain"):
+        continue
+    msg = d.get("message") or {}
+    if msg.get("role") != "user":
+        continue
+    c = msg.get("content")
+    text = ""
+    if isinstance(c, str):
+        text = c
+    elif isinstance(c, list):
+        for block in c:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "")
+                break
+    if is_compact == "1" and boilerplate_marker in text:
+        text = text.split(boilerplate_marker, 1)[1]
+    text = text.strip().replace("\n", " ").replace("\t", " ")
+    if text:
+        preview = text[:80]
+        break
+
+# \x1f (Unit Separator) statt Tab: bash-`read` behandelt Tab als "IFS
+# whitespace" und schluckt aufeinanderfolgende Tabs/leere Felder dabei
+# stillschweigend -- mit \x1f (kein Whitespace) bleiben leere Felder erhalten.
+print("\x1f".join([created, is_compact, orig_id, orig_count, preview]))
 PYEOF
 }
 
@@ -2574,19 +2687,36 @@ choose_session_interactive() {
 
   echo
   echo "Letzte Sessions in diesem Projekt (neueste zuerst, max. 20):"
-  local i=1 f tok pct preview sizeh mtime
+  local i=1 f tok pct sizeh mtime
+  local created is_compact orig_id orig_count preview user_title herkunft
   for f in "${files[@]}"; do
     tok="$(_estimate_session_tokens "$f")"
     tok="${tok:-0}"
-    preview="$(_session_preview "$f")"
+    IFS=$'\x1f' read -r created is_compact orig_id orig_count preview < <(_session_meta "$f")
     sizeh="$(du -h "$f" 2>/dev/null | cut -f1)"
     mtime="$(date -r "$f" '+%d.%m. %H:%M' 2>/dev/null)"
+    local created_h=""
+    [[ -n "$created" ]] && created_h="$(date -d "$created" '+%d.%m. %H:%M' 2>/dev/null)"
+    user_title="$(_get_session_title "$proj_dir" "$(basename "$f" .jsonl)")"
+
     if [[ -n "$cw" && "$cw" -gt 0 && "$tok" -gt 0 ]]; then
       pct=$(( tok * 100 / cw ))
-      printf "  %2d) [%s] %s Tok (%s%% v. %s, %s)  %s\n" "$i" "$mtime" "$tok" "$pct" "owl:$owl_id" "$sizeh" "${preview:-<leer>}"
+      printf "  %2d) Erstellt %s · Aktiv %s · %s Tok (%s%% v. owl:%s, %s)\n" \
+        "$i" "${created_h:-?}" "$mtime" "$tok" "$pct" "$owl_id" "$sizeh"
     else
-      printf "  %2d) [%s] %s Tok (%s)  %s\n" "$i" "$mtime" "$tok" "$sizeh" "${preview:-<leer>}"
+      printf "  %2d) Erstellt %s · Aktiv %s · %s Tok (%s)\n" \
+        "$i" "${created_h:-?}" "$mtime" "$tok" "$sizeh"
     fi
+
+    herkunft=""
+    [[ "$is_compact" == "1" ]] && herkunft="⤷ komprimiert aus ${orig_id:0:8}… (${orig_count:-?} Nachr.)"
+    if [[ -n "$user_title" || -n "$herkunft" ]]; then
+      printf "       %s%s%s\n" \
+        "${user_title:+Titel: $user_title  }" \
+        "$herkunft" \
+        ""
+    fi
+    printf "       \"%s\"\n" "${preview:-<leer>}"
     ((i++))
   done
   printf "Auswahl [1-%d, Enter=Abbrechen]: " "${#files[@]}"
@@ -2599,8 +2729,10 @@ choose_session_interactive() {
   echo "Gewählt: $chosen_id"
   echo "  1) Fortsetzen"
   echo "  2) Komprimieren (und danach fortsetzen)"
-  echo "  3) Abbrechen"
-  printf "Auswahl [1-3, Enter=1]: "
+  echo "  3) Titel setzen"
+  echo "  4) Löschen (unwiderruflich!)"
+  echo "  5) Abbrechen"
+  printf "Auswahl [1-5, Enter=1]: "
   local action; read -r action
   case "${action:-1}" in
     2)
@@ -2619,7 +2751,31 @@ choose_session_interactive() {
         return 1
       fi
       ;;
-    3) echo "Abgebrochen." ;;
+    3)
+      printf "Neuer Titel für %s: " "$chosen_id"
+      local new_title; read -r new_title
+      _set_session_title "$proj_dir" "$chosen_id" "$new_title"
+      echo "✓ Titel gesetzt."
+      choose_session_interactive
+      ;;
+    4)
+      echo "Session $chosen_id WIRD ENDGÜLTIG UND UNWIEDERBRINGLICH GELÖSCHT."
+      printf "Tippe 'löschen' zum Bestätigen: "
+      local confirm; read -r confirm
+      if [[ "$confirm" == "löschen" ]]; then
+        rm -f "$chosen"
+        _delete_session_title "$proj_dir" "$chosen_id"
+        if [[ "${CLAU_SESSION_ID:-}" == "$chosen_id" ]]; then
+          CLAU_SESSION_ID=""
+          save_config
+        fi
+        echo "✓ Gelöscht: $chosen_id"
+        choose_session_interactive
+      else
+        echo "Abgebrochen (nichts gelöscht)."
+      fi
+      ;;
+    5) echo "Abgebrochen." ;;
     *) run_resume_id "$chosen_id" ;;
   esac
 }
