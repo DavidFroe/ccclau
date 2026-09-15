@@ -1478,6 +1478,7 @@ MAX_BUDGET_USD=""
 DANGEROUS_SKIP=0
 CLI_MODEL_OVERRIDE=""
 CLI_BACKEND_OVERRIDE=""
+IMPORT_MD_FILE=""
 INTERACTION_LEVEL=""  # wird aus Config geladen; CLI --interaction überschreibt
 
 # Git-Aktionstypen
@@ -1765,6 +1766,8 @@ Verwendung (interaktiv):
   clau --resume [ID]              Setzt eine Session fort (ohne ID = Resume-Picker)
   clau --new                      Startet eine neue Session
   clau --compact                  Custom-Compact: aktuelle Session extern komprimieren (QuiteQue)
+  clau --import-md datei.md       Startet eine neue Session mit dem Inhalt von datei.md als erster
+                                  Nachricht (Session-Auswahl → Punkt 5 exportiert umgekehrt als .md)
   clau --model N                  Setzt das Standardmodell (1=haiku, 2=sonnet, 3=opus, 4=fable)
   clau --take ID                  Merkt sich eine feste Session-ID für dieses Verzeichnis
   clau --forget                   Entfernt die gemerkte Session-ID
@@ -2667,6 +2670,129 @@ print("\x1f".join([created, is_compact, orig_id, orig_count, preview]))
 PYEOF
 }
 
+# ── Session ↔ Markdown ───────────────────────────────────────────────────────
+# Export: liest eine Session-JSONL und schreibt eine lesbare .md-Transkription
+# (User/Assistant-Turns, Tool-Calls kompakt). Gibt den Pfad der .md-Datei aus.
+_session_export_md() {
+  local sf="$1"
+  local sid; sid="$(basename "$sf" .jsonl)"
+  local proj_dir; proj_dir="$(dirname "$sf")"
+  local title; title="$(_get_session_title "$proj_dir" "$sid")"
+  local slug="$sid"
+  if [[ -n "$title" ]]; then
+    slug="$(echo "$title" | tr -cs 'A-Za-z0-9äöüÄÖÜß' '-' | sed 's/^-*//;s/-*$//')"
+    [[ -n "$slug" ]] || slug="$sid"
+  fi
+  local out="./${slug}.md"
+  python3 - "$sf" "$sid" "${title:-<ohne Titel>}" "$out" <<'PY'
+import json
+import sys
+
+sf, sid, title, out = sys.argv[1:5]
+
+
+def text_from_content(content):
+    if isinstance(content, str):
+        return content
+    out_parts = []
+    if isinstance(content, list):
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            t = b.get("type")
+            if t == "text":
+                out_parts.append(b.get("text", ""))
+            elif t == "tool_use":
+                out_parts.append(f"[Tool: {b.get('name','?')}({json.dumps(b.get('input', {}))[:300]})]")
+            elif t == "tool_result":
+                out_parts.append(f"[Tool-Result: {str(b.get('content',''))[:500]}]")
+            elif t == "thinking":
+                out_parts.append(f"[Thinking: {str(b.get('thinking',''))[:300]}]")
+    return "\n".join(out_parts)
+
+
+lines = []
+try:
+    with open(sf) as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if d.get("isMeta") or d.get("isSidechain"):
+                continue
+            msg = d.get("message")
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            text = text_from_content(msg.get("content")).strip()
+            if text:
+                lines.append((role, text))
+except Exception as e:
+    print(f"FEHLER beim Lesen: {e}", file=sys.stderr)
+    sys.exit(1)
+
+with open(out, "w") as f:
+    f.write(f"# Session: {title}\n\n")
+    f.write(f"Session-ID: {sid}\n\n---\n\n")
+    for role, text in lines:
+        heading = "User" if role == "user" else "Assistant"
+        f.write(f"## {heading}\n\n{text}\n\n")
+
+print(out)
+PY
+}
+
+# Import: nimmt eine beliebige .md-Datei, erzeugt eine neue Session mit ihrem
+# Inhalt als erste User-Nachricht (wie eine frisch getippte erste Message --
+# kein synthetisches Assistant-Echo wie bei cc_compact.py, Claude antwortet
+# beim Fortsetzen ganz normal live darauf). Gibt die neue Session-ID aus.
+_session_import_md() {
+  local md_file="$1"
+  [[ -f "$md_file" ]] || { echo "Datei nicht gefunden: $md_file" >&2; return 1; }
+  local proj_dir; proj_dir="$(_claude_projects_dir)/$(_project_hash_for)"
+  mkdir -p "$proj_dir"
+  python3 - "$md_file" "$proj_dir" "$PWD" <<'PY'
+import json
+import sys
+import uuid
+import datetime
+
+md_file, proj_dir, cwd = sys.argv[1:4]
+
+with open(md_file) as f:
+    content = f.read()
+
+new_id = str(uuid.uuid4())
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+user_msg = {
+    "type": "user",
+    "isMeta": False,
+    "isVisibleInTranscriptOnly": False,
+    "message": {
+        "role": "user",
+        "content": [{"type": "text", "text": content}],
+    },
+    "uuid": str(uuid.uuid4()),
+    "parentUuid": None,
+    "timestamp": now,
+    "sessionId": new_id,
+    "userType": "external",
+    "entrypoint": "sdk-cli",
+    "cwd": cwd,
+    "version": "2.0",
+}
+
+with open(f"{proj_dir}/{new_id}.jsonl", "w") as f:
+    f.write(json.dumps(user_msg) + "\n")
+
+print(new_id)
+PY
+}
+
 # Listet die letzten Sessions im aktuellen Projekt mit Größe/Token-Schätzung
 # und Inhalts-Vorschau, lässt eine auswählen, und fragt dann: fortsetzen
 # oder komprimieren (auf genau dieser gewählten Datei, nicht "die neueste").
@@ -2738,8 +2864,9 @@ choose_session_interactive() {
   echo "  2) Komprimieren (und danach fortsetzen)"
   echo "  3) Titel setzen"
   echo "  4) Löschen (unwiderruflich!)"
-  echo "  5) Abbrechen"
-  printf "Auswahl [1-5, Enter=1]: "
+  echo "  5) Als Markdown exportieren"
+  echo "  6) Abbrechen"
+  printf "Auswahl [1-6, Enter=1]: "
   local action; read -r action
   case "${action:-1}" in
     2)
@@ -2782,7 +2909,16 @@ choose_session_interactive() {
         echo "Abgebrochen (nichts gelöscht)."
       fi
       ;;
-    5) echo "Abgebrochen." ;;
+    5)
+      local out; out="$(_session_export_md "$chosen")"
+      if [[ -n "$out" ]]; then
+        echo "✓ Exportiert: $out"
+      else
+        echo "✗ Export fehlgeschlagen." >&2
+      fi
+      choose_session_interactive
+      ;;
+    6) echo "Abgebrochen." ;;
     *) run_resume_id "$chosen_id" ;;
   esac
 }
@@ -3434,6 +3570,15 @@ parse_args() {
         ACTION="compact"
         shift
         ;;
+      --import-md)
+        if [[ -z "${2:-}" ]]; then
+          echo "--import-md erwartet einen Dateipfad" >&2
+          exit 1
+        fi
+        ACTION="import-md"
+        IMPORT_MD_FILE="$2"
+        shift 2
+        ;;
       --tg-token)
         ACTION="tg-token"
         shift
@@ -3587,6 +3732,17 @@ case "${ACTION}" in
     ;;
   compact)
     run_compact
+    ;;
+  import-md)
+    ensure_model
+    new_id="$(_session_import_md "$IMPORT_MD_FILE")"
+    if [[ -n "$new_id" ]]; then
+      echo "✓ Session aus $IMPORT_MD_FILE erzeugt: $new_id"
+      run_resume_id "$new_id"
+    else
+      echo "✗ Import fehlgeschlagen." >&2
+      exit 1
+    fi
     ;;
   tg-token)
     tg_token
