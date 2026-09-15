@@ -3297,7 +3297,8 @@ interactive_start() {
   echo "  6) Telegram / Handy"
   echo "  7) Update von GitHub (self-update)"
   echo "  8) CLI-Engine wechseln (Claude Code / opencode)"
-  printf "Auswahl [1-8, Enter=2]: "
+  echo "  9) Markdown importieren (neue Session aus Datei)"
+  printf "Auswahl [1-9, Enter=2]: "
   read -r start_choice
 
   case "${start_choice:-2}" in
@@ -3314,6 +3315,24 @@ interactive_start() {
       exit 0
       ;;
     8) choose_backend_interactive; interactive_start ;;
+    9)
+      printf "Pfad zur .md-Datei: "
+      local md_path; read -r md_path
+      if [[ -z "$md_path" || ! -f "$md_path" ]]; then
+        echo "Datei nicht gefunden: $md_path" >&2
+        interactive_start
+        return
+      fi
+      ensure_model
+      local new_id; new_id="$(_session_import_md "$md_path")"
+      if [[ -n "$new_id" ]]; then
+        echo "✓ Session aus $md_path erzeugt: $new_id"
+        run_resume_id "$new_id"
+      else
+        echo "✗ Import fehlgeschlagen." >&2
+        interactive_start
+      fi
+      ;;
     *) echo "Ungültige Auswahl."; exit 1 ;;
   esac
 }
