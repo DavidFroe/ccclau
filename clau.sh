@@ -2389,13 +2389,6 @@ PY
   fi
 }
 
-# Nächstes Äquivalent zu Claudes --dangerously-skip-permissions. Anders als
-# dort respektiert opencodes --auto weiterhin explizite "deny"-Regeln in der
-# Permission-Config -- etwas weniger bedingungslos als Claudes Flag.
-_opencode_auto_flag() {
-  [[ "${INTERACTION_LEVEL:-2}" -eq 0 ]] && echo "--auto"
-}
-
 # Stellt sicher dass opencode installiert ist (fragt ggf. nach Installation).
 _ensure_opencode_runtime() {
   _have opencode && return 0
@@ -2419,12 +2412,16 @@ run_opencode_session() {
   fi
   _ensure_opencode_runtime || exit 1
   _opencode_sync_config "$mdl"
+  local model_arg; model_arg="$(_opencode_model_arg "$mdl")"
   echo "Starte opencode (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   cleanup_tool_blocking
   unset_token_saver_env
-  local auto_flag; auto_flag="$(_opencode_auto_flag)"
-  # shellcheck disable=SC2086
-  exec opencode $auto_flag
+  # KEIN --auto hier: die installierte opencode-Version kennt dieses Flag bei
+  # der nackten TUI-Invocation nicht (bestätigt am 15.09.2026 -- fiel auf
+  # Usage/Help zurück statt zu starten). Level-0-Vollautomatik müsste über
+  # den "permission"-Block in opencode.json laufen, nicht über einen
+  # CLI-Flag -- noch nicht verifiziert, daher vorerst weggelassen.
+  exec opencode --model "$model_arg"
 }
 
 # Headless-Kommando für opencode (Analogie zu build_headless_cmd). Füllt
@@ -2432,9 +2429,8 @@ run_opencode_session() {
 build_opencode_headless_cmd() {
   local mdl; mdl="$(effective_model)"
   _opencode_sync_config "$mdl"
-  OPENCODE_CMD=(opencode run)
-  local auto_flag; auto_flag="$(_opencode_auto_flag)"
-  [[ -n "$auto_flag" ]] && OPENCODE_CMD+=("$auto_flag")
+  local model_arg; model_arg="$(_opencode_model_arg "$mdl")"
+  OPENCODE_CMD=(opencode run --model "$model_arg")
   if [[ -z "${PROMPT_TEXT:-}" ]]; then
     echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
     exit 1
