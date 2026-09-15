@@ -1406,6 +1406,7 @@ MAX_TURNS=""
 MAX_BUDGET_USD=""
 DANGEROUS_SKIP=0
 CLI_MODEL_OVERRIDE=""
+CLI_BACKEND_OVERRIDE=""
 INTERACTION_LEVEL=""  # wird aus Config geladen; CLI --interaction überschreibt
 
 # Git-Aktionstypen
@@ -1442,6 +1443,8 @@ load_config() {
   : "${CLAU_DISABLE_ARTIFACT:=0}"
   : "${CLAU_DISABLE_AGENT_VIEW:=0}"
   : "${CLAU_WEBSEARCH:=1}"
+  # CLI-Engine: "claude" (Claude Code, Standard) oder "opencode".
+  : "${CLAU_BACKEND:=claude}"
   # Timeout: in ms, für Claude Code Bash-Tool + Modell-Inferenz
   : "${CLAU_TIMEOUT_DEFAULT:=1800000}"
   : "${CLAU_TIMEOUT_MAX:=7200000}"
@@ -1527,6 +1530,7 @@ CLAU_DISABLE_TOOLS="${CLAU_DISABLE_TOOLS:-}"
 CLAU_DISABLE_ARTIFACT="${CLAU_DISABLE_ARTIFACT:-0}"
 CLAU_DISABLE_AGENT_VIEW="${CLAU_DISABLE_AGENT_VIEW:-0}"
 CLAU_WEBSEARCH="${CLAU_WEBSEARCH:-1}"
+CLAU_BACKEND="${CLAU_BACKEND:-claude}"
 CLAU_TIMEOUT_DEFAULT="${CLAU_TIMEOUT_DEFAULT:-1800000}"
 CLAU_TIMEOUT_MAX="${CLAU_TIMEOUT_MAX:-7200000}"
 CONF_EOF
@@ -1725,6 +1729,9 @@ Headless-Optionen:
   -p, --prompt TEXT               Prompt-Text für headless mode (erforderlich bei --headless)
   -f, --folder PATH               Zielverzeichnis für --new
   -m, --mdl MODEL                 Modell: haiku | sonnet | opus | fable | owl:<ID>
+      --backend claude|opencode   CLI-Engine für diesen Aufruf (Standard: claude,
+                                  per-Verzeichnis in .clau.conf gespeichert via Menü
+                                  "CLI-Engine wechseln")
       --effort LEVEL              low | medium | high | max
       --max-turns N               Max. agentische Schritte
       --max-budget-usd USD        Kostenlimit
@@ -1755,6 +1762,7 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_ARTIFACT="1"          Artifacts deaktivieren (spart ~2-3K Tokens)
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
   CLAU_WEBSEARCH="1"                 Lokale QuiteQue-Websuche als MCP-Tool (Default an, ~300 Tokens)
+  CLAU_BACKEND="claude"               CLI-Engine: claude (Standard) | opencode
   CLAU_TIMEOUT_DEFAULT="1800000"     Default Bash-Timeout in ms (30 Min = 1800000)
   CLAU_TIMEOUT_MAX="7200000"         Max Bash-Timeout in ms (120 Min = 7200000)
   CLAU_OWL_TIMEOUT="1800"            owlAPI-Request-Timeout in Sekunden (Default 1800 = 30 Min)
@@ -1815,6 +1823,16 @@ effective_model() {
   fi
 }
 
+# CLI-Engine (nicht zu verwechseln mit dem Modell-Routing owl-vs-Claude):
+# "claude" (Claude Code, Standard) oder "opencode".
+effective_backend() {
+  if [[ -n "${CLI_BACKEND_OVERRIDE:-}" ]]; then
+    echo "$CLI_BACKEND_OVERRIDE"
+  else
+    echo "${CLAU_BACKEND:-claude}"
+  fi
+}
+
 # Übersetzt den internen Claude-Modell-Kurznamen in die volle Modell-ID, die die
 # claude-CLI erwartet. Explizit gepinnt auf die aktuelle Generation (Stand 2026-07):
 #   haiku=Haiku 4.5, sonnet=Sonnet 5, opus=Opus 5, fable=Fable 5.
@@ -1831,13 +1849,14 @@ claude_cli_model() {
 
 show_current() {
   local mdl="${CLAU_MODEL:-<nicht gesetzt>}"
-  local backend="Claude Code (agentisch)"
+  local route="Claude Code (agentisch)"
   if is_owl_model "${CLAU_MODEL:-}"; then
-    backend="owlAPI Chat (${OWL_BASE_URL}, Modell $(owl_model_id "${CLAU_MODEL}"))"
+    route="owlAPI Chat (${OWL_BASE_URL}, Modell $(owl_model_id "${CLAU_MODEL}"))"
   fi
   echo "Aktuelles Verzeichnis : $(pwd)"
   echo "Konfiguriertes Modell : $mdl"
-  echo "Backend               : $backend"
+  echo "Modell-Route          : $route"
+  echo "CLI-Engine            : $(effective_backend)"
   echo "Session-Name          : ${CLAU_SESSION_NAME:-<keiner>}"
   echo "Feste Session-ID      : ${CLAU_SESSION_ID:-<keine>}"
   echo "Autonomie-Level       : $(interaction_label)"
@@ -1926,6 +1945,30 @@ choose_model_interactive() {
   apply_timeout_for_model "$CLAU_MODEL"
   save_config
   echo "Modell: $CLAU_MODEL"
+}
+
+choose_backend_interactive() {
+  echo
+  echo "CLI-Engine wählen:"
+  echo "  1) claude              Claude Code   Standard         [Enter]"
+  echo "  2) opencode            opencode.ai   alternative Engine"
+  printf "Auswahl [1-2, Enter=1]: "
+  read -r choice
+  case "${choice:-1}" in
+    1) CLAU_BACKEND="claude" ;;
+    2)
+      CLAU_BACKEND="opencode"
+      if ! _have opencode; then
+        echo "opencode ist noch nicht installiert."
+        if ask_yes_no "Jetzt installieren?"; then
+          _ensure_opencode || echo "Installation fehlgeschlagen — 'opencode' bleibt vorerst nicht nutzbar." >&2
+        fi
+      fi
+      ;;
+    *) echo "Ungültige Auswahl."; return ;;
+  esac
+  save_config
+  echo "CLI-Engine: $CLAU_BACKEND"
 }
 
 ensure_model() {
@@ -2197,6 +2240,132 @@ _ensure_opencode() {
   return 1
 }
 
+# ── opencode-Backend ─────────────────────────────────────────────────────────
+# opencode spricht OpenAI-kompatibles Chat-Format nativ (eigenes
+# @ai-sdk/openai-compatible Provider-Config) -- für owl/QuiteQue-Modelle
+# braucht es KEINEN owl_proxy.py-Umweg, im Gegensatz zu Claude Code (das nur
+# die Anthropic Messages API spricht).
+
+# Modell-String, den opencode selbst versteht: "owl/<id>" für lokale/owl-
+# Modelle (via selbst geschriebenem Custom-Provider), "anthropic/<id>" für
+# echte Claude-Modelle (opencodes eingebauter Anthropic-Provider, Auth läuft
+# über Davids eigenes `opencode auth login`, nicht über uns).
+_opencode_model_arg() {
+  local mdl="$1"
+  if is_owl_model "$mdl"; then
+    echo "owl/$(owl_model_id "$mdl")"
+  else
+    echo "anthropic/$(claude_cli_model "$mdl")"
+  fi
+}
+
+# Schreibt/aktualisiert opencode.json im aktuellen Projektverzeichnis: setzt
+# das Default-Modell, und bei owl-Modellen zusätzlich den Custom-Provider-
+# Block der direkt auf QuiteQue/PropellerA zeigt. Bestehende opencode.json
+# wird gemergt, nicht überschrieben (andere Keys bleiben erhalten).
+_opencode_sync_config() {
+  local mdl="$1"
+  local model_arg; model_arg="$(_opencode_model_arg "$mdl")"
+  if is_owl_model "$mdl"; then
+    python3 - "$model_arg" "${OWL_BASE_URL}/v1" "$(owl_model_id "$mdl")" "$QQ_USER" <<'PY'
+import json
+import sys
+
+path = "opencode.json"
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except Exception:
+    cfg = {}
+model_arg, base_url, owl_id, qq_user = sys.argv[1:5]
+cfg.setdefault("$schema", "https://opencode.ai/config.json")
+cfg["model"] = model_arg
+cfg.setdefault("provider", {})["owl"] = {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "QuiteQue/PropellerA (owl)",
+    "options": {
+        "baseURL": base_url,
+        "headers": {"X-OwlTrail-User": qq_user},
+    },
+    "models": {owl_id: {"name": f"owl:{owl_id}"}},
+}
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+PY
+  else
+    python3 - "$model_arg" <<'PY'
+import json
+import sys
+
+path = "opencode.json"
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except Exception:
+    cfg = {}
+cfg.setdefault("$schema", "https://opencode.ai/config.json")
+cfg["model"] = sys.argv[1]
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+PY
+  fi
+}
+
+# Nächstes Äquivalent zu Claudes --dangerously-skip-permissions. Anders als
+# dort respektiert opencodes --auto weiterhin explizite "deny"-Regeln in der
+# Permission-Config -- etwas weniger bedingungslos als Claudes Flag.
+_opencode_auto_flag() {
+  [[ "${INTERACTION_LEVEL:-2}" -eq 0 ]] && echo "--auto"
+}
+
+# Stellt sicher dass opencode installiert ist (fragt ggf. nach Installation).
+_ensure_opencode_runtime() {
+  _have opencode && return 0
+  echo "opencode ist nicht installiert." >&2
+  if ask_yes_no "Jetzt installieren?"; then
+    _ensure_opencode && return 0
+  fi
+  echo "Kann ohne opencode nicht fortfahren." >&2
+  return 1
+}
+
+# Interaktive opencode-Session (Analogie zu run_new_session/run_saved_session
+# für Claude Code). Resume läuft über opencodes eigenen /sessions-Picker in
+# der TUI -- ein von außen scriptbares "--resume <id>" ist für den
+# interaktiven Fall nicht belegt.
+run_opencode_session() {
+  local mdl; mdl="$(effective_model)"
+  if [[ -z "$mdl" ]]; then
+    ensure_model
+    mdl="$(effective_model)"
+  fi
+  _ensure_opencode_runtime || exit 1
+  _opencode_sync_config "$mdl"
+  echo "Starte opencode (Modell: $mdl, Autonomie: $(interaction_label)) ..."
+  cleanup_tool_blocking
+  unset_token_saver_env
+  local auto_flag; auto_flag="$(_opencode_auto_flag)"
+  # shellcheck disable=SC2086
+  exec opencode $auto_flag
+}
+
+# Headless-Kommando für opencode (Analogie zu build_headless_cmd). Füllt
+# OPENCODE_CMD als Array.
+build_opencode_headless_cmd() {
+  local mdl; mdl="$(effective_model)"
+  _opencode_sync_config "$mdl"
+  OPENCODE_CMD=(opencode run)
+  local auto_flag; auto_flag="$(_opencode_auto_flag)"
+  [[ -n "$auto_flag" ]] && OPENCODE_CMD+=("$auto_flag")
+  if [[ -z "${PROMPT_TEXT:-}" ]]; then
+    echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
+    exit 1
+  fi
+  OPENCODE_CMD+=("$PROMPT_TEXT")
+}
+
 install_self() {
   local script_path target_path
   script_path="$(readlink -f "$0")"
@@ -2462,6 +2631,12 @@ run_resume_picker() {
     ensure_model
     mdl="$(effective_model)"
   fi
+  if [[ "$(effective_backend)" == "opencode" ]]; then
+    # opencode hat seinen eigenen /sessions-Picker in der TUI -- kein von
+    # außen scriptbares Äquivalent zu Claudes --resume ohne ID.
+    run_opencode_session
+    return
+  fi
   if is_owl_model "$mdl"; then
     run_owl_via_claude "$(owl_model_id "$mdl")" --resume
     return
@@ -2481,6 +2656,12 @@ run_saved_session() {
   if [[ -z "$mdl" ]]; then
     ensure_model
     mdl="$(effective_model)"
+  fi
+  if [[ "$(effective_backend)" == "opencode" ]]; then
+    # CLAU_SESSION_ID ist ein Claude-Code-Session-Format, überträgt sich
+    # nicht auf opencode -- dessen eigene TUI übernimmt die Fortsetzung.
+    run_opencode_session
+    return
   fi
   if is_owl_model "$mdl"; then
     run_owl_via_claude "$(owl_model_id "$mdl")"
@@ -2502,6 +2683,10 @@ run_new_session() {
     ensure_model
     mdl="$(effective_model)"
   fi
+  if [[ "$(effective_backend)" == "opencode" ]]; then
+    run_opencode_session
+    return
+  fi
   if is_owl_model "$mdl"; then
     run_owl_via_claude "$(owl_model_id "$mdl")" --force-context
     return
@@ -2522,6 +2707,13 @@ run_resume_id() {
   if [[ -z "$mdl" ]]; then
     ensure_model
     mdl="$(effective_model)"
+  fi
+  if [[ "$(effective_backend)" == "opencode" ]]; then
+    # $rid ist eine Claude-Code-Session-ID (aus cc_compact.py) -- opencode
+    # hat kein passendes Gegenstück dazu (Phase 2: Kompressions-Brücke).
+    echo "Hinweis: Session-ID $rid ist Claude-Code-Format, nicht auf opencode übertragbar." >&2
+    run_opencode_session
+    return
   fi
   if is_owl_model "$mdl"; then
     run_owl_via_claude "$(owl_model_id "$mdl")" --resume "$rid"
@@ -2629,6 +2821,12 @@ build_headless_cmd() {
 
 run_headless_here() {
   local mdl; mdl="$(effective_model)"
+  if [[ "$(effective_backend)" == "opencode" ]]; then
+    _ensure_opencode_runtime || exit 1
+    build_opencode_headless_cmd
+    echo "Starte opencode headless im Verzeichnis: $(pwd)"
+    exec "${OPENCODE_CMD[@]}"
+  fi
   if is_owl_model "$mdl"; then
     if [[ -z "${PROMPT_TEXT:-}" ]]; then
       echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
@@ -2647,6 +2845,17 @@ run_headless_in_dir() {
   local dir="$1"
   mkdir -p "$dir"
   local mdl; mdl="$(effective_model)"
+  if [[ "$(effective_backend)" == "opencode" ]]; then
+    _ensure_opencode_runtime || exit 1
+    echo "Projektverzeichnis bereit für opencode headless: $dir"
+    (
+      cd "$dir"
+      build_opencode_headless_cmd
+      echo "Starte opencode headless in: $dir"
+      exec "${OPENCODE_CMD[@]}"
+    )
+    return
+  fi
   if is_owl_model "$mdl"; then
     if [[ -z "${PROMPT_TEXT:-}" ]]; then
       echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
@@ -2779,7 +2988,7 @@ interactive_start() {
   fi
 
   echo
-  echo "clau — $(basename "$(pwd)")  [$tag]"
+  echo "clau — $(basename "$(pwd)")  [$tag, Engine: $(effective_backend)]"
   [[ -n "${CLAU_SESSION_NAME:-}" ]] && echo "  Session: ${CLAU_SESSION_NAME}"
   echo "  1) Session auswählen (fortsetzen oder komprimieren)"
   echo "  2) Neue Session beginnen        [Enter]"
@@ -2788,7 +2997,8 @@ interactive_start() {
   echo "  5) Session komprimieren (custom-compact via QuiteQue)"
   echo "  6) Telegram / Handy"
   echo "  7) Update von GitHub (self-update)"
-  printf "Auswahl [1-7, Enter=2]: "
+  echo "  8) CLI-Engine wechseln (Claude Code / opencode)"
+  printf "Auswahl [1-8, Enter=2]: "
   read -r start_choice
 
   case "${start_choice:-2}" in
@@ -2804,6 +3014,7 @@ interactive_start() {
       echo "Bitte 'clau' erneut starten, um die neue Version zu nutzen."
       exit 0
       ;;
+    8) choose_backend_interactive; interactive_start ;;
     *) echo "Ungültige Auswahl."; exit 1 ;;
   esac
 }
@@ -3002,6 +3213,14 @@ parse_args() {
           exit 1
         fi
         normalize_model_name "$2"
+        shift 2
+        ;;
+      --backend)
+        if [[ -z "${2:-}" || ( "$2" != "claude" && "$2" != "opencode" ) ]]; then
+          echo "--backend erwartet: claude|opencode" >&2
+          exit 1
+        fi
+        CLI_BACKEND_OVERRIDE="$2"
         shift 2
         ;;
       --take)
