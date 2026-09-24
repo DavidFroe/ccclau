@@ -1769,6 +1769,7 @@ Verwendung (interaktiv):
   clau --import-md datei.md       Startet eine neue Session mit dem Inhalt von datei.md als erster
                                   Nachricht (Session-Auswahl → Punkt 5 exportiert umgekehrt als .md)
   clau --all-sessions             Alle Claude-Code-Sessions (alle Projekte) auflisten & fortsetzen
+  clau --running-sessions         Nur die JETZT laufenden Sessions (andere Terminals/Hintergrund)
   clau --model N                  Setzt das Standardmodell (1=haiku, 2=sonnet, 3=opus, 4=fable)
   clau --take ID                  Merkt sich eine feste Session-ID für dieses Verzeichnis
   clau --forget                   Entfernt die gemerkte Session-ID
@@ -3084,16 +3085,91 @@ for mtime, cwd, sid, tokens, preview, title in sessions:
 PYEOF
 }
 
+# Ermittelt die Sessions, die JETZT aktiv laufen (in anderen Terminals oder
+# im Hintergrund). Grundlage sind die laufenden claude-Prozesse: deren cwd
+# (via /proc/<pid>/cwd) und --resume-Flag. Sessions mit --resume werden über
+# die ID gematcht; frisch gestartete (ohne --resume) über das cwd-Feld der
+# Session-Datei -- pro cwd nur die neueste (Scan ist mtime-absteigend).
+# Gibt dieselbe \x1f-getrennte Zeile wie _all_sessions_scan aus.
+_running_sessions() {
+  local pids=()
+  mapfile -t pids < <(pgrep -x claude 2>/dev/null)
+  [[ "${#pids[@]}" -eq 0 ]] && return 0
+
+  local active_sids=() active_cwds=()
+  local pid cwd sid
+  for pid in "${pids[@]}"; do
+    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null)" || continue
+    [[ -n "$cwd" ]] || continue
+    # --resume <sid> (oder --resume=<sid>) aus der Kommandozeile.
+    # || true: grep liefert Exit 1, wenn kein --resume da ist -- mit
+    # set -e + pipefail würde die Zuweisung sonst die Funktion abbrechen.
+    local cmdline
+    cmdline="$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    sid="$(printf '%s\n' "$cmdline" | grep -oP '(?<=^--resume=)\S+' || true)"
+    if [[ -z "$sid" ]]; then
+      sid="$(printf '%s\n' "$cmdline" | grep -A1 '^--resume$' | tail -1 || true)"
+    fi
+    if [[ -n "$sid" ]]; then
+      active_sids+=("$sid")
+    else
+      active_cwds+=("$cwd")
+    fi
+  done
+  [[ "${#active_sids[@]}" -eq 0 && "${#active_cwds[@]}" -eq 0 ]] && return 0
+
+  local line mstr cwd_field sid_field hit a e already
+  local emitted_cwds=()
+  while IFS= read -r line; do
+    IFS=$'\x1f' read -r mstr cwd_field sid_field _ <<< "$line"
+    hit=0
+    for a in "${active_sids[@]}"; do
+      if [[ "$sid_field" == "$a" ]]; then
+        hit=1
+        break
+      fi
+    done
+    if [[ "$hit" -eq 0 && "${#active_cwds[@]}" -gt 0 ]]; then
+      for a in "${active_cwds[@]}"; do
+        if [[ "$cwd_field" == "$a" ]]; then
+          already=0
+          for e in "${emitted_cwds[@]}"; do
+            if [[ "$e" == "$a" ]]; then
+              already=1
+              break
+            fi
+          done
+          if [[ "$already" -eq 0 ]]; then
+            hit=1
+            emitted_cwds+=("$a")
+          fi
+          break
+        fi
+      done
+    fi
+    [[ "$hit" -eq 1 ]] && printf '%s\n' "$line"
+  done < <(_all_sessions_scan)
+}
+
 # Globaler Session-Picker: listet Sessions aus ALLEN Projekten auf und
 # ermöglicht es, eine davon aus der aktuellen Konsole zu erreichen. Claude
 # löst --resume <id> gegen den Bucket des aktuellen Arbeitsordners auf,
 # daher wird vor dem Fortsetzen in den Projektordner der Session gewechselt
 # (und dessen .clau.conf geladen, damit das dort konfigurierte Modell gilt).
 choose_all_sessions() {
+  local filter="${1:-all}"
   local lines=()
-  while IFS= read -r l; do lines+=("$l"); done < <(_all_sessions_scan)
+  if [[ "$filter" == "running" ]]; then
+    while IFS= read -r l; do lines+=("$l"); done < <(_running_sessions)
+  else
+    while IFS= read -r l; do lines+=("$l"); done < <(_all_sessions_scan)
+  fi
   if [[ "${#lines[@]}" -eq 0 ]]; then
-    echo "Keine Claude-Code-Sessions gefunden."
+    if [[ "$filter" == "running" ]]; then
+      echo "Keine aktuell laufenden Claude-Code-Sessions gefunden."
+    else
+      echo "Keine Claude-Code-Sessions gefunden."
+    fi
     return 0
   fi
 
@@ -3101,7 +3177,11 @@ choose_all_sessions() {
   [[ "$shown" -gt "$max" ]] && shown="$max"
 
   echo
-  echo "Alle Claude-Code-Sessions auf dieser Maschine (neueste zuerst, max. $max):"
+  if [[ "$filter" == "running" ]]; then
+    echo "Aktuell laufende Claude-Code-Sessions (andere Terminals / Hintergrund):"
+  else
+    echo "Alle Claude-Code-Sessions auf dieser Maschine (neueste zuerst, max. $max):"
+  fi
   echo
   local i=1 l mstr cwd sid tokens preview title
   for l in "${lines[@]:0:shown}"; do
@@ -3514,7 +3594,8 @@ interactive_start() {
   echo "  8) CLI-Engine wechseln (Claude Code / opencode)"
   echo "  9) Markdown importieren (neue Session aus Datei)"
   echo "  10) Alle Sessions (alle Projekte auf dieser Maschine)"
-  printf "Auswahl [1-10, Enter=2]: "
+  echo "  11) Laufende Sessions (jetzt aktive, andere Terminals/Hintergrund)"
+  printf "Auswahl [1-11, Enter=2]: "
   read -r start_choice
 
   case "${start_choice:-2}" in
@@ -3562,6 +3643,7 @@ interactive_start() {
       run_import_md "$md_path" || interactive_start
       ;;
     10) choose_all_sessions ;;
+    11) choose_all_sessions running ;;
     *) echo "Ungültige Auswahl."; exit 1 ;;
   esac
 }
@@ -3831,6 +3913,10 @@ parse_args() {
         ACTION="all-sessions"
         shift
         ;;
+      --running-sessions)
+        ACTION="running-sessions"
+        shift
+        ;;
       --tg-token)
         ACTION="tg-token"
         shift
@@ -3990,6 +4076,9 @@ case "${ACTION}" in
     ;;
   all-sessions)
     choose_all_sessions
+    ;;
+  running-sessions)
+    choose_all_sessions running
     ;;
   tg-token)
     tg_token
