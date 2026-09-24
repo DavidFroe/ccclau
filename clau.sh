@@ -1768,6 +1768,7 @@ Verwendung (interaktiv):
   clau --compact                  Custom-Compact: aktuelle Session extern komprimieren (QuiteQue)
   clau --import-md datei.md       Startet eine neue Session mit dem Inhalt von datei.md als erster
                                   Nachricht (Session-Auswahl → Punkt 5 exportiert umgekehrt als .md)
+  clau --all-sessions             Alle Claude-Code-Sessions (alle Projekte) auflisten & fortsetzen
   clau --model N                  Setzt das Standardmodell (1=haiku, 2=sonnet, 3=opus, 4=fable)
   clau --take ID                  Merkt sich eine feste Session-ID für dieses Verzeichnis
   clau --forget                   Entfernt die gemerkte Session-ID
@@ -2960,6 +2961,183 @@ choose_session_interactive() {
   esac
 }
 
+# Globaler Session-Scan: durchsucht ALLE Projekt-Buckets unter
+# ~/.claude/projects und listet jede Session mit Projekt-Pfad (aus dem
+# "cwd"-Feld der JSONL), mtime, Token-Schätzung, Titel und Vorschau.
+# Ein Python-Pass pro Datei (statt N getrennten Aufrufen) — bei vielen
+# Sessions bleibt das schnell. Ausgabe: eine Zeile pro Session, Felder mit
+# \x1f getrennt, nach mtime absteigend sortiert.
+_all_sessions_scan() {
+  local proj_root; proj_root="$(_claude_projects_dir)"
+  [[ -d "$proj_root" ]] || return 0
+  python3 - "$proj_root" <<'PYEOF' 2>/dev/null
+import json, os, sys, time
+
+proj_root = sys.argv[1]
+SEP = "\x1f"
+OVERHEAD_TOKENS = 20000
+CHARS_PER_TOKEN = 3.5
+
+def block_chars(b):
+    if isinstance(b, dict) and b.get('type') in ('thinking', 'redacted_thinking'):
+        return 0
+    return len(json.dumps(b, ensure_ascii=False))
+
+def estimate_tokens(rows):
+    last_in = last_cr = last_cc = 0
+    for d in rows:
+        u = (d.get('message') or {}).get('usage') or {}
+        if u:
+            last_in = u.get('input_tokens', 0) or 0
+            last_cr = u.get('cache_read_input_tokens', 0) or 0
+            last_cc = u.get('cache_creation_input_tokens', 0) or 0
+    total = last_in + last_cr + last_cc
+    if total > 0:
+        return total
+    start = 0
+    for i, d in enumerate(rows):
+        if d.get('subtype') == 'compact_boundary':
+            start = i
+    chars = 0
+    for d in rows[start:]:
+        if d.get('isSidechain') or d.get('type') not in ('user', 'assistant'):
+            continue
+        content = (d.get('message') or {}).get('content')
+        if isinstance(content, str):
+            chars += len(content)
+        elif isinstance(content, list):
+            chars += sum(block_chars(b) for b in content)
+    return int(chars / CHARS_PER_TOKEN) + OVERHEAD_TOKENS if chars > 0 else 0
+
+def first_text(msg):
+    c = msg.get('content')
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        for b in c:
+            if isinstance(b, dict) and b.get('type') == 'text':
+                return b.get('text', '')
+    return ""
+
+def clean(s):
+    return s.strip().replace("\n", " ").replace("\t", " ").replace(SEP, " ")
+
+sessions = []
+for bucket in os.listdir(proj_root):
+    bdir = os.path.join(proj_root, bucket)
+    if not os.path.isdir(bdir):
+        continue
+    titles = {}
+    tf = os.path.join(bdir, ".clau-session-titles.json")
+    if os.path.isfile(tf):
+        try:
+            with open(tf) as f:
+                titles = json.load(f)
+        except Exception:
+            titles = {}
+    for fn in os.listdir(bdir):
+        if not fn.endswith(".jsonl"):
+            continue
+        path = os.path.join(bdir, fn)
+        sid = fn[:-6]
+        try:
+            mtime = os.path.getmtime(path)
+        except Exception:
+            continue
+        rows = []
+        cwd = ""
+        try:
+            with open(path) as f:
+                for line in f:
+                    try:
+                        d = json.loads(line)
+                    except Exception:
+                        continue
+                    rows.append(d)
+                    if not cwd:
+                        c = d.get('cwd')
+                        if isinstance(c, str) and c:
+                            cwd = c
+        except Exception:
+            continue
+        if not cwd:
+            # Fallback: Bucket-Namen rückwärts übersetzen (bricht bei
+            # Pfadteilen mit Bindestrich, daher nur Notnagel).
+            cwd = "/" + bucket.lstrip("-").replace("-", "/")
+        preview = ""
+        for d in rows:
+            if not d or d.get('isMeta') or d.get('isSidechain'):
+                continue
+            msg = d.get('message') or {}
+            if msg.get('role') != 'user':
+                continue
+            t = clean(first_text(msg))
+            if t:
+                preview = t[:80]
+                break
+        sessions.append((mtime, cwd, sid, estimate_tokens(rows), preview, clean(titles.get(sid, ""))))
+
+sessions.sort(key=lambda s: s[0], reverse=True)
+for mtime, cwd, sid, tokens, preview, title in sessions:
+    mstr = time.strftime("%d.%m.%Y %H:%M", time.localtime(mtime))
+    print(SEP.join([mstr, cwd, sid, str(tokens), preview, title]))
+PYEOF
+}
+
+# Globaler Session-Picker: listet Sessions aus ALLEN Projekten auf und
+# ermöglicht es, eine davon aus der aktuellen Konsole zu erreichen. Claude
+# löst --resume <id> gegen den Bucket des aktuellen Arbeitsordners auf,
+# daher wird vor dem Fortsetzen in den Projektordner der Session gewechselt
+# (und dessen .clau.conf geladen, damit das dort konfigurierte Modell gilt).
+choose_all_sessions() {
+  local lines=()
+  while IFS= read -r l; do lines+=("$l"); done < <(_all_sessions_scan)
+  if [[ "${#lines[@]}" -eq 0 ]]; then
+    echo "Keine Claude-Code-Sessions gefunden."
+    return 0
+  fi
+
+  local max=50 shown="${#lines[@]}"
+  [[ "$shown" -gt "$max" ]] && shown="$max"
+
+  echo
+  echo "Alle Claude-Code-Sessions auf dieser Maschine (neueste zuerst, max. $max):"
+  echo
+  local i=1 l mstr cwd sid tokens preview title
+  for l in "${lines[@]:0:shown}"; do
+    IFS=$'\x1f' read -r mstr cwd sid tokens preview title <<< "$l"
+    printf "  %2d) %s  %s\n" "$i" "$mstr" "$cwd"
+    printf "       %s… · %s Tok%s\n" "${sid:0:8}" "${tokens:-0}" "${title:+ · Titel: $title}"
+    printf "       \"%s\"\n" "${preview:-<leer>}"
+    ((i++))
+  done
+  [[ "${#lines[@]}" -gt "$shown" ]] && echo "  … und $(( ${#lines[@]} - shown )) weitere (ältere)."
+  echo
+  printf "Auswahl [1-%d, Enter=Abbrechen]: " "$shown"
+  local sel; read -r sel
+  [[ -n "$sel" && "$sel" =~ ^[0-9]+$ && "$sel" -ge 1 && "$sel" -le "$shown" ]] || { echo "Abgebrochen."; return 0; }
+
+  local chosen="${lines[$((sel-1))]}"
+  IFS=$'\x1f' read -r mstr cwd sid tokens preview title <<< "$chosen"
+
+  if [[ -d "$cwd" ]]; then
+    echo
+    echo "Wechsle nach $cwd und setze Session ${sid:0:8}… fort ..."
+    (
+      cd "$cwd" || exit 1
+      if [[ -f ".clau.conf" ]]; then
+        # shellcheck disable=SC1090
+        source "./.clau.conf"
+      fi
+      run_resume_id "$sid"
+    )
+  else
+    echo "Projektordner nicht gefunden: $cwd" >&2
+    echo "Setze die Session im aktuellen Ordner fort (kann fehlschlagen)." >&2
+    run_resume_id "$sid"
+  fi
+}
+
 run_resume_picker() {
   local mdl
   mdl="$(effective_model)"
@@ -3335,7 +3513,8 @@ interactive_start() {
   echo "  7) Update von GitHub (self-update)"
   echo "  8) CLI-Engine wechseln (Claude Code / opencode)"
   echo "  9) Markdown importieren (neue Session aus Datei)"
-  printf "Auswahl [1-9, Enter=2]: "
+  echo "  10) Alle Sessions (alle Projekte auf dieser Maschine)"
+  printf "Auswahl [1-10, Enter=2]: "
   read -r start_choice
 
   case "${start_choice:-2}" in
@@ -3382,6 +3561,7 @@ interactive_start() {
       fi
       run_import_md "$md_path" || interactive_start
       ;;
+    10) choose_all_sessions ;;
     *) echo "Ungültige Auswahl."; exit 1 ;;
   esac
 }
@@ -3647,6 +3827,10 @@ parse_args() {
         IMPORT_MD_FILE="$2"
         shift 2
         ;;
+      --all-sessions)
+        ACTION="all-sessions"
+        shift
+        ;;
       --tg-token)
         ACTION="tg-token"
         shift
@@ -3803,6 +3987,9 @@ case "${ACTION}" in
     ;;
   import-md)
     run_import_md "$IMPORT_MD_FILE" || exit 1
+    ;;
+  all-sessions)
+    choose_all_sessions
     ;;
   tg-token)
     tg_token
