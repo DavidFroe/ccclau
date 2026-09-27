@@ -38,6 +38,24 @@ def _dump_request_payload(payload):
         return ""
 
 
+_DUMP_DIR = os.environ.get("OWL_PROXY_DUMP_DIR", "")
+_dump_counter = [0]
+
+
+def _dump_debug_payload(payload):
+    """Mit OWL_PROXY_DUMP_DIR gesetzt: jeden Backend-Payload durchnummeriert
+    sichern, um aufeinanderfolgende Requests auf Prefix-Änderungen zu diffen."""
+    if not _DUMP_DIR:
+        return
+    try:
+        os.makedirs(_DUMP_DIR, exist_ok=True)
+        _dump_counter[0] += 1
+        with open(os.path.join(_DUMP_DIR, f"{_dump_counter[0]:04d}.json"), "w") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def _estimate_input_tokens(payload):
     """Grobe Token-Schätzung des Request-Inputs (~3.5 chars/Token).
 
@@ -101,11 +119,21 @@ def content_to_str(content):
     return str(content)
 
 
+def _strip_billing_header(text):
+    # Claude Code setzt "x-anthropic-billing-header: cc_version=X.Y.Z.<hash>;"
+    # an den Anfang des System-Prompts, der Hash wechselt pro Session. Das
+    # verschiebt den Prefix ab Zeichen ~48 und verhindert vLLM-Prefix-Caching
+    # über Sessions hinweg; das Backend kann mit der Zeile nichts anfangen.
+    return "\n".join(l for l in text.split("\n")
+                     if not l.startswith("x-anthropic-billing-header:"))
+
+
 def messages_ant_to_oai(messages, system=None):
     result = []
     if system:
         if isinstance(system, list):
             system = "\n".join(b.get("text", "") for b in system if b.get("type") == "text")
+        system = _strip_billing_header(system)
         result.append({"role": "system", "content": system})
 
     for msg in messages:
@@ -230,6 +258,7 @@ class StreamTranslator:
         self.text_index = None
         self.tool_buffers = {}   # oai_index → {id, name, args, block_index}
         self.output_tokens = 0
+        self.cached_tokens = None
         self.text_closed = False
         self.tools_closed = False
         self.stop_reason = None
@@ -260,6 +289,7 @@ class StreamTranslator:
             self.output_tokens = data["usage"].get("completion_tokens", self.output_tokens)
             # Echte prompt_tokens ersetzen die Schätzung, sobald sie da sind.
             self.input_tokens = data["usage"].get("prompt_tokens") or self.input_tokens
+            self.cached_tokens = (data["usage"].get("prompt_tokens_details") or {}).get("cached_tokens")
 
         if not choices:
             return ""
@@ -487,6 +517,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         n_msgs = len(oai_payload["messages"])
         est_input_tokens = _estimate_input_tokens(oai_payload)
+        _dump_debug_payload(oai_payload)
         t0 = time.monotonic()
         roles_summary = ", ".join(
             f"{m.get('role','?')}({len(str(m.get('content') or ''))}c)"
@@ -625,7 +656,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     self.wfile.write(end_evts.encode())
                     self.wfile.flush()
             log(f"  Stream fertig nach {time.monotonic()-t0:.1f}s, {n_lines} Zeilen, "
-                f"{n_pings[0]} Pings, in={tr.input_tokens} out={tr.output_tokens} Tokens")
+                f"{n_pings[0]} Pings, in={tr.input_tokens} out={tr.output_tokens} "
+                f"cached={tr.cached_tokens if tr.cached_tokens is not None else '?'} Tokens")
         except BrokenPipeError:
             log(f"  Client trennte Verbindung nach {time.monotonic()-t0:.1f}s ({n_lines} Zeilen, {n_pings[0]} Pings)")
         except requests.exceptions.RequestException as e:
