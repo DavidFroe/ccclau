@@ -105,7 +105,7 @@ effective_context_window() {
     echo "1000000"   # Sonnet 5: 1M Kontext
     return
   elif [[ "$model" == "opus" || "$model" == "claude-opus"* ]]; then
-    echo "1000000"   # Opus 5: 1M Kontext
+    echo "1000000"   # Opus 5.5: 1M Kontext
     return
   elif [[ "$model" == "fable" || "$model" == "claude-fable"* ]]; then
     echo "1000000"   # Fable 5: 1M Kontext
@@ -1770,7 +1770,7 @@ Verwendung (interaktiv):
                                   Nachricht (Session-Auswahl → Punkt 5 exportiert umgekehrt als .md)
   clau --all-sessions             Alle Claude-Code-Sessions (alle Projekte) auflisten & fortsetzen
   clau --running-sessions         Nur die JETZT laufenden Sessions (andere Terminals/Hintergrund)
-  clau --model N                  Setzt das Standardmodell (1=haiku, 2=sonnet, 3=opus, 4=fable)
+  clau --model N                  Setzt das Standardmodell (1=haiku, 2=sonnet, 3=opus5.5, 4=fable)
   clau --take ID                  Merkt sich eine feste Session-ID für dieses Verzeichnis
   clau --forget                   Entfernt die gemerkte Session-ID
   clau --current                  Zeigt aktuelle Session/Model-Config
@@ -1831,7 +1831,7 @@ Git-Helfer (Repo aus GitHub via SSH):
   clau --git-down NAME            Klont git@github.com:DavidFroe/NAME.git ins aktuelle Verzeichnis
 
 Model-Mappings:
-  Claude Code (agentisch):  1=haiku(4.5)  2=sonnet(5)  3=opus(5)  4=fable(5)
+  Claude Code (agentisch):  1=haiku(4.5)  2=sonnet(5)  3=opus(5.5)  4=fable(5)
   owlAPI (lokal/gratis):    5=owl:120  6=owl:243  7=owl:113(Grok)  8=owl:38(QwQ)  9=owl:316  0=owl:free
   owlAPI (günstig/stark):   a=owl:35  b=owl:350  c=owl:503  d=owl:21  e=owl:84  ee=owl:501
   owlAPI direkt:            --model owl:35  oder  -m 350
@@ -1915,14 +1915,14 @@ effective_backend() {
 }
 
 # Übersetzt den internen Claude-Modell-Kurznamen in die volle Modell-ID, die die
-# claude-CLI erwartet. Explizit gepinnt auf die aktuelle Generation (Stand 2026-07):
-#   haiku=Haiku 4.5, sonnet=Sonnet 5, opus=Opus 5, fable=Fable 5.
+# claude-CLI erwartet. Explizit gepinnt auf die aktuelle Generation (Stand 2026-09):
+#   haiku=Haiku 4.5, sonnet=Sonnet 5, opus=Opus 5.5, fable=Fable 5.
 # Bei neuer Generation hier einmalig aktualisieren.
 claude_cli_model() {
   case "${1:-}" in
     haiku)  echo "claude-haiku-4-5" ;;
     sonnet) echo "claude-sonnet-5" ;;
-    opus)   echo "claude-opus-5" ;;
+    opus)   echo "claude-opus-5-5" ;;
     fable)  echo "claude-fable-5" ;;
     *) echo "$1" ;;
   esac
@@ -1973,7 +1973,7 @@ choose_model_interactive() {
     echo "  --- Standard Claude (agentisch, Datei-Editing + Shell) ---"
     echo "  1) haiku              Haiku 4.5   schnell, günstig"
     echo "  2) sonnet             Sonnet 5    Standard         [Enter]"
-    echo "  3) opus               Opus 5      stärker, teurer"
+    echo "  3) opus               Opus 5.5    stärker, teurer"
     echo "  4) fable              Fable 5     stärkstes Modell"
     echo "  --- LiteLLM Modelle (via Proxy, ${OWL_BASE_URL}) ---"
     echo "  5) PropellerA-27B  lokal   tools+vision  GRATIS"
@@ -3485,7 +3485,7 @@ run_new_project_interactive() {
         echo "Bitte Modell wählen:"
         echo "  1) haiku   Haiku 4.5   schnell, günstig"
         echo "  2) sonnet  Sonnet 5    Standard"
-        echo "  3) opus    Opus 5      stärker, teurer"
+        echo "  3) opus    Opus 5.5    stärker, teurer"
         echo "  4) fable   Fable 5     stärkstes Modell"
         printf "Auswahl [1-4, Enter=2]: "
         read -r choice
@@ -3520,7 +3520,7 @@ choose_tg_brain() {
   echo "  aktuell: ${CLAU_TG_BRAIN_MODEL}  (${CLAU_TG_BRAIN:-1} = 1:an / 0:aus)"
   echo "  1) gemma-12b-chat    lokal, DE-optimiert, schnell   [Standard]"
   echo "  2) owl:free          Router, gratis"
-  echo "  3) claude-opus-5     stark, aber teuer fürs Plaudern"
+  echo "  3) claude-opus-5-5   stark, aber teuer fürs Plaudern"
   echo "  4) eigene Modell-ID eingeben"
   echo "  5) Concierge AUS (jede Nachricht geht direkt an Claude)"
   echo "  6) Zurück"
@@ -3529,7 +3529,7 @@ choose_tg_brain() {
   case "${b:-6}" in
     1) _tg_conf_set CLAU_TG_BRAIN_MODEL "gemma-12b-chat"; _tg_conf_set CLAU_TG_BRAIN "1"; echo "✅ gemma-12b-chat" ;;
     2) _tg_conf_set CLAU_TG_BRAIN_MODEL "free";           _tg_conf_set CLAU_TG_BRAIN "1"; echo "✅ free (Router)" ;;
-    3) _tg_conf_set CLAU_TG_BRAIN_MODEL "claude-opus-5";  _tg_conf_set CLAU_TG_BRAIN "1"; echo "✅ claude-opus-5" ;;
+    3) _tg_conf_set CLAU_TG_BRAIN_MODEL "claude-opus-5-5"; _tg_conf_set CLAU_TG_BRAIN "1"; echo "✅ claude-opus-5-5" ;;
     4) printf "Modell-ID (wie auf QuiteQue): "; read -r mid
        [[ -n "$mid" ]] && { _tg_conf_set CLAU_TG_BRAIN_MODEL "$mid"; _tg_conf_set CLAU_TG_BRAIN "1"; echo "✅ $mid"; } ;;
     5) _tg_conf_set CLAU_TG_BRAIN "0"; echo "Concierge AUS." ;;
