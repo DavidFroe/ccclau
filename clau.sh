@@ -59,6 +59,7 @@ declare -gA OWL_CONTEXT_WINDOWS=(
   ["54"]="0"        # SkinnyJoe B3: SD-Turbo (Image-Gen, CPU)
   ["90"]="1048000"  # GPT-5.1
   ["120"]="97000"   # PropellerA: Qwen3.6 27B (Tools+Vision+Thinking)
+  ["121"]="97000"   # Qwen3.8-Flash-Next: 176B MoE, Tools+Vision+Reasoning
   ["317"]="1048000" # OpenRouter Owl Alpha (1M ctx, Agentic, FREE)
   ["350"]="1048000" # DeepSeek V4 Pro (1M ctx, Reasoning)
   ["351"]="1048000" # MiniMax M3 (1M ctx)
@@ -129,7 +130,7 @@ declare -gA TIMEOUT_PRESET_DEFAULT=(
   ["51"]="600000"    # SkinnyJoe T77: Dolphin3 3B (CPU) → 10 Min
   ["52"]="600000"    # SkinnyJoe T78: L3.1 Dark-Planet 8B (CPU) → 10 Min
   ["120"]="1800000"  # PropellerA: Qwen3.6 27B → 30 Min
-  ["121"]="1800000"  # opencode-Subagent: Qwen3.8 27B (32k, teilt Pool mit 120) → 30 Min
+  ["121"]="1800000"  # Qwen3.8-Flash-Next (176B MoE, 97k) → 30 Min
   ["317"]="3600000"  # OpenRouter Owl Alpha (1M ctx) → 60 Min
   ["350"]="3600000"  # DeepSeek V4 Pro (1M ctx) → 60 Min
   ["351"]="3600000"  # MiniMax M3 (1M ctx) → 60 Min
@@ -152,7 +153,7 @@ declare -gA TIMEOUT_PRESET_MAX=(
   ["51"]="1800000"
   ["52"]="1800000"
   ["120"]="3600000"  # PropellerA → 60 Min
-  ["121"]="3600000"  # opencode-Subagent → 60 Min
+  ["121"]="3600000"  # Qwen3.8-Flash-Next → 60 Min
   ["317"]="10800000" # OpenRouter Owl Alpha → 180 Min
   ["350"]="10800000" # DeepSeek V4 Pro → 180 Min
   ["351"]="10800000" # MiniMax M3 → 180 Min
@@ -1834,10 +1835,9 @@ Git-Helfer (Repo aus GitHub via SSH):
 
 Model-Mappings:
   Claude Code (agentisch):  1=haiku(4.5)  2=sonnet(5)  3=opus(5.5)  4=fable(5)
-  owlAPI (lokal/gratis):    5=owl:120  6=owl:243  7=owl:113(Grok)  8=owl:38(QwQ)  9=owl:316  0=owl:free
+  owlAPI (lokal/gratis):    5=owl:120  6=owl:243  7=owl:113(Grok)  8=owl:38(QwQ)  9=owl:316  0=owl:free  f=owl:121(Flash-Next,97k)
   owlAPI (günstig/stark):   a=owl:35  b=owl:350  c=owl:503  d=owl:21  e=owl:84  ee=owl:501
   owlAPI direkt:            --model owl:35  oder  -m 350
-  Nur opencode (32k):       f=owl:121  (Qwen3.8-27B, Subagent/Kurz-Check, NICHT für Claude Code)
 
 Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_AUTO_COMPACT_WINDOW="90000"   Festes Auto-Compact-Limit (leer = Prozent-basiert)
@@ -1991,8 +1991,7 @@ choose_model_interactive() {
     echo "  d) Claude-Sonnet   Anth    tools         \$3.00/\$15.00"
     echo "  e) GPT-5           OAI     tools         \$1.25/\$10.00"
     echo "  ee) Gemini-2.5-Pro Goog    tools         \$1.25/\$10.00"
-    echo "  --- Nur opencode-Backend (32k Kontext, Subagent/Kurz-Check) ---"
-    echo "  f) Qwen3.8-27B(121) lokal  32k, GRATIS   NICHT für Claude Code!"
+    echo "  f) Qwen3.8-Flash-Next(121) lokal  97k, GRATIS  176B MoE, schnell"
     echo "  o) LiteLLM ID direkt"
     printf "Auswahl [0-9, a-ee, f, o, Enter=2]: "
     read -r choice
@@ -2014,15 +2013,7 @@ choose_model_interactive() {
       d|D) CLAU_MODEL="owl:21"; break ;;
       e|E) CLAU_MODEL="owl:84"; break ;;
       ee|EE) CLAU_MODEL="owl:501"; break ;;
-      f|F)
-        CLAU_MODEL="owl:121"
-        if [[ "$(effective_backend)" != "opencode" ]]; then
-          echo
-          echo "Hinweis: 121 hat nur 32k Kontext -- für Claude Code (großer System-"
-          echo "Prompt + Tools) zu klein. Gedacht für die opencode-Engine (Menü 8)."
-        fi
-        break
-        ;;
+      f|F) CLAU_MODEL="owl:121"; break ;;
       o|O)
         printf "LiteLLM/owlAPI Modell-ID: "
         read -r tmp_id
