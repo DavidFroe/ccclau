@@ -36,7 +36,15 @@ Falls `~/.local/bin` nicht im PATH:
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 ```
 
-### Frisches Zielsystem (bei ausgetauschten SSH-Keys)
+### Frisches Zielsystem
+
+Einzeiler (klont + installiert, HTTPS — keine SSH-Keys nötig):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DavidFroe/ccclau/main/install.sh | bash
+```
+
+Oder manuell (SSH, bei ausgetauschten SSH-Keys):
 
 ```bash
 git clone git@github.com:DavidFroe/ccclau.git ~/ccclau

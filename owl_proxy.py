@@ -525,21 +525,41 @@ class ProxyHandler(BaseHTTPRequestHandler):
         )
         log(f"→ POST {OWL_BASE}/chat/completions model={OWL_MODEL} stream={stream} messages={n_msgs} [{roles_summary}]")
         try:
-            resp = requests.post(
-                f"{OWL_BASE}/chat/completions",
-                json=oai_payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "X-OwlTrail-User": OWL_USER,
-                    # Wie lange QuiteQue serverseitig auf diesen Request warten darf
-                    # (inkl. eines evtl. internen Retries bei Watchdog-Timeout),
-                    # etwas unter unserem eigenen Timeout.
-                    "X-Owl-Max-Wait": str(max(60, REQUEST_TIMEOUT - 60)),
-                    **ACTIVITY_HEADERS,
-                },
-                stream=stream,
-                timeout=REQUEST_TIMEOUT
-            )
+            # Bei 429/503 (Überlast bzw. owlAPIs Liveness-Probe-Fenster nach
+            # einem verpassten TCP-Connect) genau einmal mit Backoff neu
+            # anfragen -- das passiert hier VOR dem Lesen des Bodys (raise_for_status
+            # feuert schon auf die Status-Zeile), rührt also weder an einem
+            # bereits laufenden Stream noch an dessen Timeout. Jeder andere
+            # Fehler (auch ein zweites 429/503) geht unverändert durch.
+            resp = None
+            for attempt in range(2):
+                resp = requests.post(
+                    f"{OWL_BASE}/chat/completions",
+                    json=oai_payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-OwlTrail-User": OWL_USER,
+                        # Wie lange QuiteQue serverseitig auf diesen Request warten darf
+                        # (inkl. eines evtl. internen Retries bei Watchdog-Timeout),
+                        # etwas unter unserem eigenen Timeout.
+                        "X-Owl-Max-Wait": str(max(60, REQUEST_TIMEOUT - 60)),
+                        **ACTIVITY_HEADERS,
+                    },
+                    stream=stream,
+                    timeout=REQUEST_TIMEOUT
+                )
+                if attempt == 0 and resp.status_code in (429, 503):
+                    retry_after = resp.headers.get("Retry-After")
+                    try:
+                        backoff = min(float(retry_after), 30.0) if retry_after else 5.0
+                    except ValueError:
+                        backoff = 5.0
+                    log(f"✗ Backend {resp.status_code} nach {time.monotonic()-t0:.1f}s "
+                        f"-- einmaliger Retry in {backoff:.0f}s")
+                    resp.close()
+                    time.sleep(backoff)
+                    continue
+                break
             resp.raise_for_status()
         except requests.exceptions.HTTPError as e:
             # Backend hat mit einem echten HTTP-Fehlerstatus geantwortet (4xx/5xx).
