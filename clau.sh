@@ -32,6 +32,7 @@ toggle_sudo() {
 OWL_PROXY_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/owl_proxy.py"
 CC_COMPACT_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc_compact.py"
 WEBSEARCH_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/websearch_mcp.py"
+LLM_STATUS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/llm_status_mcp.py"
 OWL_BASE_URL="http://11.0.0.13:7077"
 QQ_USER="opencode"
 
@@ -1307,6 +1308,29 @@ CLAU_OWL_TOOLS_DEFAULT="Bash,Edit,Write,Read,AskUserQuestion,TaskCreate,TaskGet,
 # dazu — das serverseitige WebSearch der Anthropic-API gibt es über owlAPI
 # nicht, ein lokales Modell hätte sonst gar keinen Weg ins Netz.
 _owl_mcp_config() {
+  if team_active && [[ -f "$LLM_STATUS_MCP_SCRIPT" ]]; then
+    # Team-Modus: llm_status (Slot-Auslastung des Ausführer-Modells) immer,
+    # Websuche wie gehabt nur mit CLAU_WEBSEARCH=1.
+    local ws=0
+    if [[ "${CLAU_WEBSEARCH:-1}" == "1" && -f "$WEBSEARCH_MCP_SCRIPT" ]]; then
+      ws=1; _owl_activity_env "websearch"
+    fi
+    python3 - "$ws" "$LLM_STATUS_MCP_SCRIPT" "$WEBSEARCH_MCP_SCRIPT" <<PY_MCP
+import json, sys
+ws, llm, web = sys.argv[1] == "1", sys.argv[2], sys.argv[3]
+servers = {"llm_status": {"type": "stdio", "command": "python3", "args": [llm], "env": {
+    "CLAU_TEAM_STATUS_URL": "${CLAU_TEAM_STATUS_URL:-http://127.0.0.1:8293/slots}",
+    "CLAU_TEAM_EXEC_MODEL": "$(team_exec_model)",
+    "CLAU_TEAM_MAX_AGENTS": "${CLAU_TEAM_MAX_AGENTS:-5}"}}}
+if ws:
+    servers["websearch"] = {"type": "stdio", "command": "python3", "args": [web], "env": {
+        "QUITEQUE_URL": "$OWL_BASE_URL", "OWL_PROXY_USER": "$QQ_USER",
+        "OWL_HDR_AGENT_TOOL": "${OWL_HDR_AGENT_TOOL:-}", "OWL_HDR_REQUEST_CONTEXT": "${OWL_HDR_REQUEST_CONTEXT:-}",
+        "OWL_HDR_PROJECT": "${OWL_HDR_PROJECT:-}", "OWL_HDR_USER": "${OWL_HDR_USER:-}"}}
+print(json.dumps({"mcpServers": servers}))
+PY_MCP
+    return
+  fi
   if [[ "${CLAU_WEBSEARCH:-1}" == "1" && -f "$WEBSEARCH_MCP_SCRIPT" ]]; then
     _owl_activity_env "websearch"
     # Zeilenumbruch ist Pflicht: der Aufrufer liest die Argumente mit
