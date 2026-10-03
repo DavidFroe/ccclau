@@ -507,6 +507,7 @@ _kill_owl_proxy() {
     rm -f "$_OWL_PID_FILE"
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
   fi
+  rm -f "${OWL_PROXY_LOG_DIR}/team_anweisung_$$.md" 2>/dev/null || true
   # Claude CLI aktiviert Mouse-Tracking — bei Exit sauber deaktivieren
   printf '\e[?1000l\e[?1002l\e[?1003l\e[?1004l\e[?1006l\e[?1015l\e[?1016l' > /dev/tty 2>/dev/null || true
 }
@@ -1452,6 +1453,17 @@ _team_claude_args() {
   if [[ -n "$agents" && "$agents" != "{}" ]]; then
     echo "--agents"
     echo "$agents"
+  fi
+  # Team-Anweisung (team/TEAM_ANWEISUNG.md) mit eingesetztem Agenten-Limit
+  # als System-Prompt-Zusatz. Datei pro Prozess, weil der Text Zeilenumbrüche hat.
+  local tpl="$CLAU_TEAM_DIR/TEAM_ANWEISUNG.md"
+  if [[ -f "$tpl" ]]; then
+    local out="${OWL_PROXY_LOG_DIR}/team_anweisung_$$.md"
+    mkdir -p "$OWL_PROXY_LOG_DIR" 2>/dev/null || true
+    if sed "s/{{MAX_AGENTS}}/${CLAU_TEAM_MAX_AGENTS:-5}/g" "$tpl" > "$out" 2>/dev/null; then
+      echo "--append-system-prompt-file"
+      echo "$out"
+    fi
   fi
 }
 
