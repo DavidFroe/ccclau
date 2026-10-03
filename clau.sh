@@ -33,6 +33,7 @@ OWL_PROXY_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/owl_proxy.py"
 CC_COMPACT_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc_compact.py"
 WEBSEARCH_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/websearch_mcp.py"
 LLM_STATUS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/llm_status_mcp.py"
+CLAU_TEAM_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/team"
 OWL_BASE_URL="http://11.0.0.13:7077"
 QQ_USER="opencode"
 
@@ -1412,6 +1413,48 @@ team_export_env() {
   unset CLAUDE_CODE_SUBAGENT_MODEL
 }
 
+# Agent-Definitionen (team/agents/*.md, Frontmatter wie .claude/agents/) als
+# --agents-JSON: so landen sie in der Session, ohne dass clau etwas in den
+# Projektordner schreibt. Ein gleichnamiger Agent in .claude/agents/ des
+# Projekts wird dabei von der CLI-Definition überdeckt.
+_team_agents_json() {
+  python3 - "$CLAU_TEAM_DIR/agents" <<'PY_AGENTS'
+import json, os, sys
+d = sys.argv[1]
+agents = {}
+for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+    if not fn.endswith(".md"):
+        continue
+    text = open(os.path.join(d, fn), encoding="utf-8").read()
+    meta, body = {}, text
+    if text.startswith("---"):
+        _, fm, body = text.split("---", 2)
+        for line in fm.strip().splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                meta[k.strip()] = v.strip()
+    name = meta.get("name") or fn[:-3]
+    a = {"description": meta.get("description", ""), "prompt": body.strip()}
+    if meta.get("model"):
+        a["model"] = meta["model"]
+    if meta.get("tools"):
+        a["tools"] = [t.strip() for t in meta["tools"].split(",") if t.strip()]
+    agents[name] = a
+print(json.dumps(agents, ensure_ascii=False))
+PY_AGENTS
+}
+
+# Zusätzliche claude-Argumente im Team-Modus, eine pro Zeile (Aufrufer liest
+# mit "while read", deshalb einzeiliges JSON und Dateipfad statt Prompt-Text).
+_team_claude_args() {
+  team_active || return 0
+  local agents; agents="$(_team_agents_json 2>/dev/null)"
+  if [[ -n "$agents" && "$agents" != "{}" ]]; then
+    echo "--agents"
+    echo "$agents"
+  fi
+}
+
 # claude über owlAPI-Proxy starten (interaktiv)
 run_owl_via_claude() {
   local owl_id="$1"
@@ -1504,7 +1547,7 @@ run_owl_via_claude() {
     [[ "$arg" != "--force-context" ]] && real_args+=("$arg")
   done
   local tool_args=()
-  while IFS= read -r line; do tool_args+=("$line"); done < <(_owl_minimal_tool_args)
+  while IFS= read -r line; do tool_args+=("$line"); done < <(_owl_minimal_tool_args; _team_claude_args)
   local cli_model; cli_model="$(owl_cli_model)"
   team_active && team_export_env
   # shellcheck disable=SC2086
@@ -1558,7 +1601,7 @@ run_owl_headless_via_claude() {
   fi
 
   local tool_args=()
-  while IFS= read -r line; do tool_args+=("$line"); done < <(_owl_minimal_tool_args)
+  while IFS= read -r line; do tool_args+=("$line"); done < <(_owl_minimal_tool_args; _team_claude_args)
   local cli_model; cli_model="$(owl_cli_model)"
   local perm_args=()
   if team_active; then
