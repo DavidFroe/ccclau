@@ -3945,10 +3945,7 @@ interactive_start() {
   case "${start_choice:-2}" in
     1) choose_session_interactive; interactive_start ;;
     2) run_new_session_named ;;
-    3)
-      if [[ "$(effective_backend)" == "qwenplan" ]]; then choose_qwen_model_interactive
-      else choose_model_interactive; fi
-      interactive_start ;;
+    3) choose_model_interactive; interactive_start ;;
     4) choose_bot_settings; interactive_start ;;
     5) run_compact ;;
     6) choose_telegram_interactive; interactive_start ;;
