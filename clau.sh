@@ -2597,6 +2597,10 @@ run_qwenplan_session() {
   # dialog in Claude Code, und es gibt keinen Rückfall, bei dem das
   # Claude-Abo-OAuth-Token an den fremden Endpunkt geschickt würde.
   # Kein MCP (Websuche läuft über QuiteQue, das verbieten die AGB), keine Telegram-Hooks.
+  # CLAUDE_CODE_ATTRIBUTION_HEADER=0: sonst steht im System-Prompt eine
+  # "x-anthropic-billing-header: cc_version=…<hash>"-Zeile, die sich pro Session
+  # ändert -- dann trifft der Prompt-Cache bei jedem Session-Start daneben
+  # (~36k Tokens neu). Gleiches Problem wie bei owl_proxy (adb66d4).
   unset ANTHROPIC_API_KEY
   # shellcheck disable=SC2086
   ANTHROPIC_BASE_URL="$QWENPLAN_BASE_URL" \
@@ -2608,6 +2612,7 @@ run_qwenplan_session() {
   ANTHROPIC_SMALL_FAST_MODEL="$fast" \
   CLAUDE_CODE_SUBAGENT_MODEL="$model" \
   CLAU_TG_SUPPRESS=1 \
+  CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
   exec claude --model "$model" --strict-mcp-config $extra "$@"
 }
 
