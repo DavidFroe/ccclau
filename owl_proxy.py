@@ -7,6 +7,7 @@ Setzt X-OwlTrail-User Header (User 'opencode' per default) für QuiteQue-Auth.
 
 import json
 import os
+import re
 
 import sys
 import time
@@ -101,6 +102,34 @@ def _activity_headers():
 
 
 ACTIVITY_HEADERS = _activity_headers()
+
+# Echtes Kontext-Fenster des Zielmodells (setzt clau). Wird nur gebraucht, um
+# Kontext-Überlauf-Fehler des Backends ins Anthropic-Format zu übersetzen.
+OWL_CTX_LIMIT = int(os.environ.get("OWL_CTX_LIMIT", "0") or 0)
+
+# Fehlertexte, mit denen vLLM / llama.cpp / OpenRouter / QuiteQue einen zu
+# langen Prompt melden.
+_CTX_ERR_RE = re.compile(
+    r"maximum context length|context length|context size|context window|"
+    r"exceed_context|exceeds? the (?:available )?context|too many tokens|"
+    r"prompt is too long|input is too long|reduce the length", re.I)
+
+
+def _ctx_overflow_message(body_text, est_input_tokens):
+    """Liefert eine Fehlermeldung im Anthropic-Format ("prompt is too long:
+    N tokens > M maximum"), wenn body_text einen Kontext-Überlauf meldet --
+    sonst None. Nur auf genau diese Form reagiert Claude Code mit seiner
+    eigenen Rettung (Notfall-Compact, ältesten Verlauf abschneiden)."""
+    if not _CTX_ERR_RE.search(body_text or ""):
+        return None
+    nums = [int(n) for n in re.findall(r"(\d{4,7})\s*tokens?", body_text or "")]
+    limit = OWL_CTX_LIMIT or (min(nums) if nums else 0)
+    actual = max([est_input_tokens] + [n for n in nums if n > limit]) if limit else est_input_tokens
+    if not limit:
+        limit = max(1, int(actual * 0.9))
+    if actual <= limit:
+        actual = limit + 1
+    return f"prompt is too long: {actual} tokens > {limit} maximum (owlAPI: {(body_text or '')[:300]})"
 PORT = int(os.environ.get("OWL_PROXY_PORT", "8325"))
 # Timeout: lang genug für langsame Modelle (PropellerA etc.)
 REQUEST_TIMEOUT = int(os.environ.get("OWL_PROXY_TIMEOUT", "600"))
@@ -578,6 +607,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # Sessions: der Prompt überschreitet das Modell-Context-Window.
             # Dann den User direkt auf clau --compact hinweisen statt ihn
             # raten zu lassen.
+            ctx_msg = _ctx_overflow_message(body_text, est_input_tokens)
+            if ctx_msg:
+                log(f"  → als Kontext-Überlauf an Claude Code gemeldet: {ctx_msg[:120]}")
+                self._error_json(400, ctx_msg)
+                return
             msg = f"owlAPI backend {status}: {body_text}"
             if status == 400 and est_input_tokens > 60000:
                 msg += ("  [Kontext-Window des Modells wahrscheinlich überschritten — "

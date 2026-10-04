@@ -485,43 +485,16 @@ _pre_flight_check() {
   local sf_name; sf_name="$(basename "$sf")"
 
   if [[ "$tokens" -gt "$cw" ]]; then
+    # Kein automatisches eigenes Compact mehr: Claude Code kompaktiert selbst.
+    # Lehnt das Backend den Prompt als zu lang ab, übersetzt owl_proxy das in
+    # "prompt is too long: N > M" -- darauf reagiert Claude Code mit seiner
+    # eigenen Rettung (Notfall-Compact, ältesten Verlauf abschneiden).
     cat >&2 <<EOF
-⚠ PRE-FLIGHT FEHLGESCHLAGEN — Session überschreitet Modell-Context-Window
-
-  Modell:      owl:$owl_id
-  Kontext:     $cw Tokens
-  Session:     $tokens Tokens ($pct%)
-  Session-File: $sf
-
-  Diese Session ist zu groß für das gewählte Modell. claude-CLI wird
-  beim Start einen API-Error geben, weil das Backend den Input nicht
-  verarbeiten kann.
+⚠ Pre-Flight: Session hat ~$tokens Tokens ($pct% von $cw) — größer als das Fenster von owl:$owl_id.
+  Claude Code startet trotzdem und kompaktiert selbst.
+  Eigenes Compact über QuiteQue bei Bedarf: clau → Menüpunkt 5 (oder clau --compact).
 EOF
-    if ask_yes_no "Jetzt automatisch komprimieren (Tokenverlust) und auf der neuen Session mit owl:$owl_id fortsetzen?"; then
-      echo "Komprimiere $sf_name (Ziel: owl:$owl_id) ..." >&2
-      local new_id
-      new_id="$(_compact_session_file "$sf" "$owl_id")"
-      if [[ -n "$new_id" ]]; then
-        echo "✓ Komprimiert → neue Session: $new_id" >&2
-        PRE_FLIGHT_RESUME_ID="$new_id"
-        return 0
-      fi
-      echo "✗ Komprimieren fehlgeschlagen." >&2
-    fi
-    cat >&2 <<EOF
-
-  Alternativen:
-    1) Größeres Modell wählen, z.B.:
-         clau -m owl:351    (MiniMax M3, 1M ctx)
-         clau -m owl:361    (Qwen3.7 Max, 1M ctx)
-         clau -m owl:379    (DeepSeek V4 Flash, 1M ctx)
-    2) Neue Session starten (alte verwerfen):
-         clau --new -m owl:$owl_id
-    3) Später manuell komprimieren: clau → Menüpunkt 5
-
-  Override mit --force-context, wenn du es trotzdem versuchen willst.
-EOF
-    return 1
+    return 0
   fi
 
   if [[ "$pct" -gt 80 ]]; then
@@ -546,6 +519,15 @@ _OWL_PID_FILE="/tmp/.clau_owl_proxy_$$.pid"
 OWL_PROXY_LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/clau"
 OWL_PROXY_LOG_FILE="${OWL_PROXY_LOG_DIR}/owl_proxy.log"
 
+# Modellname, den Claude Code im owl-Pfad bekommt (owl_proxy ignoriert ihn).
+# Claude Code traut "claude-sonnet-4-6" nur 200k zu und deckelt die
+# Compact-Grenze darauf; mit "[1m]" rechnet es mit 1M, dann greift unser
+# CLAUDE_CODE_AUTO_COMPACT_WINDOW auch bei großen owl-Modellen.
+_owl_cc_model() {
+  local cw="${1:-0}"
+  if [[ -n "$cw" && "$cw" -gt 200000 ]]; then echo "claude-sonnet-4-6[1m]"; else echo "claude-sonnet-4-6"; fi
+}
+
 _start_owl_proxy() {
   local owl_id="$1"
   local port
@@ -555,7 +537,7 @@ _start_owl_proxy() {
   : > "$OWL_PROXY_LOG_FILE" 2>/dev/null || true
   _owl_activity_env "chat"
   OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
-    OWL_PROXY_TIMEOUT="${CLAU_OWL_TIMEOUT:-1800}" \
+    OWL_PROXY_TIMEOUT="${CLAU_OWL_TIMEOUT:-1800}" OWL_CTX_LIMIT="$(owl_context_window "$owl_id")" \
     OWL_HDR_AGENT_TOOL="$OWL_HDR_AGENT_TOOL" OWL_HDR_REQUEST_CONTEXT="$OWL_HDR_REQUEST_CONTEXT" \
     OWL_HDR_PROJECT="$OWL_HDR_PROJECT" OWL_HDR_USER="$OWL_HDR_USER" \
     python3 "$OWL_PROXY_SCRIPT" "$port" >>"$OWL_PROXY_LOG_FILE" 2>&1 &
@@ -1435,18 +1417,7 @@ run_owl_via_claude() {
   # oder CLAU_AUTO_COMPACT_PCT (Prozent von Context-Window, Default 80).
   # claude-CLI respektiert CLAUDE_CODE_AUTO_COMPACT_WINDOW ohne DISABLE_COMPACT zu setzen!
   local cw; cw="$(owl_context_window "$owl_id")"
-  if [[ -n "$cw" && "$cw" -gt 0 && "$cw" -lt 1000000 ]]; then
-    local compact_target; compact_target="$(compute_auto_compact_window "$cw")"
-    export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$compact_target"
-    if [[ -n "${CLAU_AUTO_COMPACT_WINDOW:-}" && "${CLAU_AUTO_COMPACT_WINDOW:-}" -gt 0 ]]; then
-      echo "Auto-Compact-Window: $compact_target Tokens (fester Wert für owl:$owl_id)"
-    else
-      local pct="${CLAU_AUTO_COMPACT_PCT:-80}"
-      echo "Auto-Compact-Window: $compact_target Tokens (${pct}% von $cw für owl:$owl_id)"
-    fi
-  else
-    unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
-  fi
+  _apply_compact_window "$cw" "owl:$owl_id"
 
   # Token-Fresser deaktivieren
   token_saver_env >/dev/null
@@ -1460,11 +1431,10 @@ run_owl_via_claude() {
   trap '_kill_owl_proxy' EXIT INT TERM
   sleep 0.6
 
-  # Kontext-Window für die Info-Anzeige ausgeben. Wir überschreiben NICHT
-  # CLAUDE_CODE_MAX_CONTEXT_TOKENS — das würde Auto-Compact ausschalten
-  # (greift nur wenn DISABLE_COMPACT gesetzt ist), und der User will
-  # Auto-Compact aktiv lassen. Statt dessen: User alle paar Turns /compact
-  # aufrufen lassen, oder ein größeres Modell wählen.
+  # Fenster: Claude Code traut "claude-sonnet-4-6" 200k zu, mit "[1m]" 1M
+  # (_owl_cc_model); die eigentliche Compact-Grenze kommt aus
+  # _apply_compact_window. CLAUDE_CODE_MAX_CONTEXT_TOKENS wirkt bei bekannten
+  # Modellnamen nur zusammen mit DISABLE_COMPACT -- hier also nicht nutzbar.
   echo "Claude Code → Proxy :${port} → QuiteQue (Modell $owl_id${cw:+, ctx=$cw})"
   if [[ -n "$cw" && "$cw" -lt 200000 ]]; then
     echo "Hinweis: Modell $owl_id hat nur $cw Token Kontext."
@@ -1487,7 +1457,7 @@ run_owl_via_claude() {
   # shellcheck disable=SC2086
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
   ANTHROPIC_API_KEY="sk-ant-api03-owl-dummy-key-not-real" \
-  claude --model "claude-sonnet-4-6" $extra "${tool_args[@]}" "${real_args[@]}" || true
+  claude --model "$(_owl_cc_model "$cw")" $extra "${tool_args[@]}" "${real_args[@]}" || true
 
   _kill_owl_proxy
   trap - EXIT INT TERM
@@ -1507,12 +1477,7 @@ run_owl_headless_via_claude() {
 
   # Auto-Compact-Threshold: konfigurierbar
   local cw; cw="$(owl_context_window "$owl_id")"
-  if [[ -n "$cw" && "$cw" -gt 0 && "$cw" -lt 1000000 ]]; then
-    local compact_target; compact_target="$(compute_auto_compact_window "$cw")"
-    export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$compact_target"
-  else
-    unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
-  fi
+  _apply_compact_window "$cw" "owl:$owl_id" >/dev/null
 
   # Token-Fresser deaktivieren
   token_saver_env >/dev/null
@@ -1538,7 +1503,7 @@ run_owl_headless_via_claude() {
   while IFS= read -r line; do tool_args+=("$line"); done < <(_owl_minimal_tool_args)
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
   ANTHROPIC_API_KEY="sk-owl" \
-  claude -p "$prompt" --model "claude-sonnet-4-6" "${tool_args[@]}" || true
+  claude -p "$prompt" --model "$(_owl_cc_model "$cw")" "${tool_args[@]}" || true
 
   _kill_owl_proxy
   trap - EXIT INT TERM
@@ -1710,6 +1675,32 @@ compute_auto_compact_window() {
     local pct="${CLAU_AUTO_COMPACT_PCT:-80}"
     echo $(( cw * pct / 100 ))
   fi
+}
+
+# Claude Code rechnet die Compact-Schwelle so (2.1.x, aus dem Code gelesen):
+#   Fenster  = min(Fenster, das es dem Modell zutraut; CLAUDE_CODE_AUTO_COMPACT_WINDOW)
+#   Schwelle = Fenster - min(max_output, 20000) - 13000
+# und hebt CLAUDE_CODE_AUTO_COMPACT_WINDOW auf mindestens 100000 an.
+# Früher setzten wir die Variable direkt auf 80 % -- dann zog Claude Code die
+# 33k noch einmal ab und kompaktierte viel zu früh. Jetzt: gewünschte Schwelle
+# + 33000, höchstens das echte Fenster.
+CC_COMPACT_RESERVE=33000
+
+# Exportiert CLAUDE_CODE_AUTO_COMPACT_WINDOW für ein Modell mit echtem Fenster $1
+# und meldet die tatsächliche Schwelle. $2 = Bezeichnung fürs Log.
+_apply_compact_window() {
+  local cw="$1" label="$2"
+  if [[ -z "$cw" || "$cw" -le 0 ]]; then
+    unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
+    return 0
+  fi
+  local want; want="$(compute_auto_compact_window "$cw")"
+  local w=$(( want + CC_COMPACT_RESERVE ))
+  [[ "$w" -gt "$cw" ]] && w="$cw"
+  [[ "$w" -lt 100000 ]] && w=100000     # Claude Codes Untergrenze
+  [[ "$w" -gt 1000000 ]] && w=1000000   # und Obergrenze
+  export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$w"
+  echo "Auto-Compact: ab ~$(( w - CC_COMPACT_RESERVE )) Tokens (Fenster $cw, $label)"
 }
 
 # Kurzstatus für die Menüleiste
@@ -1930,6 +1921,7 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_BACKEND="claude"               CLI-Engine: claude (Standard) | opencode | qwenplan
   CLAU_QWEN_MODEL="qwen3.8-max"       Modell für qwenplan (Key: ~/.config/clau/qwenplan.key, chmod 600)
   CLAU_QWEN_FAST_MODEL="qwen3.8-flash" schnelles Modell für qwenplan
+  CLAU_QWEN_COMPACT_AT="200000"       qwenplan: Auto-Compact ab so vielen Tokens (Fenster 1M; höher = mehr Credits/Anfrage)
   CLAU_TIMEOUT_DEFAULT="1800000"     Default Bash-Timeout in ms (30 Min = 1800000)
   CLAU_TIMEOUT_MAX="7200000"         Max Bash-Timeout in ms (120 Min = 7200000)
   CLAU_OWL_TIMEOUT="1800"            owlAPI-Request-Timeout in Sekunden (Default 1800 = 30 Min)
@@ -2744,8 +2736,15 @@ run_qwenplan_session() {
   token_saver_env >/dev/null
   export BASH_DEFAULT_TIMEOUT_MS="${CLAU_TIMEOUT_DEFAULT:-1800000}"
   export BASH_MAX_TIMEOUT_MS="${CLAU_TIMEOUT_MAX:-7200000}"
-  # Claude-Code-eigene Auto-Compact-Grenze nicht von owl-Läufen erben.
-  unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  # Claude Code kennt die Qwen-Modelle nicht und rechnet sonst mit 200k.
+  # CLAUDE_CODE_MAX_CONTEXT_TOKENS gibt ihm das echte Fenster (1M für die
+  # Plan-Modelle, CLAU_QWEN_CONTEXT überschreibt). Kompaktiert wird trotzdem
+  # schon bei CLAU_QWEN_COMPACT_AT (Default 200k): jede Anfrage schickt den
+  # ganzen Verlauf, bei 800k kostet das auch aus dem Cache ein Vielfaches an
+  # Plan-Credits.
+  local qcw="${CLAU_QWEN_CONTEXT:-1000000}"
+  export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$qcw"
+  CLAU_AUTO_COMPACT_WINDOW="${CLAU_QWEN_COMPACT_AT:-200000}" _apply_compact_window "$qcw" "$model"
 
   echo "Claude Code → Qwen Token Plan (Modell $model, schnell: $fast, Autonomie: $(interaction_label))"
   local extra; extra="$(_interaction_args)"
