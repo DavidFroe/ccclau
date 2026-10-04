@@ -2797,15 +2797,13 @@ choose_timeout_settings() {
 choose_team_settings() {
   while true; do
     echo
-    echo "Team-Modus / Fernsteuerung:"
+    echo "Team-Modus:"
     echo "  1) Team-Modus             : $(team_active && echo AN || echo aus)"
     echo "  2) Teamleiter-Modell      : owl:$(team_lead_model)"
     echo "  3) Ausführer-Modell       : owl:$(team_exec_model) (Slots: $(_team_exec_slots))"
     echo "  4) Max. Agenten           : ${CLAU_TEAM_MAX_AGENTS:-5}"
     echo "  5) Slot-Status-URL        : ${CLAU_TEAM_STATUS_URL}"
     echo "  8) Subagenten             : ${CLAU_TEAM_SUBAGENTS:-pi}$([[ "${CLAU_TEAM_SUBAGENTS:-pi}" == "pi" ]] && ! _team_pi_bin >/dev/null && echo "  (pi nicht gefunden → claude)")"
-    echo "  6) Fernsteuerung (API)    : $([[ "${CLAU_API:-0}" == "1" ]] && echo AN || echo aus)  (${CLAU_API_BIND})"
-    echo "  7) API-Token              : $([[ -n "${CLAU_API_TOKEN:-}" ]] && echo gesetzt || echo "<leer>")"
     echo "  0) Zurück"
     printf "Auswahl: "
     local c v; read -r c
@@ -2819,9 +2817,6 @@ choose_team_settings() {
          fi ;;
       4) printf "Max. Agenten [%s]: " "${CLAU_TEAM_MAX_AGENTS:-5}"; read -r v; [[ "$v" =~ ^[0-9]+$ ]] && CLAU_TEAM_MAX_AGENTS="$v" ;;
       5) printf "Slot-Status-URL [%s]: " "$CLAU_TEAM_STATUS_URL"; read -r v; [[ -n "$v" ]] && CLAU_TEAM_STATUS_URL="$v" ;;
-      6) if [[ "${CLAU_API:-0}" == "1" ]]; then CLAU_API=0; else CLAU_API=1; fi
-         printf "Bind-Adresse [%s]: " "$CLAU_API_BIND"; read -r v; [[ -n "$v" ]] && CLAU_API_BIND="$v" ;;
-      7) printf "API-Token (leer = keiner): "; read -r v; CLAU_API_TOKEN="$v" ;;
       8) if [[ "${CLAU_TEAM_SUBAGENTS:-pi}" == "pi" ]]; then CLAU_TEAM_SUBAGENTS=claude; else CLAU_TEAM_SUBAGENTS=pi; fi ;;
       0|"") return 0 ;;
       *) echo "Ungültige Auswahl." ; continue ;;
@@ -2854,12 +2849,26 @@ choose_bot_settings() {
   done
 }
 
+# Neue Session mit Pflicht-Namen. clau gibt die Session-ID vor (--session-id),
+# damit Name (--name, /rename-Titel) und Modell zur Session gemerkt werden.
+NEW_SESSION_ARGS=()
 run_new_session_named() {
-  printf "Session-Name (optional, Enter=ohne): "
-  read -r sname
-  if [[ -n "$sname" ]]; then
-    CLAU_SESSION_NAME="$sname"
-    save_config
+  local sname=""
+  while [[ -z "$sname" ]]; do
+    printf "Name der neuen Session: "
+    read -r sname || return 1
+    sname="$(printf '%s' "$sname" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -z "$sname" ]] && echo "  Bitte einen Namen eingeben (zum Wiederfinden in der Session-Liste)."
+  done
+  local sid; sid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid;print(uuid.uuid4())')"
+  CLAU_SESSION_NAME="$sname"
+  save_config
+  if [[ "$(effective_backend)" != "opencode" ]]; then
+    NEW_SESSION_ARGS=(--session-id "$sid" --name "$sname")
+    _set_session_title "$(_claude_projects_dir)/$(_project_hash_for)" "$sid" "$sname" 2>/dev/null || {
+      mkdir -p "$(_claude_projects_dir)/$(_project_hash_for)"
+      _set_session_title "$(_claude_projects_dir)/$(_project_hash_for)" "$sid" "$sname"; }
+    _session_meta_set "$sid" "$(_current_model_spec)"
   fi
   run_new_session
 }
@@ -3707,89 +3716,53 @@ run_import_md() {
 # Listet die letzten Sessions im aktuellen Projekt mit Größe/Token-Schätzung
 # und Inhalts-Vorschau, lässt eine auswählen, und fragt dann: fortsetzen
 # oder komprimieren (auf genau dieser gewählten Datei, nicht "die neueste").
-choose_session_interactive() {
-  local mdl; mdl="$(effective_model)"
-  if [[ -z "$mdl" ]]; then
-    ensure_model
-    mdl="$(effective_model)"
+# Aktionen für eine Session ($1 = Scan-Zeile). Läuft im Ordner der Session
+# (Claude löst --resume gegen den Bucket des Arbeitsordners auf).
+session_action_menu() {
+  local mstr cwd sid tokens name model preview epoch
+  IFS=$'\x1f' read -r mstr cwd sid tokens name model preview epoch <<< "$1"
+  if [[ -d "$cwd" && "$cwd" != "$PWD" ]]; then
+    cd "$cwd" || return 1
+    CONFIG_FILE=".clau.conf"; CLI_MODEL_OVERRIDE=""; CLI_BACKEND_OVERRIDE=""
+    load_config
   fi
-  local owl_id="" cw=""
-  if is_owl_model "$mdl"; then
-    owl_id="$(owl_model_id "$mdl")"
-    cw="$(owl_context_window "$owl_id")"
-  fi
-
   local proj_dir; proj_dir="$(_claude_projects_dir)/$(_project_hash_for)"
-  local files=()
-  if [[ -d "$proj_dir" ]]; then
-    while IFS= read -r f; do files+=("$f"); done < <(ls -1t "$proj_dir"/*.jsonl 2>/dev/null | head -20)
-  fi
-  if [[ "${#files[@]}" -eq 0 ]]; then
-    echo "Keine Sessions in diesem Projekt gefunden."
-    return 1
-  fi
-
+  local cur; cur="$(_current_model_spec)"
   echo
-  echo "Letzte Sessions in diesem Projekt (neueste zuerst, max. 20):"
-  local i=1 f tok pct sizeh mtime
-  local created is_compact orig_id orig_count preview user_title herkunft
-  for f in "${files[@]}"; do
-    tok="$(_estimate_session_tokens "$f")"
-    tok="${tok:-0}"
-    IFS=$'\x1f' read -r created is_compact orig_id orig_count preview < <(_session_meta "$f")
-    sizeh="$(du -h "$f" 2>/dev/null | cut -f1)"
-    mtime="$(date -r "$f" '+%d.%m. %H:%M' 2>/dev/null)"
-    local created_h=""
-    [[ -n "$created" ]] && created_h="$(date -d "$created" '+%d.%m. %H:%M' 2>/dev/null)"
-    user_title="$(_get_session_title "$proj_dir" "$(basename "$f" .jsonl)")"
-
-    if [[ -n "$cw" && "$cw" -gt 0 && "$tok" -gt 0 ]]; then
-      pct=$(( tok * 100 / cw ))
-      printf "  %2d) Erstellt %s · Aktiv %s · %s Tok (%s%% v. owl:%s, %s)\n" \
-        "$i" "${created_h:-?}" "$mtime" "$tok" "$pct" "$owl_id" "$sizeh"
-    else
-      printf "  %2d) Erstellt %s · Aktiv %s · %s Tok (%s)\n" \
-        "$i" "${created_h:-?}" "$mtime" "$tok" "$sizeh"
-    fi
-
-    herkunft=""
-    [[ "$is_compact" == "1" ]] && herkunft="⤷ komprimiert aus ${orig_id:0:8}… (${orig_count:-?} Nachr.)"
-    if [[ -n "$user_title" || -n "$herkunft" ]]; then
-      printf "       %s%s%s\n" \
-        "${user_title:+Titel: $user_title  }" \
-        "$herkunft" \
-        ""
-    fi
-    printf "       \"%s\"\n" "${preview:-<leer>}"
-    ((i++))
-  done
-  printf "Auswahl [1-%d, Enter=Abbrechen]: " "${#files[@]}"
-  local sel; read -r sel
-  [[ -n "$sel" && "$sel" =~ ^[0-9]+$ && "$sel" -ge 1 && "$sel" -le "${#files[@]}" ]] || { echo "Abgebrochen."; return 0; }
-  local chosen="${files[$((sel-1))]}"
-  local chosen_id; chosen_id="$(basename "$chosen" .jsonl)"
-
+  echo "Session: $name   (${sid:0:8}…, ${cwd/#$HOME/\~})"
+  echo "  Zuletzt: $(_model_label "$model") · $(_rel_time "$epoch") · ~${tokens:-0} Tokens"
+  [[ -n "$preview" && "$preview" != "$name" ]] && echo "  Start:   \"${preview:0:70}\""
   echo
-  echo "Gewählt: $chosen_id"
-  echo "  1) Fortsetzen"
-  echo "  2) Komprimieren (und danach fortsetzen)"
-  echo "  3) Titel setzen"
-  echo "  4) Löschen (unwiderruflich!)"
-  echo "  5) Als Markdown exportieren"
-  echo "  6) Abbrechen"
-  printf "Auswahl [1-6, Enter=1]: "
+  echo "  1) Fortsetzen                      [Enter]"
+  echo "  2) Komprimieren (custom-compact über QuiteQue) und fortsetzen"
+  echo "  3) Umbenennen"
+  echo "  4) Als Markdown exportieren"
+  echo "  5) Löschen (unwiderruflich!)"
+  echo "  0) Zurück"
+  printf "Auswahl [0-5, Enter=1]: "
   local action; read -r action
   case "${action:-1}" in
-    2)
-      if [[ -z "$owl_id" ]]; then
-        echo "Komprimieren ist aktuell nur für owlAPI-Modelle verdrahtet (Modell wechseln, z.B. owl:120)." >&2
-        return 1
+    1)
+      # Modell weicht von der Voreinstellung ab → fragen, womit fortgesetzt wird
+      if [[ -n "$model" && "$model" != "owl:?" && "$model" != "$cur" ]]; then
+        echo "  Diese Session lief zuletzt mit $(_model_label "$model"), eingestellt ist $(_model_label "$cur")."
+        echo "    a) mit der Voreinstellung $(_model_label "$cur")   [Enter]"
+        echo "    b) mit dem alten Modell $(_model_label "$model")"
+        printf "  Auswahl [a/b]: "
+        local mm; read -r mm
+        [[ "$mm" =~ ^[bB] ]] && _apply_model_spec "$model"
       fi
-      echo "Komprimiere $chosen_id (Ziel: owl:$owl_id) ..."
-      local new_id
-      new_id="$(_compact_session_file "$chosen" "$owl_id")"
+      run_resume_id "$sid"
+      ;;
+    2)
+      local sum_id="120"
+      is_owl_model "$(effective_model)" && sum_id="$(owl_model_id "$(effective_model)")"
+      echo "Komprimiere ${sid:0:8}… (Zusammenfassung mit owl:$sum_id) ..."
+      local sf; sf="$(_session_file_for_id "$sid" 2>/dev/null)"
+      local new_id; new_id="$(_compact_session_file "$sf" "$sum_id")"
       if [[ -n "$new_id" ]]; then
         echo "✓ Komprimiert → neue Session: $new_id"
+        _set_session_title "$proj_dir" "$new_id" "$name (komprimiert)"
         run_resume_id "$new_id"
       else
         echo "✗ Komprimieren fehlgeschlagen." >&2
@@ -3797,56 +3770,95 @@ choose_session_interactive() {
       fi
       ;;
     3)
-      printf "Neuer Titel für %s: " "$chosen_id"
+      printf "Neuer Name: "
       local new_title; read -r new_title
-      _set_session_title "$proj_dir" "$chosen_id" "$new_title"
-      echo "✓ Titel gesetzt."
-      choose_session_interactive
+      [[ -n "$new_title" ]] && _set_session_title "$proj_dir" "$sid" "$new_title" && echo "✓ Umbenannt."
       ;;
     4)
-      echo "Session $chosen_id WIRD ENDGÜLTIG UND UNWIEDERBRINGLICH GELÖSCHT."
+      local out; out="$(_session_export_md "$(_session_file_for_id "$sid")")"
+      [[ -n "$out" ]] && echo "✓ Exportiert: $out" || echo "✗ Export fehlgeschlagen." >&2
+      ;;
+    5)
+      echo "Session \"$name\" WIRD ENDGÜLTIG UND UNWIEDERBRINGLICH GELÖSCHT."
       printf "Tippe 'löschen' zum Bestätigen: "
       local confirm; read -r confirm
       if [[ "$confirm" == "löschen" ]]; then
-        rm -f "$chosen"
-        _delete_session_title "$proj_dir" "$chosen_id"
-        if [[ "${CLAU_SESSION_ID:-}" == "$chosen_id" ]]; then
-          CLAU_SESSION_ID=""
-          save_config
-        fi
-        echo "✓ Gelöscht: $chosen_id"
-        choose_session_interactive
+        rm -f "$(_session_file_for_id "$sid")"
+        _delete_session_title "$proj_dir" "$sid"
+        if [[ "${CLAU_SESSION_ID:-}" == "$sid" ]]; then CLAU_SESSION_ID=""; save_config; fi
+        echo "✓ Gelöscht."
       else
         echo "Abgebrochen (nichts gelöscht)."
       fi
       ;;
-    5)
-      local out; out="$(_session_export_md "$chosen")"
-      if [[ -n "$out" ]]; then
-        echo "✓ Exportiert: $out"
-      else
-        echo "✗ Export fehlgeschlagen." >&2
-      fi
-      choose_session_interactive
-      ;;
-    6) echo "Abgebrochen." ;;
-    *) run_resume_id "$chosen_id" ;;
+    *) return 0 ;;
   esac
 }
 
-# Globaler Session-Scan: durchsucht ALLE Projekt-Buckets unter
-# ~/.claude/projects und listet jede Session mit Projekt-Pfad (aus dem
-# "cwd"-Feld der JSONL), mtime, Token-Schätzung, Titel und Vorschau.
-# Ein Python-Pass pro Datei (statt N getrennten Aufrufen) — bei vielen
-# Sessions bleibt das schnell. Ausgabe: eine Zeile pro Session, Felder mit
-# \x1f getrennt, nach mtime absteigend sortiert.
-_all_sessions_scan() {
+# Session-Liste: $1 = here | all | running. Auswahl öffnet session_action_menu.
+choose_session_list() {
+  local scope="${1:-here}" lines=() l max=40
+  case "$scope" in
+    here)    while IFS= read -r l; do lines+=("$l"); done < <(_here_sessions_scan) ;;
+    all)     while IFS= read -r l; do lines+=("$l"); done < <(_all_sessions_scan) ;;
+    running) while IFS= read -r l; do lines+=("$l"); done < <(_running_sessions) ;;
+  esac
+  if [[ "${#lines[@]}" -eq 0 ]]; then
+    case "$scope" in
+      here) echo "Keine Sessions in diesem Verzeichnis." ;;
+      running) echo "Keine laufenden Claude-Code-Sessions gefunden." ;;
+      *) echo "Keine Claude-Code-Sessions gefunden." ;;
+    esac
+    return 0
+  fi
+  local shown="${#lines[@]}"; [[ "$shown" -gt "$max" ]] && shown="$max"
+  echo
+  case "$scope" in
+    here)    echo "Sessions in diesem Verzeichnis (neueste zuerst):" ;;
+    all)     echo "Alle Sessions auf diesem System (neueste zuerst):" ;;
+    running) echo "Laufende Sessions (andere Terminals / Hintergrund):" ;;
+  esac
+  _session_table "$([[ "$scope" == "here" ]] && echo 0 || echo 1)" 1 "${lines[@]:0:shown}"
+  [[ "${#lines[@]}" -gt "$shown" ]] && echo "       … und $(( ${#lines[@]} - shown )) ältere."
+  printf "Auswahl [1-%d, Enter=Zurück]: " "$shown"
+  local sel; read -r sel
+  [[ "$sel" =~ ^[0-9]+$ && "$sel" -ge 1 && "$sel" -le "$shown" ]] || return 0
+  session_action_menu "${lines[$((sel-1))]}"
+}
+
+choose_session_interactive() { choose_session_list here; }
+
+# Untermenü "Weitere Sessions"
+choose_sessions_menu() {
+  echo
+  echo "Sessions:"
+  echo "  1) Alle in diesem Verzeichnis     [Enter]"
+  echo "  2) Alle auf diesem System"
+  echo "  3) Laufende (andere Terminals / Hintergrund)"
+  echo "  0) Zurück"
+  printf "Auswahl [0-3, Enter=1]: "
+  local c; read -r c
+  case "${c:-1}" in
+    1) choose_session_list here ;;
+    2) choose_session_list all ;;
+    3) choose_session_list running ;;
+    *) return 0 ;;
+  esac
+}
+
+# Session-Scan über ~/.claude/projects (alle Buckets) oder nur einen Bucket ($1).
+# Eine Zeile pro Session, Felder mit \x1f getrennt, neueste zuerst:
+#   mstr cwd sid tokens name model preview epoch
+# name:  clau-Titel > /rename-Titel (custom-title) > KI-Titel (ai-title) > erste Nachricht
+# model: von clau gemerkt (.clau-session-meta.json, z.B. "owl:120", "qwen:glm-5.3")
+#        sonst aus der letzten Antwort abgeleitet ("owl:?" = owl, ID unbekannt)
+_sessions_scan() {
   local proj_root; proj_root="$(_claude_projects_dir)"
   [[ -d "$proj_root" ]] || return 0
-  python3 - "$proj_root" <<'PYEOF' 2>/dev/null
+  python3 - "$proj_root" "${1:-}" <<'PYEOF' 2>/dev/null
 import json, os, sys, time
 
-proj_root = sys.argv[1]
+proj_root, only = sys.argv[1], sys.argv[2]
 SEP = "\x1f"
 OVERHEAD_TOKENS = 20000
 CHARS_PER_TOKEN = 3.5
@@ -3857,16 +3869,14 @@ def block_chars(b):
     return len(json.dumps(b, ensure_ascii=False))
 
 def estimate_tokens(rows):
-    last_in = last_cr = last_cc = 0
+    last = 0
     for d in rows:
         u = (d.get('message') or {}).get('usage') or {}
         if u:
-            last_in = u.get('input_tokens', 0) or 0
-            last_cr = u.get('cache_read_input_tokens', 0) or 0
-            last_cc = u.get('cache_creation_input_tokens', 0) or 0
-    total = last_in + last_cr + last_cc
-    if total > 0:
-        return total
+            last = (u.get('input_tokens', 0) or 0) + (u.get('cache_read_input_tokens', 0) or 0) \
+                + (u.get('cache_creation_input_tokens', 0) or 0)
+    if last > 0:
+        return last
     start = 0
     for i, d in enumerate(rows):
         if d.get('subtype') == 'compact_boundary':
@@ -3893,21 +3903,37 @@ def first_text(msg):
     return ""
 
 def clean(s):
-    return s.strip().replace("\n", " ").replace("\t", " ").replace(SEP, " ")
+    return (s or "").strip().replace("\n", " ").replace("\t", " ").replace(SEP, " ")
 
+def spec_from_model(m):
+    if not m or m == "<synthetic>":
+        return ""
+    m = m.split("[")[0]
+    if m.startswith("owl-"):
+        return "owl:" + m[4:]
+    if m == "claude-sonnet-4-6":          # Platzhalter des owl-Pfads
+        return "owl:?"
+    for short in ("opus", "sonnet", "haiku", "fable"):
+        if m.startswith("claude-" + short):
+            return short
+    if m.startswith(("qwen", "glm", "deepseek", "kimi", "auto")):
+        return "qwen:" + m
+    return m
+
+def load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+buckets = [only] if only else [os.path.join(proj_root, b) for b in os.listdir(proj_root)]
 sessions = []
-for bucket in os.listdir(proj_root):
-    bdir = os.path.join(proj_root, bucket)
+for bdir in buckets:
     if not os.path.isdir(bdir):
         continue
-    titles = {}
-    tf = os.path.join(bdir, ".clau-session-titles.json")
-    if os.path.isfile(tf):
-        try:
-            with open(tf) as f:
-                titles = json.load(f)
-        except Exception:
-            titles = {}
+    titles = load_json(os.path.join(bdir, ".clau-session-titles.json"))
+    meta = load_json(os.path.join(bdir, ".clau-session-meta.json"))
     for fn in os.listdir(bdir):
         if not fn.endswith(".jsonl"):
             continue
@@ -3917,8 +3943,7 @@ for bucket in os.listdir(proj_root):
             mtime = os.path.getmtime(path)
         except Exception:
             continue
-        rows = []
-        cwd = ""
+        rows, cwd, custom, ai, model = [], "", "", "", ""
         try:
             with open(path) as f:
                 for line in f:
@@ -3927,16 +3952,21 @@ for bucket in os.listdir(proj_root):
                     except Exception:
                         continue
                     rows.append(d)
-                    if not cwd:
-                        c = d.get('cwd')
-                        if isinstance(c, str) and c:
-                            cwd = c
+                    if not cwd and isinstance(d.get('cwd'), str) and d['cwd']:
+                        cwd = d['cwd']
+                    t = d.get('type')
+                    if t == 'custom-title' and d.get('customTitle'):
+                        custom = d['customTitle']
+                    elif t == 'ai-title' and d.get('aiTitle'):
+                        ai = d['aiTitle']
+                    elif t == 'assistant' and not d.get('isSidechain'):
+                        mm = spec_from_model((d.get('message') or {}).get('model'))
+                        if mm:
+                            model = mm
         except Exception:
             continue
         if not cwd:
-            # Fallback: Bucket-Namen rückwärts übersetzen (bricht bei
-            # Pfadteilen mit Bindestrich, daher nur Notnagel).
-            cwd = "/" + bucket.lstrip("-").replace("-", "/")
+            cwd = "/" + os.path.basename(bdir).lstrip("-").replace("-", "/")
         preview = ""
         for d in rows:
             if not d or d.get('isMeta') or d.get('isSidechain'):
@@ -3945,16 +3975,107 @@ for bucket in os.listdir(proj_root):
             if msg.get('role') != 'user':
                 continue
             t = clean(first_text(msg))
-            if t:
+            if t and not t.startswith("<"):
                 preview = t[:80]
                 break
-        sessions.append((mtime, cwd, sid, estimate_tokens(rows), preview, clean(titles.get(sid, ""))))
+        m = meta.get(sid) or {}
+        name = clean(titles.get(sid) or custom or ai or preview[:40] or "(leer)")
+        sessions.append((mtime, cwd, sid, estimate_tokens(rows), name,
+                         clean(m.get("model") or model), preview))
 
 sessions.sort(key=lambda s: s[0], reverse=True)
-for mtime, cwd, sid, tokens, preview, title in sessions:
+for mtime, cwd, sid, tokens, name, model, preview in sessions:
     mstr = time.strftime("%d.%m.%Y %H:%M", time.localtime(mtime))
-    print(SEP.join([mstr, cwd, sid, str(tokens), preview, title]))
+    print(SEP.join([mstr, cwd, sid, str(tokens), name, model, preview, str(int(mtime))]))
 PYEOF
+}
+
+_all_sessions_scan() { _sessions_scan ""; }
+_here_sessions_scan() { _sessions_scan "$(_claude_projects_dir)/$(_project_hash_for)"; }
+
+# Merkt sich zu einer Session im aktuellen Ordner das Modell, mit dem clau sie
+# startet (bei owl sieht man es der Session-Datei sonst nicht an).
+_session_meta_set() {
+  local sid="$1" spec="$2"
+  [[ -n "$sid" && -n "$spec" ]] || return 0
+  local bdir; bdir="$(_claude_projects_dir)/$(_project_hash_for)"
+  mkdir -p "$bdir" 2>/dev/null || return 0
+  python3 - "$bdir/.clau-session-meta.json" "$sid" "$spec" <<'PY' 2>/dev/null || true
+import json, sys, time
+path, sid, spec = sys.argv[1:4]
+try:
+    d = json.load(open(path))
+except Exception:
+    d = {}
+d[sid] = {"model": spec, "t": int(time.time())}
+json.dump(d, open(path, "w"), indent=1)
+PY
+}
+
+# Aktuelle Modellwahl als Kennung: opus | owl:120 | qwen:qwen3.8-max
+_current_model_spec() {
+  if [[ "$(effective_backend)" == "qwenplan" ]]; then
+    echo "qwen:${CLAU_QWEN_MODEL:-qwen3.8-max}"
+  else
+    effective_model
+  fi
+}
+
+_model_label() {
+  case "${1:-}" in
+    "") echo "—" ;;
+    owl:\?) echo "owl:?" ;;
+    qwen:*) echo "${1#qwen:}" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# Stellt eine Modell-Kennung für diesen Aufruf ein (ohne .clau.conf zu ändern).
+_apply_model_spec() {
+  case "${1:-}" in
+    qwen:*) CLI_BACKEND_OVERRIDE="qwenplan"; CLAU_QWEN_MODEL="${1#qwen:}" ;;
+    ""|owl:\?) return 1 ;;
+    *) CLI_MODEL_OVERRIDE="$1"
+       [[ "$(effective_backend)" == "qwenplan" ]] && CLI_BACKEND_OVERRIDE="claude"
+       ;;
+  esac
+  return 0
+}
+
+_rel_time() {
+  local e="${1:-0}" now d; now="$(date +%s)"; d=$(( now - e ))
+  if   [[ "$d" -lt 3600 ]];  then echo "vor $(( d / 60 )) Min"
+  elif [[ "$d" -lt 86400 ]]; then echo "vor $(( d / 3600 )) Std"
+  elif [[ "$d" -lt 172800 ]]; then echo "gestern"
+  else date -d "@$e" '+%d.%m.%y'
+  fi
+}
+
+# Auf Breite $2 kürzen/auffüllen -- in Zeichen, nicht Bytes (printf %-Ns
+# verrutscht bei Umlauten).
+_pad() {
+  local t="${1:0:$2}"
+  printf '%s%*s' "$t" $(( $2 - ${#t} )) ""
+}
+
+# Tabelle der Sessions. $1 = 1 → Ordner-Spalte, $2 = Startnummer, Rest = Scan-Zeilen
+_session_table() {
+  local show_cwd="$1" i="$2"; shift 2
+  local l mstr cwd sid tokens name model preview epoch tok
+  if [[ "$show_cwd" == "1" ]]; then
+    printf "  %3s  %-28s %-14s %-11s %6s  %s\n" "" "Name" "Modell" "Zuletzt" "Tokens" "Ordner"
+  else
+    printf "  %3s  %-28s %-14s %-11s %6s\n" "" "Name" "Modell" "Zuletzt" "Tokens"
+  fi
+  for l in "$@"; do
+    IFS=$'\x1f' read -r mstr cwd sid tokens name model preview epoch <<< "$l"
+    if [[ "${tokens:-0}" -ge 1000 ]]; then tok="$(( tokens / 1000 ))k"; else tok="${tokens:-0}"; fi
+    printf "  %3s  %s %s %s %6s" "$i)" "$(_pad "$name" 28)" "$(_pad "$(_model_label "$model")" 14)" \
+      "$(_pad "$(_rel_time "$epoch")" 11)" "$tok"
+    [[ "$show_cwd" == "1" ]] && printf "  %s" "${cwd/#$HOME/\~}"
+    echo
+    ((i++))
+  done
 }
 
 # Ermittelt die Sessions, die JETZT aktiv laufen (in anderen Terminals oder
@@ -4023,72 +4144,8 @@ _running_sessions() {
   done < <(_all_sessions_scan)
 }
 
-# Globaler Session-Picker: listet Sessions aus ALLEN Projekten auf und
-# ermöglicht es, eine davon aus der aktuellen Konsole zu erreichen. Claude
-# löst --resume <id> gegen den Bucket des aktuellen Arbeitsordners auf,
-# daher wird vor dem Fortsetzen in den Projektordner der Session gewechselt
-# (und dessen .clau.conf geladen, damit das dort konfigurierte Modell gilt).
-choose_all_sessions() {
-  local filter="${1:-all}"
-  local lines=()
-  if [[ "$filter" == "running" ]]; then
-    while IFS= read -r l; do lines+=("$l"); done < <(_running_sessions)
-  else
-    while IFS= read -r l; do lines+=("$l"); done < <(_all_sessions_scan)
-  fi
-  if [[ "${#lines[@]}" -eq 0 ]]; then
-    if [[ "$filter" == "running" ]]; then
-      echo "Keine aktuell laufenden Claude-Code-Sessions gefunden."
-    else
-      echo "Keine Claude-Code-Sessions gefunden."
-    fi
-    return 0
-  fi
-
-  local max=50 shown="${#lines[@]}"
-  [[ "$shown" -gt "$max" ]] && shown="$max"
-
-  echo
-  if [[ "$filter" == "running" ]]; then
-    echo "Aktuell laufende Claude-Code-Sessions (andere Terminals / Hintergrund):"
-  else
-    echo "Alle Claude-Code-Sessions auf dieser Maschine (neueste zuerst, max. $max):"
-  fi
-  echo
-  local i=1 l mstr cwd sid tokens preview title
-  for l in "${lines[@]:0:shown}"; do
-    IFS=$'\x1f' read -r mstr cwd sid tokens preview title <<< "$l"
-    printf "  %2d) %s  %s\n" "$i" "$mstr" "$cwd"
-    printf "       %s… · %s Tok%s\n" "${sid:0:8}" "${tokens:-0}" "${title:+ · Titel: $title}"
-    printf "       \"%s\"\n" "${preview:-<leer>}"
-    ((i++))
-  done
-  [[ "${#lines[@]}" -gt "$shown" ]] && echo "  … und $(( ${#lines[@]} - shown )) weitere (ältere)."
-  echo
-  printf "Auswahl [1-%d, Enter=Abbrechen]: " "$shown"
-  local sel; read -r sel
-  [[ -n "$sel" && "$sel" =~ ^[0-9]+$ && "$sel" -ge 1 && "$sel" -le "$shown" ]] || { echo "Abgebrochen."; return 0; }
-
-  local chosen="${lines[$((sel-1))]}"
-  IFS=$'\x1f' read -r mstr cwd sid tokens preview title <<< "$chosen"
-
-  if [[ -d "$cwd" ]]; then
-    echo
-    echo "Wechsle nach $cwd und setze Session ${sid:0:8}… fort ..."
-    (
-      cd "$cwd" || exit 1
-      if [[ -f ".clau.conf" ]]; then
-        # shellcheck disable=SC1090
-        source "./.clau.conf"
-      fi
-      run_resume_id "$sid"
-    )
-  else
-    echo "Projektordner nicht gefunden: $cwd" >&2
-    echo "Setze die Session im aktuellen Ordner fort (kann fehlschlagen)." >&2
-    run_resume_id "$sid"
-  fi
-}
+# CLI: clau --all-sessions / --running-sessions
+choose_all_sessions() { choose_session_list "${1:-all}"; }
 
 run_resume_picker() {
   local mdl
@@ -4158,7 +4215,7 @@ run_new_session() {
     mdl="$(effective_model)"
   fi
   if [[ "$(effective_backend)" == "qwenplan" ]]; then
-    run_qwenplan_session
+    run_qwenplan_session "${NEW_SESSION_ARGS[@]}"
     return
   fi
   if [[ "$(effective_backend)" == "opencode" ]]; then
@@ -4166,7 +4223,7 @@ run_new_session() {
     return
   fi
   if is_owl_model "$mdl"; then
-    run_owl_via_claude "$(owl_model_id "$mdl")" --force-context
+    run_owl_via_claude "$(owl_model_id "$mdl")" --force-context "${NEW_SESSION_ARGS[@]}"
     return
   fi
   echo "Starte neue Session (Modell: $mdl, Autonomie: $(interaction_label)) ..."
@@ -4178,7 +4235,7 @@ run_new_session() {
   while IFS= read -r line; do api_args+=("$line"); done < <(_api_claude_args interactive)
   _api_prompt_args
   # shellcheck disable=SC2086
-  exec claude --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}"
+  exec claude --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}" "${NEW_SESSION_ARGS[@]}"
 }
 
 # Setzt eine konkrete Session-ID fort (z.B. nach custom-compact)
@@ -4189,6 +4246,7 @@ run_resume_id() {
     ensure_model
     mdl="$(effective_model)"
   fi
+  [[ "$(effective_backend)" != "opencode" ]] && _session_meta_set "$rid" "$(_current_model_spec)"
   if [[ "$(effective_backend)" == "qwenplan" ]]; then
     run_qwenplan_session --resume "$rid"
     return
@@ -4474,81 +4532,122 @@ interactive_start() {
   if [[ "$(effective_backend)" == "qwenplan" ]]; then
     tag="Qwen:${CLAU_QWEN_MODEL}"
   elif is_owl_model "$mdl"; then
-    tag="LiteLLM:$(owl_model_id "$mdl")"
+    tag="owl:$(owl_model_id "$mdl")"
   else
     tag="Claude:$mdl"
   fi
+  team_active && tag+=", Team"
+
+  local recent=() l
+  while IFS= read -r l; do recent+=("$l"); done < <(_here_sessions_scan | head -3)
 
   echo
   echo "clau — $(basename "$(pwd)")  [$tag, Engine: $(effective_backend)]"
-  [[ -n "${CLAU_SESSION_NAME:-}" ]] && echo "  Session: ${CLAU_SESSION_NAME}"
-  echo "  1) Session auswählen (fortsetzen oder komprimieren)"
-  echo "  2) Neue Session beginnen        [Enter]"
-  echo "  3) Modell wechseln"
-  echo "  4) Bot-Einstellungen"
-  echo "  5) Session komprimieren (custom-compact via QuiteQue)"
-  echo "  6) Telegram / Handy"
-  echo "  7) Update von GitHub (self-update)"
-  echo "  8) CLI-Engine wechseln (Claude Code / opencode / Qwen Token Plan)"
-  echo "  9) Markdown importieren (neue Session aus Datei)"
-  echo "  10) Alle Sessions (alle Projekte auf dieser Maschine)"
-  echo "  11) Laufende Sessions (jetzt aktive, andere Terminals/Hintergrund)"
-  echo "  12) Team-Modus / Fernsteuerung  [Team: $(team_active && echo AN || echo aus), API: $([[ "${CLAU_API:-0}" == "1" ]] && echo AN || echo aus)]"
-  echo "  13) Qwen-Token-Plan-Key eintragen/erneuern  [$([[ -f "$QWENPLAN_KEY_FILE" ]] && echo "vom $(date -r "$QWENPLAN_KEY_FILE" '+%d.%m.')" || echo "fehlt")]"
-  printf "Auswahl [1-13, Enter=2]: "
-  read -r start_choice
-
-  case "${start_choice:-2}" in
-    1) choose_session_interactive; interactive_start ;;
-    2) run_new_session_named ;;
-    3) choose_model_interactive; interactive_start ;;
-    4) choose_bot_settings; interactive_start ;;
-    5) run_compact ;;
-    6) choose_telegram_interactive; interactive_start ;;
-    7)
-      self_update
-      echo
-      echo "Bitte 'clau' erneut starten, um die neue Version zu nutzen."
-      exit 0
-      ;;
-    8) choose_backend_interactive; interactive_start ;;
-    9)
-      local md_files=()
-      while IFS= read -r f; do md_files+=("$f"); done < <(ls -1 ./*.md 2>/dev/null)
-      local md_path=""
-      if [[ "${#md_files[@]}" -gt 0 ]]; then
-        echo
-        echo ".md-Dateien in diesem Verzeichnis:"
-        local mi=1 mf
-        for mf in "${md_files[@]}"; do
-          printf "  %2d) %s\n" "$mi" "$mf"
-          ((mi++))
-        done
-        printf "Auswahl [1-%d] oder eigener Pfad, Enter=Abbrechen: " "${#md_files[@]}"
-        local md_choice; read -r md_choice
-        if [[ "$md_choice" =~ ^[0-9]+$ && "$md_choice" -ge 1 && "$md_choice" -le "${#md_files[@]}" ]]; then
-          md_path="${md_files[$((md_choice-1))]}"
-        else
-          md_path="$md_choice"
-        fi
-      else
-        printf "Pfad zur .md-Datei: "
-        read -r md_path
-      fi
-      if [[ -z "$md_path" || ! -f "$md_path" ]]; then
-        echo "Datei nicht gefunden: $md_path" >&2
-        interactive_start
-        return
-      fi
-      run_import_md "$md_path" || interactive_start
-      ;;
-    10) choose_all_sessions ;;
-    11) choose_all_sessions running ;;
-    12) choose_team_settings; interactive_start ;;
-    13) qwenplan_set_key_interactive; interactive_start ;;
-    *) echo "Ungültige Auswahl."; exit 1 ;;
+  if [[ "${#recent[@]}" -gt 0 ]]; then
+    echo "  Letzte Sessions hier:"
+    _session_table 0 1 "${recent[@]}"
+  fi
+  echo
+  echo "   n) Neue Session                 [Enter]"
+  echo "   s) Weitere Sessions …           (alle hier / alle auf dem System / laufende)"
+  echo "   m) Modell wechseln"
+  echo "   i) Markdown importieren         (neue Session aus Datei)"
+  echo "   f) Fernsteuerung …              (Telegram/Handy, API)"
+  echo "   e) Einstellungen …              (Engine, Qwen-Key, Bot, Team, Update)"
+  echo "   q) Beenden"
+  printf "Auswahl [%sn s m i f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")"
+  local c; read -r c
+  case "${c:-n}" in
+    [1-3])
+      if [[ "$c" -le "${#recent[@]}" ]]; then session_action_menu "${recent[$((c-1))]}"; fi
+      interactive_start ;;
+    n|N) run_new_session_named ;;
+    s|S) choose_sessions_menu; interactive_start ;;
+    m|M) choose_model_interactive; interactive_start ;;
+    i|I) choose_import_md_interactive || interactive_start ;;
+    f|F) choose_remote_menu; interactive_start ;;
+    e|E) choose_settings_menu; interactive_start ;;
+    q|Q) exit 0 ;;
+    *) echo "Ungültige Auswahl."; interactive_start ;;
   esac
 }
+
+# Fernsteuerung: Telegram/Handy und HTTP-API an einem Ort
+choose_remote_menu() {
+  while true; do
+    echo
+    echo "Fernsteuerung:"
+    echo "  1) Telegram / Handy …"
+    echo "  2) HTTP-API (clau --api)     : $([[ "${CLAU_API:-0}" == "1" ]] && echo AN || echo aus)  (${CLAU_API_BIND})"
+    echo "  3) API-Token                 : $([[ -n "${CLAU_API_TOKEN:-}" ]] && echo gesetzt || echo "<leer>")"
+    echo "  0) Zurück"
+    printf "Auswahl [0-3]: "
+    local c v; read -r c
+    case "$c" in
+      1) choose_telegram_interactive ;;
+      2) if [[ "${CLAU_API:-0}" == "1" ]]; then CLAU_API=0; else CLAU_API=1; fi
+         printf "Bind-Adresse [%s]: " "$CLAU_API_BIND"; read -r v; [[ -n "$v" ]] && CLAU_API_BIND="$v"
+         save_config ;;
+      3) printf "API-Token (leer = keiner): "; read -r v; CLAU_API_TOKEN="$v"; save_config ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+# Einstellungen: alles, was nicht täglich gebraucht wird
+choose_settings_menu() {
+  while true; do
+    echo
+    echo "Einstellungen:"
+    echo "  1) CLI-Engine                : $(effective_backend)   (Claude Code / opencode / Qwen Token Plan)"
+    echo "  2) Qwen-Token-Plan-Key       : $([[ -f "$QWENPLAN_KEY_FILE" ]] && echo "vom $(date -r "$QWENPLAN_KEY_FILE" '+%d.%m.%Y')" || echo "fehlt")"
+    echo "  3) Bot-Einstellungen …       (Autonomie, sudo, Effort, Auto-Compact, Timeout)"
+    echo "  4) Team-Modus …              : $(team_active && echo "AN (Subagenten: $(team_pi_active && echo pi || echo "Claude Code"))" || echo aus)"
+    echo "  5) Update von GitHub (self-update)"
+    echo "  0) Zurück"
+    printf "Auswahl [0-5]: "
+    local c; read -r c
+    case "$c" in
+      1) choose_backend_interactive ;;
+      2) qwenplan_set_key_interactive ;;
+      3) choose_bot_settings ;;
+      4) choose_team_settings ;;
+      5) self_update; echo; echo "Bitte 'clau' erneut starten, um die neue Version zu nutzen."; exit 0 ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+choose_import_md_interactive() {
+  local md_files=()
+  while IFS= read -r f; do md_files+=("$f"); done < <(ls -1 ./*.md 2>/dev/null)
+  local md_path=""
+  if [[ "${#md_files[@]}" -gt 0 ]]; then
+    echo
+    echo ".md-Dateien in diesem Verzeichnis:"
+    local mi=1 mf
+    for mf in "${md_files[@]}"; do
+      printf "  %2d) %s\n" "$mi" "$mf"
+      ((mi++))
+    done
+    printf "Auswahl [1-%d] oder eigener Pfad, Enter=Abbrechen: " "${#md_files[@]}"
+    local md_choice; read -r md_choice
+    if [[ "$md_choice" =~ ^[0-9]+$ && "$md_choice" -ge 1 && "$md_choice" -le "${#md_files[@]}" ]]; then
+      md_path="${md_files[$((md_choice-1))]}"
+    else
+      md_path="$md_choice"
+    fi
+  else
+    printf "Pfad zur .md-Datei: "
+    read -r md_path
+  fi
+  if [[ -z "$md_path" || ! -f "$md_path" ]]; then
+    echo "Datei nicht gefunden: $md_path" >&2
+    return 1
+  fi
+  run_import_md "$md_path"
+}
+
 
 # --- Git-Helfer ---
 

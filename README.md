@@ -71,7 +71,33 @@ clau --git-up                 # Commit & Push
 clau --git-down               # Pull von origin
 ```
 
-### Modellwahl (interaktiv, Menüpunkt 3)
+### Hauptmenü
+
+```
+clau — mario  [owl:120, Engine: claude]
+  Letzte Sessions hier:
+       Name                         Modell         Zuletzt     Tokens
+   1)  Mario-Game mit Python        owl:120        vor 3 Min      54k
+   2)  Super Marius leveldesign     qwen3.8-flash  vor 1 Std      36k
+   3)  Grafik für Super Marius      opus           gestern        28k
+
+   n) Neue Session                 [Enter]
+   s) Weitere Sessions …           (alle hier / alle auf dem System / laufende)
+   m) Modell wechseln
+   i) Markdown importieren         (neue Session aus Datei)
+   f) Fernsteuerung …              (Telegram/Handy, API)
+   e) Einstellungen …              (Engine, Qwen-Key, Bot, Team, Update)
+```
+
+- **Neue Session** braucht einen Namen. clau gibt die Session-ID vor (`--session-id`) und
+  setzt den Namen auch in Claude Code (`--name`), dazu merkt es sich das Modell
+  (`.clau-session-meta.json` im Projekt-Bucket).
+- **Session wählen** → Fortsetzen / Komprimieren (custom-compact, nur auf Wunsch) / Umbenennen /
+  Export / Löschen. Lief die Session zuletzt mit einem anderen Modell als eingestellt, fragt clau:
+  mit der Voreinstellung oder mit dem alten Modell fortsetzen.
+- Bei alten owl-Sessions zeigt die Tabelle `owl:?` (die Modell-ID steht nicht in der Session-Datei).
+
+### Modellwahl (interaktiv, Taste m)
 
 | Taste | Engine | Modell |
 |-------|--------|--------|
