@@ -34,6 +34,7 @@ CC_COMPACT_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc_compact.py
 WEBSEARCH_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/websearch_mcp.py"
 LLM_STATUS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/llm_status_mcp.py"
 CLAU_TEAM_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/team"
+PI_TEAM_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pi_team_mcp.py"
 CLAU_API_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/clau_api.py"
 OWL_BASE_URL="http://11.0.0.13:7077"
 QQ_USER="opencode"
@@ -1387,13 +1388,23 @@ _owl_mcp_config() {
     if [[ "${CLAU_WEBSEARCH:-1}" == "1" && -f "$WEBSEARCH_MCP_SCRIPT" ]]; then
       ws=1; _owl_activity_env "websearch"
     fi
-    python3 - "$ws" "$LLM_STATUS_MCP_SCRIPT" "$WEBSEARCH_MCP_SCRIPT" <<PY_MCP
+    local pi_bin=""
+    if team_pi_active && _team_pi_setup; then pi_bin="$(_team_pi_bin)"; fi
+    python3 - "$ws" "$LLM_STATUS_MCP_SCRIPT" "$WEBSEARCH_MCP_SCRIPT" "$pi_bin" "$PI_TEAM_MCP_SCRIPT" <<PY_MCP
 import json, sys
-ws, llm, web = sys.argv[1] == "1", sys.argv[2], sys.argv[3]
+ws, llm, web, pi_bin, pi_mcp = sys.argv[1] == "1", sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 servers = {"llm_status": {"type": "stdio", "command": "python3", "args": [llm], "env": {
     "CLAU_TEAM_STATUS_URL": "${CLAU_TEAM_STATUS_URL:-http://127.0.0.1:8293/slots}",
     "CLAU_TEAM_EXEC_MODEL": "$(team_exec_model)",
     "CLAU_TEAM_MAX_AGENTS": "${CLAU_TEAM_MAX_AGENTS:-5}"}}}
+if pi_bin:
+    servers["pi_team"] = {"type": "stdio", "command": "python3", "args": [pi_mcp], "env": {
+        "CLAU_PI_BIN": pi_bin, "PI_CODING_AGENT_DIR": "$TEAM_PI_AGENT_DIR",
+        "CLAU_TEAM_DIR": "$CLAU_TEAM_DIR",
+        "CLAU_TEAM_EXEC_MODEL": "$(team_exec_model)", "CLAU_TEAM_LEAD_MODEL": "$(team_lead_model)",
+        "CLAU_TEAM_PI_SLOTS": "$(team_exec_model)=$(_team_exec_slots)$([[ "$(team_lead_model)" != "$(team_exec_model)" ]] && echo ",$(team_lead_model)=1")",
+        "CLAU_TEAM_PI_TIMEOUT": "${CLAU_TEAM_PI_TIMEOUT:-1800}",
+        "PATH": "$PATH", "HOME": "$HOME"}}
 if ws:
     servers["websearch"] = {"type": "stdio", "command": "python3", "args": [web], "env": {
         "QUITEQUE_URL": "$OWL_BASE_URL", "OWL_PROXY_USER": "$QQ_USER",
@@ -1420,8 +1431,9 @@ PY_MCP
 _owl_minimal_tool_args() {
   [[ "${CLAU_OWL_MINIMAL_TOOLS:-1}" == "1" ]] || return 0
   echo "--tools"
-  if team_active; then
-    # Ohne Agent-Tool kann der Teamleiter nichts verteilen
+  if team_active && ! team_pi_active; then
+    # Ohne Agent-Tool kann der Teamleiter nichts verteilen (pi-Modus: verteilt
+    # über das MCP-Tool pi_team, das Agent-Schema spart man sich)
     echo "${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT},Agent"
   else
     echo "${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}"
@@ -1438,6 +1450,50 @@ _owl_minimal_tool_args() {
 team_active() { [[ "${CLAU_TEAM:-0}" == "1" ]]; }
 team_lead_model() { echo "${CLAU_TEAM_LEAD_MODEL:-120}"; }
 team_exec_model() { echo "${CLAU_TEAM_EXEC_MODEL:-121}"; }
+
+# ── Team-Subagenten als pi-Prozesse ──────────────────────────────────────────
+# Statt Claude-Code-Subagenten (~36k Tokens System-Prompt + Tool-Schema pro
+# Anfrage) startet der Teamleiter über das MCP-Tool pi_team (pi_team_mcp.py)
+# schlanke `pi -p`-Prozesse (~1,7k Tokens). pi spricht OpenAI-kompatibel direkt
+# mit QuiteQue; Konfiguration in einem eigenen PI_CODING_AGENT_DIR, die
+# persönliche ~/.pi bleibt unberührt.
+_team_pi_bin() {
+  local b
+  for b in "${CLAU_PI_BIN:-}" "$(command -v pi 2>/dev/null)" "$HOME/.npm-global/bin/pi" "$HOME/.local/bin/pi"; do
+    [[ -n "$b" && -x "$b" ]] && { echo "$b"; return 0; }
+  done
+  return 1
+}
+
+team_pi_active() {
+  team_active && [[ "${CLAU_TEAM_SUBAGENTS:-pi}" == "pi" ]] && [[ -f "$PI_TEAM_MCP_SCRIPT" ]] && _team_pi_bin >/dev/null
+}
+
+TEAM_PI_AGENT_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/clau/pi-agent"
+
+# Schreibt models.json/settings.json für pi: Provider "owl" = QuiteQue mit den
+# Pflicht-Headern, Modelle Teamleiter + Ausführer mit echtem Kontextfenster.
+_team_pi_setup() {
+  mkdir -p "$TEAM_PI_AGENT_DIR" 2>/dev/null || return 1
+  python3 - "$TEAM_PI_AGENT_DIR" "${OWL_BASE_URL}/v1" "$QQ_USER" \
+    "${CLAU_AGENT_TOOL:-ccclau-$(whoami)}" "${CLAU_SESSION_NAME:-$(basename "$PWD")}" "${CLAU_USER_TAG:-$(whoami)}" \
+    "$(team_lead_model)" "$(owl_context_window "$(team_lead_model)")" \
+    "$(team_exec_model)" "$(owl_context_window "$(team_exec_model)")" <<'PY_PI'
+import json, os, sys
+d, base, user, tool, proj, xuser, lead, lead_cw, exe, exe_cw = sys.argv[1:11]
+def model(mid, cw):
+    return {"id": mid, "contextWindow": int(cw or 0) or 94000, "maxTokens": 16384, "reasoning": True}
+models = [model(lead, lead_cw)] + ([model(exe, exe_cw)] if exe != lead else [])
+cfg = {"providers": {"owl": {
+    "baseUrl": base, "api": "openai-completions", "apiKey": "owl",
+    "headers": {"X-OwlTrail-User": user, "X-Agent-Tool": tool + "-pi",
+                "X-Request-Context": "team", "X-Project": proj, "X-User": xuser},
+    "models": models}}}
+json.dump(cfg, open(os.path.join(d, "models.json"), "w"), indent=1)
+json.dump({"defaultProvider": "owl", "defaultModel": exe, "quietStartup": True},
+          open(os.path.join(d, "settings.json"), "w"), indent=1)
+PY_PI
+}
 
 # Slot-Grenze fürs Ausführer-Modell: CLAU_TEAM_SLOTS_<ID>, Default 3 (121 im
 # Zielbetrieb: 3 Slots à ~99k) bzw. 1 für das 262k-Einzelslot-Modell 126.
@@ -1519,14 +1575,18 @@ PY_AGENTS
 # mit "while read", deshalb einzeiliges JSON und Dateipfad statt Prompt-Text).
 _team_claude_args() {
   team_active || return 0
-  local agents; agents="$(_team_agents_json 2>/dev/null)"
-  if [[ -n "$agents" && "$agents" != "{}" ]]; then
-    echo "--agents"
-    echo "$agents"
-  fi
-  # Team-Anweisung (team/TEAM_ANWEISUNG.md) mit eingesetztem Agenten-Limit
-  # als System-Prompt-Zusatz. Datei pro Prozess, weil der Text Zeilenumbrüche hat.
   local tpl="$CLAU_TEAM_DIR/TEAM_ANWEISUNG.md"
+  if team_pi_active; then
+    tpl="$CLAU_TEAM_DIR/TEAM_ANWEISUNG_PI.md"
+  else
+    local agents; agents="$(_team_agents_json 2>/dev/null)"
+    if [[ -n "$agents" && "$agents" != "{}" ]]; then
+      echo "--agents"
+      echo "$agents"
+    fi
+  fi
+  # Team-Anweisung mit eingesetztem Agenten-Limit als System-Prompt-Zusatz.
+  # Datei pro Prozess, weil der Text Zeilenumbrüche hat.
   if [[ -f "$tpl" ]]; then
     local out="${OWL_PROXY_LOG_DIR}/team_anweisung_$$.md"
     mkdir -p "$OWL_PROXY_LOG_DIR" 2>/dev/null || true
@@ -1661,7 +1721,7 @@ run_owl_via_claude() {
 
   echo "Starte owlAPI-Proxy für Modell $owl_id ..."
   if team_active; then
-    echo "Team-Modus: Teamleiter owl-$(team_lead_model), Ausführer owl-$(team_exec_model) (max. $(_team_exec_slots) parallel, bis ${CLAU_TEAM_MAX_AGENTS:-5} Agenten)"
+    echo "Team-Modus: Teamleiter owl-$(team_lead_model), Ausführer owl-$(team_exec_model) (max. $(_team_exec_slots) parallel, bis ${CLAU_TEAM_MAX_AGENTS:-5} Agenten, Subagenten: $(team_pi_active && echo "pi ($(_team_pi_bin))" || echo "Claude Code"))"
   fi
   local port
   port="$(_start_owl_proxy "$owl_id")"
@@ -1787,7 +1847,7 @@ _conf_fallback_file() {
 # .clau.conf (devport/VM, Fernsteuerung: CLAU_TEAM=1 clau ..., offline ohne
 # Update-Check/Websuche).
 CLAU_ENV_OVERRIDES=(CLAU_TEAM CLAU_TEAM_LEAD_MODEL CLAU_TEAM_EXEC_MODEL CLAU_TEAM_MAX_AGENTS
-  CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_API CLAU_API_BIND CLAU_API_TOKEN
+  CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_TEAM_SUBAGENTS CLAU_API CLAU_API_BIND CLAU_API_TOKEN
   CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_OFFLINE CLAU_OWL_ROUTES)
 
 load_config() {
@@ -1835,6 +1895,8 @@ load_config() {
   : "${CLAU_TEAM_MAX_AGENTS:=5}"
   : "${CLAU_TEAM_SLOTS_121:=3}"
   : "${CLAU_TEAM_STATUS_URL:=http://127.0.0.1:8293/slots}"
+  # Subagenten: "pi" (schlanke pi-Prozesse, Default wenn pi installiert) oder "claude"
+  : "${CLAU_TEAM_SUBAGENTS:=pi}"
   : "${CLAU_API:=0}"
   : "${CLAU_API_BIND:=127.0.0.1:7010}"
   : "${CLAU_API_TOKEN:=}"
@@ -1939,6 +2001,7 @@ CLAU_TEAM_EXEC_MODEL="${CLAU_TEAM_EXEC_MODEL:-121}"
 CLAU_TEAM_MAX_AGENTS="${CLAU_TEAM_MAX_AGENTS:-5}"
 CLAU_TEAM_SLOTS_121="${CLAU_TEAM_SLOTS_121:-3}"
 CLAU_TEAM_STATUS_URL="${CLAU_TEAM_STATUS_URL:-http://127.0.0.1:8293/slots}"
+CLAU_TEAM_SUBAGENTS="${CLAU_TEAM_SUBAGENTS:-pi}"
 CLAU_API="${CLAU_API:-0}"
 CLAU_API_BIND="${CLAU_API_BIND:-127.0.0.1:7010}"
 CLAU_API_TOKEN="${CLAU_API_TOKEN:-}"
@@ -2355,7 +2418,7 @@ show_current() {
   echo "Agent-View deaktiviert: ${CLAU_DISABLE_AGENT_VIEW:-0}"
   echo "Websuche (MCP)        : $([[ "${CLAU_WEBSEARCH:-1}" == "1" ]] && echo "an (depth=speed)" || echo "aus")"
   if team_active; then
-    echo "Team-Modus            : AN (Teamleiter owl-$(team_lead_model), Ausführer owl-$(team_exec_model), max. $(_team_exec_slots) parallel / ${CLAU_TEAM_MAX_AGENTS:-5} Agenten)"
+    echo "Team-Modus            : AN (Teamleiter owl-$(team_lead_model), Ausführer owl-$(team_exec_model), max. $(_team_exec_slots) parallel / ${CLAU_TEAM_MAX_AGENTS:-5} Agenten, Subagenten: $(team_pi_active && echo pi || echo "Claude Code"))"
     echo "Team-Status-URL       : ${CLAU_TEAM_STATUS_URL}"
   else
     echo "Team-Modus            : aus"
@@ -2737,6 +2800,7 @@ choose_team_settings() {
     echo "  3) Ausführer-Modell       : owl:$(team_exec_model) (Slots: $(_team_exec_slots))"
     echo "  4) Max. Agenten           : ${CLAU_TEAM_MAX_AGENTS:-5}"
     echo "  5) Slot-Status-URL        : ${CLAU_TEAM_STATUS_URL}"
+    echo "  8) Subagenten             : ${CLAU_TEAM_SUBAGENTS:-pi}$([[ "${CLAU_TEAM_SUBAGENTS:-pi}" == "pi" ]] && ! _team_pi_bin >/dev/null && echo "  (pi nicht gefunden → claude)")"
     echo "  6) Fernsteuerung (API)    : $([[ "${CLAU_API:-0}" == "1" ]] && echo AN || echo aus)  (${CLAU_API_BIND})"
     echo "  7) API-Token              : $([[ -n "${CLAU_API_TOKEN:-}" ]] && echo gesetzt || echo "<leer>")"
     echo "  0) Zurück"
@@ -2755,6 +2819,7 @@ choose_team_settings() {
       6) if [[ "${CLAU_API:-0}" == "1" ]]; then CLAU_API=0; else CLAU_API=1; fi
          printf "Bind-Adresse [%s]: " "$CLAU_API_BIND"; read -r v; [[ -n "$v" ]] && CLAU_API_BIND="$v" ;;
       7) printf "API-Token (leer = keiner): "; read -r v; CLAU_API_TOKEN="$v" ;;
+      8) if [[ "${CLAU_TEAM_SUBAGENTS:-pi}" == "pi" ]]; then CLAU_TEAM_SUBAGENTS=claude; else CLAU_TEAM_SUBAGENTS=pi; fi ;;
       0|"") return 0 ;;
       *) echo "Ungültige Auswahl." ; continue ;;
     esac

@@ -192,6 +192,24 @@ CLAU_TEAM_SLOTS_121="3"       # max. gleichzeitige Anfragen an 121, der Rest war
 CLAU_TEAM_STATUS_URL="http://127.0.0.1:8293/slots"   # Slot-Status (Flash-Tor)
 ```
 
+### Subagenten als pi-Prozesse (Standard, wenn [pi](https://pi.dev) installiert ist)
+
+Statt Claude-Code-Subagenten (~36k Tokens System-Prompt + Tool-Schema **pro Anfrage**) startet
+der Teamleiter schlanke `pi -p`-Prozesse (~1,7k Tokens). Gemessen: erste Anfrage 1.704 statt
+~36.000 Tokens.
+
+- **MCP-Tool `pi_team`** (`pi_team_mcp.py`): `auftrag_starten(rolle, auftrag)` startet im
+  Hintergrund und kommt sofort mit einer ID zurück, `auftraege_abwarten(ids)` liefert die Berichte.
+  So laufen mehrere Ausführer echt parallel (Claude Code würde schreibende MCP-Tools sonst
+  nacheinander ausführen), und der Teamleiter muss keine parallelen Aufrufe in eine Antwort packen.
+- **Rollen** wie oben (`team/agents/*.md` als Prompt): `ausfuehrer` → 121, `tester`/`planer` → 120.
+  Gleichzeitig höchstens `CLAU_TEAM_SLOTS_121` Ausführer, der Rest wartet im MCP-Server.
+- **pi-Konfiguration** erzeugt clau in `~/.cache/clau/pi-agent` (Provider `owl` = QuiteQue mit den
+  Pflicht-Headern); die persönliche `~/.pi` bleibt unberührt. Volle Ausgaben je Auftrag:
+  `~/.cache/clau/team/<zeit>-<pid>-<id>.log`.
+- Umschalten: `CLAU_TEAM_SUBAGENTS="pi"` (Default) oder `"claude"` (alte Agent-Variante),
+  auch über Menü 12 → 8. Ohne installiertes pi fällt clau automatisch auf `claude` zurück.
+
 Einschalten auch über Menüpunkt 12 im interaktiven Menü; `clau --current` zeigt den Zustand.
 Mit `CLAU_TEAM=1` läuft die Session immer über den Teamleiter, egal welches `CLAU_MODEL`
 gesetzt ist (`-m` überschreibt weiterhin).
