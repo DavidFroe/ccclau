@@ -1520,6 +1520,9 @@ load_config() {
   : "${CLAU_WEBSEARCH:=1}"
   # CLI-Engine: "claude" (Claude Code, Standard) oder "opencode".
   : "${CLAU_BACKEND:=claude}"
+  # Modelle fürs Backend "qwenplan" (Alibaba Token Plan)
+  : "${CLAU_QWEN_MODEL:=qwen3.8-max}"
+  : "${CLAU_QWEN_FAST_MODEL:=qwen3.8-flash}"
   # Timeout: in ms, für Claude Code Bash-Tool + Modell-Inferenz
   : "${CLAU_TIMEOUT_DEFAULT:=1800000}"
   : "${CLAU_TIMEOUT_MAX:=7200000}"
@@ -1611,6 +1614,8 @@ CLAU_DISABLE_ARTIFACT="${CLAU_DISABLE_ARTIFACT:-0}"
 CLAU_DISABLE_AGENT_VIEW="${CLAU_DISABLE_AGENT_VIEW:-0}"
 CLAU_WEBSEARCH="${CLAU_WEBSEARCH:-1}"
 CLAU_BACKEND="${CLAU_BACKEND:-claude}"
+CLAU_QWEN_MODEL="${CLAU_QWEN_MODEL:-qwen3.8-max}"
+CLAU_QWEN_FAST_MODEL="${CLAU_QWEN_FAST_MODEL:-qwen3.8-flash}"
 CLAU_TIMEOUT_DEFAULT="${CLAU_TIMEOUT_DEFAULT:-1800000}"
 CLAU_TIMEOUT_MAX="${CLAU_TIMEOUT_MAX:-7200000}"
 CONF_EOF
@@ -1813,9 +1818,12 @@ Headless-Optionen:
   -p, --prompt TEXT               Prompt-Text für headless mode (erforderlich bei --headless)
   -f, --folder PATH               Zielverzeichnis für --new
   -m, --mdl MODEL                 Modell: haiku | sonnet | opus | fable | owl:<ID>
-      --backend claude|opencode   CLI-Engine für diesen Aufruf (Standard: claude,
+      --backend claude|opencode|qwenplan
+                                  CLI-Engine für diesen Aufruf (Standard: claude,
                                   per-Verzeichnis in .clau.conf gespeichert via Menü
-                                  "CLI-Engine wechseln")
+                                  "CLI-Engine wechseln"). qwenplan = Claude Code mit
+                                  Alibaba Qwen Token Plan, nur interaktiv (AGB)
+      --qwen-model [MODELL]       Modell für qwenplan setzen (ohne Wert: Auswahlmenü)
       --effort LEVEL              low | medium | high | max
       --max-turns N               Max. agentische Schritte
       --max-budget-usd USD        Kostenlimit
@@ -1846,7 +1854,9 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_ARTIFACT="1"          Artifacts deaktivieren (spart ~2-3K Tokens)
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
   CLAU_WEBSEARCH="1"                 Lokale QuiteQue-Websuche als MCP-Tool (Default an, ~300 Tokens)
-  CLAU_BACKEND="claude"               CLI-Engine: claude (Standard) | opencode
+  CLAU_BACKEND="claude"               CLI-Engine: claude (Standard) | opencode | qwenplan
+  CLAU_QWEN_MODEL="qwen3.8-max"       Modell für qwenplan (Key: ~/.config/clau/qwenplan.key, chmod 600)
+  CLAU_QWEN_FAST_MODEL="qwen3.8-flash" schnelles Modell für qwenplan
   CLAU_TIMEOUT_DEFAULT="1800000"     Default Bash-Timeout in ms (30 Min = 1800000)
   CLAU_TIMEOUT_MAX="7200000"         Max Bash-Timeout in ms (120 Min = 7200000)
   CLAU_OWL_TIMEOUT="1800"            owlAPI-Request-Timeout in Sekunden (Default 1800 = 30 Min)
@@ -1941,6 +1951,10 @@ show_current() {
   echo "Konfiguriertes Modell : $mdl"
   echo "Modell-Route          : $route"
   echo "CLI-Engine            : $(effective_backend)"
+  if [[ "$(effective_backend)" == "qwenplan" ]]; then
+    echo "Qwen-Modell           : ${CLAU_QWEN_MODEL} (schnell: ${CLAU_QWEN_FAST_MODEL})"
+    echo "Qwen-Key-Datei        : $QWENPLAN_KEY_FILE $([[ -f "$QWENPLAN_KEY_FILE" ]] && echo "(vorhanden)" || echo "(FEHLT)")"
+  fi
   echo "Session-Name          : ${CLAU_SESSION_NAME:-<keiner>}"
   echo "Feste Session-ID      : ${CLAU_SESSION_ID:-<keine>}"
   echo "Autonomie-Level       : $(interaction_label)"
@@ -2038,7 +2052,8 @@ choose_backend_interactive() {
   echo "CLI-Engine wählen:"
   echo "  1) claude              Claude Code   Standard         [Enter]"
   echo "  2) opencode            opencode.ai   alternative Engine"
-  printf "Auswahl [1-2, Enter=1]: "
+  echo "  3) qwenplan            Claude Code   mit Alibaba Qwen Token Plan (nur interaktiv)"
+  printf "Auswahl [1-3, Enter=1]: "
   read -r choice
   case "${choice:-1}" in
     1) CLAU_BACKEND="claude" ;;
@@ -2050,6 +2065,11 @@ choose_backend_interactive() {
           _ensure_opencode || echo "Installation fehlgeschlagen — 'opencode' bleibt vorerst nicht nutzbar." >&2
         fi
       fi
+      ;;
+    3)
+      CLAU_BACKEND="qwenplan"
+      _qwenplan_key >/dev/null || echo "Ohne Key-Datei startet 'qwenplan' nicht." >&2
+      choose_qwen_model_interactive
       ;;
     *) echo "Ungültige Auswahl."; return ;;
   esac
@@ -2458,6 +2478,144 @@ build_opencode_headless_cmd() {
     exit 1
   fi
   OPENCODE_CMD+=("$PROMPT_TEXT")
+}
+
+# ── Backend "qwenplan": Alibaba Model Studio Token Plan (Qwen-Abo) ───────────
+# Claude Code spricht direkt mit Alibabas Anthropic-kompatiblem Endpunkt, ohne
+# lokalen Proxy. Laut AGB NUR interaktive Nutzung in Coding-Tools auf diesem
+# einen Gerät: kein Headless, keine Automation, nicht über owlAPI/QuiteQue,
+# Key nicht teilen. Deshalb verweigern die Headless-Pfade dieses Backend.
+# Der Key steht nie im Skript oder in Git, sondern in einer Datei mit chmod 600.
+QWENPLAN_BASE_URL="${QWENPLAN_BASE_URL:-https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic}"
+QWENPLAN_KEY_FILE="${QWENPLAN_KEY_FILE:-$HOME/.config/clau/qwenplan.key}"
+QWENPLAN_MODELS=(qwen3.8-max qwen3.8-flash qwen3.7-max qwen3.7-plus qwen3.6-flash
+                 deepseek-v4-pro deepseek-v4.1-flash glm-5.3 glm-5.2 auto)
+
+# Gibt den API-Key aus. Quelle: $QWENPLAN_KEY_FILE (muss chmod 600 sein),
+# Rückfall: ~/.config/owl/system_config.json → qwenplan.api_key.
+_qwenplan_key() {
+  local f="$QWENPLAN_KEY_FILE"
+  if [[ -f "$f" ]]; then
+    local perm; perm="$(stat -c '%a' "$f" 2>/dev/null)"
+    if [[ "$perm" != "600" && "$perm" != "400" ]]; then
+      echo "Fehler: $f hat Rechte $perm — bitte 'chmod 600 $f'." >&2
+      return 1
+    fi
+    tr -d '[:space:]' < "$f"
+    return 0
+  fi
+  local sc="$HOME/.config/owl/system_config.json"
+  if [[ -f "$sc" ]]; then
+    local k
+    k="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("qwenplan",{}).get("api_key",""))' "$sc" 2>/dev/null)"
+    [[ -n "$k" ]] && { printf '%s' "$k"; return 0; }
+  fi
+  echo "Fehler: Kein Qwen-Token-Plan-Key gefunden." >&2
+  echo "  Ablegen mit:  mkdir -p ~/.config/clau && (umask 077; cat > $f)   # Key einfügen, Strg-D" >&2
+  return 1
+}
+
+# Kurzer Vorab-Request (max_tokens=1, ~60 Tokens): prüft Key, Modell und
+# Kontingent und übersetzt Fehler in eine klare Meldung, bevor Claude Code startet.
+# CLAU_QWENPLAN_PREFLIGHT=0 schaltet ihn ab.
+_qwenplan_preflight() {
+  local key="$1" model="$2"
+  [[ "${CLAU_QWENPLAN_PREFLIGHT:-1}" == "1" ]] || return 0
+  local body http
+  body="$(curl -s -m 30 -w $'\n%{http_code}' "${QWENPLAN_BASE_URL}/v1/messages" \
+    -H "Authorization: Bearer ${key}" -H 'anthropic-version: 2023-06-01' \
+    -H 'content-type: application/json' \
+    -d "{\"model\":\"${model}\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" 2>/dev/null)"
+  http="${body##*$'\n'}"; body="${body%$'\n'*}"
+  [[ "$http" == "200" ]] && return 0
+  local code msg
+  code="$(printf '%s' "$body" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit()
+e=d.get("error") if isinstance(d.get("error"),dict) else d
+print(e.get("code") or e.get("type") or "")' 2>/dev/null)"
+  msg="$(printf '%s' "$body" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit()
+e=d.get("error") if isinstance(d.get("error"),dict) else d
+print(e.get("message") or "")' 2>/dev/null)"
+  echo >&2
+  echo "✗ Qwen Token Plan antwortet nicht mit OK (HTTP ${http:-—}${code:+, $code})." >&2
+  [[ -n "$msg" ]] && echo "  Server: $msg" >&2
+  case "$http:$code:$msg" in
+    000:*)              echo "  → Keine Verbindung zu ${QWENPLAN_BASE_URL}." >&2 ;;
+    401:*|*InvalidApiKey*) echo "  → API-Key ungültig. Datei prüfen: $QWENPLAN_KEY_FILE" >&2 ;;
+    *"Model not exist"*) echo "  → Modell '$model' gibt es im Plan nicht. Anderes wählen: clau --qwen-model" >&2 ;;
+    *[Qq]uota*|*[Aa]rrearage*|*[Ii]nsufficient*|*[Ee]xhaust*|*[Ll]imit*|*[Ss]uspend*|*[Pp]ause*|403:*|429:*)
+      echo "  → Wahrscheinlich ist das Credit-Kontingent aufgebraucht, der Dienst pausiert." >&2
+      echo "    Stand nur in der Model-Studio-Konsole sichtbar. Reset laut Plan: 2026-11-04." >&2 ;;
+  esac
+  echo "  (Vorab-Check abschalten: CLAU_QWENPLAN_PREFLIGHT=0)" >&2
+  return 1
+}
+
+choose_qwen_model_interactive() {
+  echo
+  echo "Qwen-Token-Plan-Modell wählen (aktuell: ${CLAU_QWEN_MODEL}):"
+  local i=1 m
+  for m in "${QWENPLAN_MODELS[@]}"; do
+    printf "  %2d) %s%s\n" "$i" "$m" "$([[ "$m" == "qwen3.8-max" ]] && echo "   Standard, 1M Kontext")"
+    ((i++))
+  done
+  printf "Auswahl [1-%d, Enter=behalten]: " "${#QWENPLAN_MODELS[@]}"
+  local c; read -r c
+  [[ -z "$c" ]] && return 0
+  if [[ "$c" =~ ^[0-9]+$ && "$c" -ge 1 && "$c" -le "${#QWENPLAN_MODELS[@]}" ]]; then
+    CLAU_QWEN_MODEL="${QWENPLAN_MODELS[$((c-1))]}"
+    save_config
+    echo "Qwen-Modell: $CLAU_QWEN_MODEL"
+  else
+    echo "Ungültige Auswahl."
+  fi
+}
+
+# Startet Claude Code interaktiv gegen den Token Plan. Argumente gehen an
+# claude durch (z.B. --resume [id]).
+run_qwenplan_session() {
+  local key; key="$(_qwenplan_key)" || exit 1
+  local model="${CLAU_QWEN_MODEL:-qwen3.8-max}"
+  local fast="${CLAU_QWEN_FAST_MODEL:-qwen3.8-flash}"
+  _have claude || { echo "claude nicht gefunden." >&2; exit 1; }
+  echo "Prüfe Qwen Token Plan (Modell $model) ..."
+  _qwenplan_preflight "$key" "$model" || exit 1
+
+  apply_tool_blocking
+  token_saver_env >/dev/null
+  export BASH_DEFAULT_TIMEOUT_MS="${CLAU_TIMEOUT_DEFAULT:-1800000}"
+  export BASH_MAX_TIMEOUT_MS="${CLAU_TIMEOUT_MAX:-7200000}"
+  # Claude-Code-eigene Auto-Compact-Grenze nicht von owl-Läufen erben.
+  unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
+
+  echo "Claude Code → Qwen Token Plan (Modell $model, schnell: $fast, Autonomie: $(interaction_label))"
+  local extra; extra="$(_interaction_args)"
+  # ANTHROPIC_AUTH_TOKEN (Bearer) statt ANTHROPIC_API_KEY: kein Bestätigungs-
+  # dialog in Claude Code, und es gibt keinen Rückfall, bei dem das
+  # Claude-Abo-OAuth-Token an den fremden Endpunkt geschickt würde.
+  # Kein MCP (Websuche läuft über QuiteQue, das verbieten die AGB), keine Telegram-Hooks.
+  unset ANTHROPIC_API_KEY
+  # shellcheck disable=SC2086
+  ANTHROPIC_BASE_URL="$QWENPLAN_BASE_URL" \
+  ANTHROPIC_AUTH_TOKEN="$key" \
+  ANTHROPIC_MODEL="$model" \
+  ANTHROPIC_DEFAULT_OPUS_MODEL="$model" \
+  ANTHROPIC_DEFAULT_SONNET_MODEL="$model" \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL="$fast" \
+  ANTHROPIC_SMALL_FAST_MODEL="$fast" \
+  CLAUDE_CODE_SUBAGENT_MODEL="$model" \
+  CLAU_TG_SUPPRESS=1 \
+  exec claude --model "$model" --strict-mcp-config $extra "$@"
+}
+
+# Headless/Automation ist laut Token-Plan-AGB verboten.
+_qwenplan_refuse_headless() {
+  echo "Backend 'qwenplan' ist nur interaktiv erlaubt (Alibaba Token Plan, AGB:" >&2
+  echo "keine Automation, kein Headless/Backend-Betrieb). Abgebrochen." >&2
+  exit 1
 }
 
 install_self() {
@@ -3230,6 +3388,10 @@ run_resume_picker() {
     ensure_model
     mdl="$(effective_model)"
   fi
+  if [[ "$(effective_backend)" == "qwenplan" ]]; then
+    run_qwenplan_session --resume
+    return
+  fi
   if [[ "$(effective_backend)" == "opencode" ]]; then
     # opencode hat seinen eigenen /sessions-Picker in der TUI -- kein von
     # außen scriptbares Äquivalent zu Claudes --resume ohne ID.
@@ -3255,6 +3417,10 @@ run_saved_session() {
   if [[ -z "$mdl" ]]; then
     ensure_model
     mdl="$(effective_model)"
+  fi
+  if [[ "$(effective_backend)" == "qwenplan" ]]; then
+    run_qwenplan_session --resume "$CLAU_SESSION_ID"
+    return
   fi
   if [[ "$(effective_backend)" == "opencode" ]]; then
     # CLAU_SESSION_ID ist ein Claude-Code-Session-Format, überträgt sich
@@ -3282,6 +3448,10 @@ run_new_session() {
     ensure_model
     mdl="$(effective_model)"
   fi
+  if [[ "$(effective_backend)" == "qwenplan" ]]; then
+    run_qwenplan_session
+    return
+  fi
   if [[ "$(effective_backend)" == "opencode" ]]; then
     run_opencode_session
     return
@@ -3306,6 +3476,10 @@ run_resume_id() {
   if [[ -z "$mdl" ]]; then
     ensure_model
     mdl="$(effective_model)"
+  fi
+  if [[ "$(effective_backend)" == "qwenplan" ]]; then
+    run_qwenplan_session --resume "$rid"
+    return
   fi
   if [[ "$(effective_backend)" == "opencode" ]]; then
     # $rid ist eine Claude-Code-Session-ID (aus cc_compact.py) -- opencode
@@ -3420,6 +3594,7 @@ build_headless_cmd() {
 
 run_headless_here() {
   local mdl; mdl="$(effective_model)"
+  [[ "$(effective_backend)" == "qwenplan" ]] && _qwenplan_refuse_headless
   if [[ "$(effective_backend)" == "opencode" ]]; then
     _ensure_opencode_runtime || exit 1
     build_opencode_headless_cmd
@@ -3444,6 +3619,7 @@ run_headless_in_dir() {
   local dir="$1"
   mkdir -p "$dir"
   local mdl; mdl="$(effective_model)"
+  [[ "$(effective_backend)" == "qwenplan" ]] && _qwenplan_refuse_headless
   if [[ "$(effective_backend)" == "opencode" ]]; then
     _ensure_opencode_runtime || exit 1
     echo "Projektverzeichnis bereit für opencode headless: $dir"
@@ -3580,7 +3756,9 @@ interactive_start() {
 
   local mdl; mdl="$(effective_model)"
   local tag
-  if is_owl_model "$mdl"; then
+  if [[ "$(effective_backend)" == "qwenplan" ]]; then
+    tag="Qwen:${CLAU_QWEN_MODEL}"
+  elif is_owl_model "$mdl"; then
     tag="LiteLLM:$(owl_model_id "$mdl")"
   else
     tag="Claude:$mdl"
@@ -3596,7 +3774,7 @@ interactive_start() {
   echo "  5) Session komprimieren (custom-compact via QuiteQue)"
   echo "  6) Telegram / Handy"
   echo "  7) Update von GitHub (self-update)"
-  echo "  8) CLI-Engine wechseln (Claude Code / opencode)"
+  echo "  8) CLI-Engine wechseln (Claude Code / opencode / Qwen Token Plan)"
   echo "  9) Markdown importieren (neue Session aus Datei)"
   echo "  10) Alle Sessions (alle Projekte auf dieser Maschine)"
   echo "  11) Laufende Sessions (jetzt aktive, andere Terminals/Hintergrund)"
@@ -3606,7 +3784,10 @@ interactive_start() {
   case "${start_choice:-2}" in
     1) choose_session_interactive; interactive_start ;;
     2) run_new_session_named ;;
-    3) choose_model_interactive; interactive_start ;;
+    3)
+      if [[ "$(effective_backend)" == "qwenplan" ]]; then choose_qwen_model_interactive
+      else choose_model_interactive; fi
+      interactive_start ;;
     4) choose_bot_settings; interactive_start ;;
     5) run_compact ;;
     6) choose_telegram_interactive; interactive_start ;;
@@ -3850,12 +4031,22 @@ parse_args() {
         shift 2
         ;;
       --backend)
-        if [[ -z "${2:-}" || ( "$2" != "claude" && "$2" != "opencode" ) ]]; then
-          echo "--backend erwartet: claude|opencode" >&2
+        if [[ -z "${2:-}" || ( "$2" != "claude" && "$2" != "opencode" && "$2" != "qwenplan" ) ]]; then
+          echo "--backend erwartet: claude|opencode|qwenplan" >&2
           exit 1
         fi
         CLI_BACKEND_OVERRIDE="$2"
         shift 2
+        ;;
+      --qwen-model)
+        if [[ -z "${2:-}" || "$2" == -* ]]; then
+          choose_qwen_model_interactive
+          exit 0
+        fi
+        CLAU_QWEN_MODEL="$2"
+        save_config
+        echo "Qwen-Modell gesetzt auf: $CLAU_QWEN_MODEL"
+        exit 0
         ;;
       --take)
         if [[ -z "${2:-}" ]]; then
