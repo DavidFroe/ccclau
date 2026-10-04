@@ -78,9 +78,71 @@ declare -gA OWL_CONTEXT_WINDOWS=(
   ["386"]="1048000" # Meta Llama 4 Maverick (1M ctx, Vision)
 )
 
+# ── Live-Modellliste der owlAPI ──────────────────────────────────────────────
+# /v1/models liefert ID, Name, Kontext, Anbieter, Status und Preis. Gecacht in
+# $OWL_MODELS_CACHE; älter als OWL_MODELS_TTL Sekunden → neu holen (3 s Timeout).
+# Ist die owlAPI nicht erreichbar, gilt der alte Cache, danach die Tabelle oben.
+OWL_MODELS_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/clau/owl_models.json"
+OWL_MODELS_TTL="${OWL_MODELS_TTL:-3600}"
+
+# $1 = "force" → Cache ignorieren. Rückgabe 0, wenn ein (evtl. alter) Cache da ist.
+_owl_models_refresh() {
+  local age=999999
+  if [[ -f "$OWL_MODELS_CACHE" ]]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$OWL_MODELS_CACHE" 2>/dev/null || echo 0) ))
+  fi
+  if [[ "${1:-}" == "force" || "$age" -gt "$OWL_MODELS_TTL" ]]; then
+    mkdir -p "$(dirname "$OWL_MODELS_CACHE")" 2>/dev/null
+    local tmp="${OWL_MODELS_CACHE}.tmp.$$"
+    if curl -sf -m 3 "${OWL_BASE_URL}/v1/models" \
+         -H "X-User: ${CLAU_USER_TAG:-$(whoami)}" \
+         -H "X-Agent-Tool: ${CLAU_AGENT_TOOL:-ccclau-$(whoami)}" -o "$tmp" 2>/dev/null \
+       && python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["data"]' "$tmp" 2>/dev/null; then
+      mv -f "$tmp" "$OWL_MODELS_CACHE"
+    else
+      rm -f "$tmp"
+    fi
+  fi
+  [[ -f "$OWL_MODELS_CACHE" ]]
+}
+
+# Chat-taugliche Modelle als TSV: id status anbieter ctx preis name
+# Sortiert: lokal (propellera) → gratis → nach Eingabepreis. Ohne Bild/Audio/Suche.
+_owl_models_tsv() {
+  _owl_models_refresh "${1:-}" || return 1
+  python3 - "$OWL_MODELS_CACHE" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))["data"]
+skip_owner = {"searchllm", "ohrwurm"}
+rows = []
+for m in data:
+    ctx = m.get("context_window") or 0
+    st = m.get("status") or ""
+    if ctx <= 0 or st == "DISABLED" or m.get("owned_by") in skip_owner:
+        continue
+    p = m.get("pricing") or {}
+    free = bool(p.get("is_free"))
+    price = "GRATIS" if free else "$%.2f/$%.2f" % (p.get("input_per_mtok", 0), p.get("output_per_mtok", 0))
+    grp = 0 if m.get("owned_by") == "propellera" else (1 if free else 2)
+    rows.append((grp, p.get("input_per_mtok", 0) or 0, str(m["numerical_id"]), st,
+                 m.get("owned_by", ""), str(ctx), price, (m.get("name") or "").replace("\t", " ")))
+rows.sort(key=lambda r: (r[0], r[1]))
+for r in rows:
+    print("\t".join(r[2:]))
+PY
+}
+
 owl_context_window() {
   local owl_id="${1:-}"
-  local cw="${OWL_CONTEXT_WINDOWS[$owl_id]:-}"
+  local cw=""
+  if _owl_models_refresh 2>/dev/null; then
+    cw="$(python3 -c '
+import json, sys
+for m in json.load(open(sys.argv[1]))["data"]:
+    if str(m.get("numerical_id")) == sys.argv[2]:
+        print(m.get("context_window") or ""); break' "$OWL_MODELS_CACHE" "$owl_id" 2>/dev/null)"
+  fi
+  [[ -n "$cw" && "$cw" -gt 0 ]] 2>/dev/null || cw="${OWL_CONTEXT_WINDOWS[$owl_id]:-}"
   if [[ -n "$cw" && "$cw" -gt 0 ]]; then
     echo "$cw"
   fi
@@ -185,6 +247,15 @@ apply_timeout_for_model() {
   if [[ -n "$owl_id" ]]; then
     local preset_default="${TIMEOUT_PRESET_DEFAULT[$owl_id]:-}"
     local preset_max="${TIMEOUT_PRESET_MAX[$owl_id]:-}"
+    if [[ -z "$preset_default" ]]; then
+      # Nicht in der Tabelle (z.B. neues Modell aus der Live-Liste): nach Kontext.
+      local cw; cw="$(owl_context_window "$owl_id")"
+      if [[ -n "$cw" && "$cw" -ge 500000 ]]; then
+        preset_default="3600000"; preset_max="10800000"   # 60 / 180 Min
+      elif [[ -n "$cw" ]]; then
+        preset_default="1800000"; preset_max="3600000"    # 30 / 60 Min
+      fi
+    fi
     if [[ -n "$preset_default" ]]; then
       CLAU_TIMEOUT_DEFAULT="$preset_default"
     fi
@@ -1843,9 +1914,9 @@ Git-Helfer (Repo aus GitHub via SSH):
 
 Model-Mappings:
   Claude Code (agentisch):  1=haiku(4.5)  2=sonnet(5)  3=opus(5.5)  4=fable(5)
-  owlAPI (lokal/gratis):    5=owl:120  6=owl:243  7=owl:113(Grok)  8=owl:38(QwQ)  9=owl:316  0=owl:free  f=owl:121(Flash-Next,97k)
-  owlAPI (günstig/stark):   a=owl:35  b=owl:350  c=owl:503  d=owl:21  e=owl:84  ee=owl:501
-  owlAPI direkt:            --model owl:35  oder  -m 350
+  owlAPI (für --model N):   5=owl:120  6=owl:121  0=owl:free
+  owlAPI direkt:            -m owl:350  oder  -m 350   (interaktiv: Live-Liste der owlAPI)
+  Qwen Token Plan:          -m qwen:qwen3.8-max  (setzt Engine qwenplan für diesen Aufruf)
 
 Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_AUTO_COMPACT_WINDOW="90000"   Festes Auto-Compact-Limit (leer = Prozent-basiert)
@@ -1875,13 +1946,10 @@ model_from_number() {
     3) CLAU_MODEL="opus" ;;
     4) CLAU_MODEL="fable" ;;     # Claude Fable 5
     5) CLAU_MODEL="owl:120" ;;   # PropellerA lokal
-    6) CLAU_MODEL="owl:243" ;;   # Qwopus lokal
-    7) CLAU_MODEL="owl:113" ;;   # Grok-4.3 gratis
-    8) CLAU_MODEL="owl:38" ;;    # QwQ-Plus gratis
-    9) CLAU_MODEL="owl:316" ;;   # Qwen3-Coder OR gratis
+    6) CLAU_MODEL="owl:121" ;;   # Qwen3.8-Flash-Next lokal
     0) CLAU_MODEL="owl:free" ;;  # free Router gratis
     *)
-      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5-9/0=owlAPI)" >&2
+      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5/6/0=owlAPI, sonst -m owl:<ID>)" >&2
       exit 1
       ;;
   esac
@@ -1894,6 +1962,11 @@ normalize_model_name() {
       ;;
     owl:*)
       CLI_MODEL_OVERRIDE="$1"
+      ;;
+    qwen:*)
+      # Qwen Token Plan: Engine für diesen Aufruf auf qwenplan, Modell setzen
+      CLI_BACKEND_OVERRIDE="qwenplan"
+      CLAU_QWEN_MODEL="${1#qwen:}"
       ;;
     *)
       # Bare Zahl oder ID → als owl-Modell interpretieren
@@ -1971,8 +2044,11 @@ show_current() {
   echo "Websuche (MCP)        : $([[ "${CLAU_WEBSEARCH:-1}" == "1" ]] && echo "an (depth=speed)" || echo "aus")"
   local owl_id_for_preset=""
   if [[ "${CLAU_MODEL:-}" == owl:* ]]; then owl_id_for_preset="${CLAU_MODEL#owl:}"; fi
-  local preset_d="${TIMEOUT_PRESET_DEFAULT[$owl_id_for_preset]:-}"
-  local preset_m="${TIMEOUT_PRESET_MAX[$owl_id_for_preset]:-}"
+  local preset_d="" preset_m=""
+  if [[ -n "$owl_id_for_preset" ]]; then
+    preset_d="${TIMEOUT_PRESET_DEFAULT[$owl_id_for_preset]:-}"
+    preset_m="${TIMEOUT_PRESET_MAX[$owl_id_for_preset]:-}"
+  fi
   local preset_indicator=""
   if [[ -n "$preset_d" && "$CLAU_TIMEOUT_DEFAULT" == "$preset_d" && "$CLAU_TIMEOUT_MAX" == "$preset_m" ]]; then
     preset_indicator=" (Preset)"
@@ -1984,53 +2060,46 @@ show_current() {
 }
 
 choose_model_interactive() {
+  local nq=${#QWENPLAN_MODELS[@]}
+  local last=$((4 + nq))
   while true; do
     echo
     echo "Modell wählen:"
-    echo "  --- Standard Claude (agentisch, Datei-Editing + Shell) ---"
+    echo "  --- Claude Code mit Claude-Abo ---"
     echo "  1) haiku              Haiku 4.5   schnell, günstig"
     echo "  2) sonnet             Sonnet 5    Standard         [Enter]"
     echo "  3) opus               Opus 5.5    stärker, teurer"
     echo "  4) fable              Fable 5     stärkstes Modell"
-    echo "  --- LiteLLM Modelle (via Proxy, ${OWL_BASE_URL}) ---"
-    echo "  5) PropellerA-27B  lokal   tools+vision  GRATIS"
-    echo "  6) Qwopus-9B       lokal   tools schnell GRATIS"
-    echo "  7) Grok-4.3        xAI     tools 2M ctx  GRATIS"
-    echo "  8) QwQ-Plus        Ali     reasoning     GRATIS"
-    echo "  9) Qwen3-Coder     OR      tools 1M ctx  GRATIS"
-    echo "  0) free (Router)   ---     mix gratis    GRATIS"
-    echo "  a) Qwen-Flash      Ali     tools         \$0.05/\$0.15"
-    echo "  b) DeepSeek V4 Pro OR      tools 1M ctx  \$0.44/\$0.87"
-    echo "  c) Gemini-Flash    Goog    tools         \$0.10/\$0.40"
-    echo "  d) Claude-Sonnet   Anth    tools         \$3.00/\$15.00"
-    echo "  e) GPT-5           OAI     tools         \$1.25/\$10.00"
-    echo "  ee) Gemini-2.5-Pro Goog    tools         \$1.25/\$10.00"
-    echo "  f) Qwen3.8-Flash-Next(121) lokal  97k, GRATIS  176B MoE, schnell"
-    echo "  o) LiteLLM ID direkt"
-    printf "Auswahl [0-9, a-ee, f, o, Enter=2]: "
-    read -r choice
+    echo "  --- Claude Code mit Qwen Token Plan (Alibaba-Abo, nur interaktiv) ---"
+    local i=5 m
+    for m in "${QWENPLAN_MODELS[@]}"; do
+      printf "  %2d) %-19s %s\n" "$i" "$m" "$(_qwenplan_model_desc "$m")"
+      ((i++))
+    done
+    echo "  --- owlAPI / QuiteQue (live von ${OWL_BASE_URL}) ---"
+    echo "   w) owlAPI-Modell aus der Live-Liste wählen"
+    echo "   o) owlAPI-ID direkt eingeben"
+    printf "Auswahl [1-%d, w, o, Enter=2]: " "$last"
+    local choice; read -r choice
+    choice="${choice:-2}"
 
-    case "${choice:-2}" in
+    if [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 5 && "$choice" -le "$last" ]]; then
+      CLAU_QWEN_MODEL="${QWENPLAN_MODELS[$((choice-5))]}"
+      CLAU_BACKEND="qwenplan"
+      _qwenplan_key >/dev/null || echo "Ohne Key-Datei startet 'qwenplan' nicht." >&2
+      save_config
+      echo "Engine: qwenplan, Qwen-Modell: $CLAU_QWEN_MODEL"
+      return 0
+    fi
+    case "$choice" in
       1) CLAU_MODEL="haiku"; break ;;
       2) CLAU_MODEL="sonnet"; break ;;
       3) CLAU_MODEL="opus"; break ;;
       4) CLAU_MODEL="fable"; break ;;
-      5) CLAU_MODEL="owl:120"; break ;;
-      6) CLAU_MODEL="owl:243"; break ;;
-      7) CLAU_MODEL="owl:113"; break ;;
-      8) CLAU_MODEL="owl:38"; break ;;
-      9) CLAU_MODEL="owl:316"; break ;;
-      0) CLAU_MODEL="owl:free"; break ;;
-      a|A) CLAU_MODEL="owl:35"; break ;;
-      b|B) CLAU_MODEL="owl:350"; break ;;
-      c|C) CLAU_MODEL="owl:503"; break ;;
-      d|D) CLAU_MODEL="owl:21"; break ;;
-      e|E) CLAU_MODEL="owl:84"; break ;;
-      ee|EE) CLAU_MODEL="owl:501"; break ;;
-      f|F) CLAU_MODEL="owl:121"; break ;;
+      w|W) choose_owl_model_live && break ;;
       o|O)
-        printf "LiteLLM/owlAPI Modell-ID: "
-        read -r tmp_id
+        printf "owlAPI-Modell-ID: "
+        local tmp_id; read -r tmp_id
         if [[ -n "$tmp_id" ]]; then
           CLAU_MODEL="owl:${tmp_id}"
           break
@@ -2041,10 +2110,49 @@ choose_model_interactive() {
     esac
   done
 
+  # Claude- oder owl-Modell gewählt: vom Qwen-Plan zurück auf Claude Code
+  # (opencode bleibt opencode).
+  [[ "${CLAU_BACKEND:-claude}" == "qwenplan" ]] && CLAU_BACKEND="claude"
   # Timeout-Preset für das gewählte Modell anwenden
   apply_timeout_for_model "$CLAU_MODEL"
   save_config
   echo "Modell: $CLAU_MODEL"
+}
+
+# Live-Liste der owlAPI (lokal → gratis → nach Preis). Setzt CLAU_MODEL.
+# Rückgabe 1 bei Abbruch.
+choose_owl_model_live() {
+  local rows=()
+  while IFS= read -r line; do rows+=("$line"); done < <(_owl_models_tsv force)
+  if [[ "${#rows[@]}" -eq 0 ]]; then
+    echo "owlAPI nicht erreichbar und kein Cache vorhanden (${OWL_BASE_URL})." >&2
+    return 1
+  fi
+  local stamp; stamp="$(date -r "$OWL_MODELS_CACHE" '+%d.%m. %H:%M' 2>/dev/null)"
+  echo
+  echo "owlAPI-Modelle (Stand ${stamp}, Preis \$/MTok ein/aus):"
+  local i=1 r id st own ctx price name grp prev_grp="" ctxs
+  for r in "${rows[@]}"; do
+    IFS=$'\t' read -r id st own ctx price name <<< "$r"
+    if [[ "$own" == "propellera" ]]; then grp="lokal"
+    elif [[ "$price" == "GRATIS" ]]; then grp="gratis"
+    else grp="kostenpflichtig"; fi
+    [[ "$grp" != "$prev_grp" ]] && { echo "  --- $grp ---"; prev_grp="$grp"; }
+    if [[ "$ctx" -ge 1000000 ]]; then ctxs="$((ctx / 1000000))M"; else ctxs="$((ctx / 1000))k"; fi
+    printf "  %3d) %-5s %-5s %-13s %s%s\n" "$i" "$id" "$ctxs" "$price" "${name:0:58}" \
+      "$([[ "$st" != "OK" ]] && echo "  [$st]")"
+    ((i++))
+  done
+  printf "Auswahl [1-%d, Enter=Abbrechen]: " "${#rows[@]}"
+  local sel; read -r sel
+  if [[ "$sel" =~ ^[0-9]+$ && "$sel" -ge 1 && "$sel" -le "${#rows[@]}" ]]; then
+    IFS=$'\t' read -r id st own ctx price name <<< "${rows[$((sel-1))]}"
+    [[ "$st" != "OK" ]] && echo "Hinweis: Modell $id meldet gerade Status $st."
+    CLAU_MODEL="owl:${id}"
+    return 0
+  fi
+  echo "Abgebrochen."
+  return 1
 }
 
 choose_backend_interactive() {
@@ -2204,8 +2312,11 @@ choose_timeout_settings() {
       owl_id="${mdl#owl:}"
     fi
 
-    local preset_default="${TIMEOUT_PRESET_DEFAULT[$owl_id]:-}"
-    local preset_max="${TIMEOUT_PRESET_MAX[$owl_id]:-}"
+    local preset_default="" preset_max=""
+    if [[ -n "$owl_id" ]]; then
+      preset_default="${TIMEOUT_PRESET_DEFAULT[$owl_id]:-}"
+      preset_max="${TIMEOUT_PRESET_MAX[$owl_id]:-}"
+    fi
     local preset_label="<kein Preset>"
     if [[ -n "$preset_default" ]]; then
       preset_label="$(( preset_default / 60000 )) Min / $(( preset_max / 60000 )) Min"
@@ -2491,6 +2602,20 @@ QWENPLAN_KEY_FILE="${QWENPLAN_KEY_FILE:-$HOME/.config/clau/qwenplan.key}"
 QWENPLAN_MODELS=(qwen3.8-max qwen3.8-flash qwen3.7-max qwen3.7-plus qwen3.6-flash
                  deepseek-v4-pro deepseek-v4.1-flash glm-5.3 glm-5.2 auto)
 
+_qwenplan_model_desc() {
+  case "$1" in
+    qwen3.8-max)         echo "Standard, 1M Kontext" ;;
+    qwen3.8-flash)       echo "schnell, 1M Kontext" ;;
+    qwen3.7-max)         echo "Vorgänger Max" ;;
+    qwen3.7-plus)        echo "Mittelklasse" ;;
+    qwen3.6-flash)       echo "älter, schnell" ;;
+    deepseek-v4-pro)     echo "DeepSeek, Reasoning" ;;
+    deepseek-v4.1-flash) echo "DeepSeek, schnell" ;;
+    glm-5.3|glm-5.2)     echo "Z.ai GLM" ;;
+    auto)                echo "Alibaba wählt selbst" ;;
+  esac
+}
+
 # Gibt den API-Key aus. Quelle: $QWENPLAN_KEY_FILE (muss chmod 600 sein),
 # Rückfall: ~/.config/owl/system_config.json → qwenplan.api_key.
 _qwenplan_key() {
@@ -2559,7 +2684,7 @@ choose_qwen_model_interactive() {
   echo "Qwen-Token-Plan-Modell wählen (aktuell: ${CLAU_QWEN_MODEL}):"
   local i=1 m
   for m in "${QWENPLAN_MODELS[@]}"; do
-    printf "  %2d) %s%s\n" "$i" "$m" "$([[ "$m" == "qwen3.8-max" ]] && echo "   Standard, 1M Kontext")"
+    printf "  %2d) %-19s %s\n" "$i" "$m" "$(_qwenplan_model_desc "$m")"
     ((i++))
   done
   printf "Auswahl [1-%d, Enter=behalten]: " "${#QWENPLAN_MODELS[@]}"

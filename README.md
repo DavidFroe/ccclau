@@ -68,16 +68,33 @@ clau --git-up                 # Commit & Push
 clau --git-down               # Pull von origin
 ```
 
-### Modell-Kürzel (interaktiv)
+### Modellwahl (interaktiv, Menüpunkt 3)
 
-| Taste | Backend | Modell |
-|-------|---------|--------|
-| 1-4 | Claude | haiku (4.5) / sonnet (5) / opus (5) / fable (5) |
-| 5 | QuiteQue | PropellerA-27B (lokal, gratis) |
-| 6 | QuiteQue | Qwopus-9B (lokal, gratis) |
-| 7-9 | QuiteQue | Grok, QwQ, Qwen3-Coder |
-| 0 | QuiteQue | free (Router) |
-| a-ee | QuiteQue | Qwen-Flash, DeepSeek V4, Gemini, Claude, GPT-5, Gemini-2.5-Pro |
+| Taste | Engine | Modell |
+|-------|--------|--------|
+| 1-4 | Claude Code + Claude-Abo | haiku (4.5) / sonnet (5) / opus (5.5) / fable (5) |
+| 5-14 | Claude Code + Qwen Token Plan | qwen3.8-max (Standard), qwen3.8-flash, … glm-5.2, auto |
+| w | Claude Code + owlAPI | Live-Liste von `/v1/models` (lokal → gratis → nach Preis, mit Status) |
+| o | Claude Code + owlAPI | ID direkt eingeben |
+
+Die owlAPI-Liste wird live abgefragt und in `~/.cache/clau/owl_models.json` gecacht (1 h);
+daraus kommt auch das Kontext-Fenster für Auto-Compact.
+
+## Qwen Token Plan (Engine `qwenplan`)
+
+Claude Code direkt gegen Alibabas Anthropic-kompatiblen Token-Plan-Endpunkt, ohne Proxy.
+
+```bash
+mkdir -p ~/.config/clau && (umask 077; cat > ~/.config/clau/qwenplan.key)   # Key einfügen, Strg-D
+clau --backend qwenplan          # oder Menü 3 → 5-14, oder: clau -m qwen:glm-5.3
+clau --qwen-model                # Modell wählen (Default qwen3.8-max, schnell qwen3.8-flash)
+```
+
+- Key-Datei muss `chmod 600` haben, sonst startet clau nicht.
+- Vor dem Start ein Mini-Request (`max_tokens=1`): Key, Modell und leeres Kontingent werden klar gemeldet
+  (`CLAU_QWENPLAN_PREFLIGHT=0` schaltet das ab).
+- Prompt-Cache greift auch sessionübergreifend (`CLAUDE_CODE_ATTRIBUTION_HEADER=0`).
+- Laut AGB **nur interaktiv**: Headless, MCP/QuiteQue und Telegram-Hooks sind für diese Engine gesperrt.
 
 ## Custom Compact
 
