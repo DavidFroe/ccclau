@@ -71,7 +71,13 @@ def get_status():
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
-        return _error(f"HTTP {e.code} von {STATUS_URL}")
+        # Das Flash-Tor meldet z.B. 503 {"error": "176B nicht geladen - laedt bei der ersten Anfrage"}
+        detail = ""
+        try:
+            detail = json.loads(e.read().decode("utf-8", "replace")).get("error", "")
+        except Exception:
+            pass
+        return _error(f"HTTP {e.code} von {STATUS_URL}" + (f": {detail}" if detail else ""))
     except urllib.error.URLError as e:
         return _error(f"{STATUS_URL} nicht erreichbar: {e.reason}")
     except (TimeoutError, OSError) as e:

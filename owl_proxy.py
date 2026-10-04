@@ -141,6 +141,31 @@ def _parse_slot_limits(spec):
     return out
 
 
+# OWL_ROUTES="120=http://127.0.0.1:8292/v1,121=http://127.0.0.1:8293/v1#qwen3.8-flash-next":
+# einzelne Zielmodelle direkt an einen OpenAI-kompatiblen Server statt über
+# QuiteQue (OWL_BASE) -- für Umgebungen ohne QuiteQue/Internet. Hinter "#"
+# optional der Modellname, den dieser Server erwartet. Leer = alles über OWL_BASE.
+def _parse_routes(spec):
+    out = {}
+    for part in (spec or "").split(","):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        url, _, name = v.strip().partition("#")
+        if k.strip() and url:
+            out[k.strip()] = (url.rstrip("/"), name.strip() or None)
+    return out
+
+
+ROUTES = _parse_routes(os.environ.get("OWL_ROUTES", ""))
+
+
+def backend_for(target):
+    """(Basis-URL, Modellname fürs Backend) für ein Zielmodell."""
+    url, name = ROUTES.get(target, (OWL_BASE, None))
+    return url, name or target
+
+
 SLOT_LIMITS_SPEC = os.environ.get("OWL_SLOT_LIMITS", "")
 SLOT_SEMS = _parse_slot_limits(SLOT_LIMITS_SPEC)
 SLOT_WAIT_MAX = float(os.environ.get("OWL_SLOT_WAIT_MAX", str(REQUEST_TIMEOUT)))
@@ -553,8 +578,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         target = resolve_model(model_name)
         stream = req.get("stream", False)
 
+        base, backend_model = backend_for(target)
         oai_payload = {
-            "model": target,
+            "model": backend_model,
             "messages": messages_ant_to_oai(req.get("messages", []), req.get("system")),
             "stream": stream,
             "temperature": req.get("temperature", 0.3),
@@ -606,15 +632,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 return
             log(f"  Slot für model={target} frei nach {time.monotonic()-t_wait:.1f}s Wartezeit")
         try:
-            log(f"→ POST {OWL_BASE}/chat/completions model={target}{requested} stream={stream} messages={n_msgs} [{roles_summary}]")
-            self._forward(oai_payload, model_name, target, stream, est_input_tokens, sse)
+            log(f"→ POST {base}/chat/completions model={target}{requested} stream={stream} messages={n_msgs} [{roles_summary}]")
+            self._forward(oai_payload, model_name, target, stream, est_input_tokens, sse, base)
         finally:
             if sem is not None:
                 sem.release()
             if sse is not None:
                 sse["stop"].set()
 
-    def _forward(self, oai_payload, model_name, target, stream, est_input_tokens, sse):
+    def _forward(self, oai_payload, model_name, target, stream, est_input_tokens, sse, base=OWL_BASE):
         t0 = time.monotonic()
         try:
             # Bei 429/503 (Überlast bzw. owlAPIs Liveness-Probe-Fenster nach
@@ -626,7 +652,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             resp = None
             for attempt in range(2):
                 resp = requests.post(
-                    f"{OWL_BASE}/chat/completions",
+                    f"{base}/chat/completions",
                     json=oai_payload,
                     headers={
                         "Content-Type": "application/json",
@@ -867,8 +893,10 @@ def main():
     srv_cls = ThreadingHTTPServer if THREADED else HTTPServer
     srv = srv_cls(("127.0.0.1", port), ProxyHandler)
     extra = ""
+    if ROUTES:
+        extra += " routes=" + ",".join(f"{k}→{u}" for k, (u, _) in ROUTES.items())
     if THREADED or SLOT_LIMITS_SPEC:
-        extra = f" routing=owl-<ID> threaded={THREADED} slots={SLOT_LIMITS_SPEC or '-'}"
+        extra += f" routing=owl-<ID> threaded={THREADED} slots={SLOT_LIMITS_SPEC or '-'}"
     print(f"owl_proxy :{port} → {OWL_BASE} model={OWL_MODEL}{extra}", flush=True)
     try:
         srv.serve_forever()

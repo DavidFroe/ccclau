@@ -34,6 +34,7 @@ CC_COMPACT_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc_compact.py
 WEBSEARCH_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/websearch_mcp.py"
 LLM_STATUS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/llm_status_mcp.py"
 CLAU_TEAM_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/team"
+CLAU_API_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/clau_api.py"
 OWL_BASE_URL="http://11.0.0.13:7077"
 QQ_USER="opencode"
 
@@ -481,6 +482,9 @@ _start_owl_proxy() {
   local port
   port="$(_free_port)"
   mkdir -p "$OWL_PROXY_LOG_DIR" 2>/dev/null || true
+  # Rollen-Sessions der Fernsteuerung laufen parallel -- eigenes Log je Rolle,
+  # sonst kappen sie sich gegenseitig die gemeinsame Datei.
+  [[ -n "${CLAU_API_ROLE:-}" ]] && OWL_PROXY_LOG_FILE="${OWL_PROXY_LOG_DIR}/owl_proxy-${CLAU_API_ROLE}.log"
   # Log-Datei bei jedem Start kappen statt endlos wachsen zu lassen
   : > "$OWL_PROXY_LOG_FILE" 2>/dev/null || true
   _owl_activity_env "chat"
@@ -491,7 +495,7 @@ _start_owl_proxy() {
     threaded=1
     slot_limits="$(team_exec_model)=$(_team_exec_slots)"
   fi
-  OWL_PROXY_THREADED="$threaded" OWL_SLOT_LIMITS="$slot_limits" \
+  OWL_PROXY_THREADED="$threaded" OWL_SLOT_LIMITS="$slot_limits" OWL_ROUTES="${CLAU_OWL_ROUTES:-}" \
   OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
     OWL_PROXY_TIMEOUT="${CLAU_OWL_TIMEOUT:-1800}" \
     OWL_HDR_AGENT_TOOL="$OWL_HDR_AGENT_TOOL" OWL_HDR_REQUEST_CONTEXT="$OWL_HDR_REQUEST_CONTEXT" \
@@ -1467,6 +1471,78 @@ _team_claude_args() {
   fi
 }
 
+# Von der Fernsteuerung (clau_api.py) gestartete Rollen-Sessions: Status-Hooks
+# nur für diese Session (--settings) und feste Session-ID, damit die API die
+# Session wiederfindet. $1 = interactive|headless. Ohne CLAU_API_SESSION_ID leer.
+_api_claude_args() {
+  [[ -n "${CLAU_API_SESSION_ID:-}" ]] || return 0
+  if [[ -n "${CLAU_API_HOOK_SETTINGS:-}" ]]; then
+    echo "--settings"
+    echo "$CLAU_API_HOOK_SETTINGS"
+  fi
+  if [[ "${CLAU_API_RESUME:-0}" == "1" ]]; then
+    # interaktiv kommt --resume schon über clau --resume <id>
+    if [[ "${1:-}" == "headless" ]]; then echo "--resume"; echo "$CLAU_API_SESSION_ID"; fi
+  else
+    echo "--session-id"
+    echo "$CLAU_API_SESSION_ID"
+  fi
+}
+
+# Erster Auftrag einer per API gestarteten Session (als Prompt-Argument,
+# kann Zeilenumbrüche enthalten, deshalb nicht über _api_claude_args).
+_api_prompt_args() {
+  API_PROMPT_ARGS=()
+  if [[ -n "${CLAU_API_PROMPT_FILE:-}" && -f "${CLAU_API_PROMPT_FILE}" ]]; then
+    API_PROMPT_ARGS=("$(cat "$CLAU_API_PROMPT_FILE")")
+  fi
+}
+
+# ── Fernsteuerung (clau --api, Default aus) ─────────────────────────────────
+CLAU_API_STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/clau/api"
+
+_api_env_export() {
+  export CLAU_API_BIND="${CLAU_API_BIND:-127.0.0.1:7010}" CLAU_API_TOKEN="${CLAU_API_TOKEN:-}"
+  export CLAU_TEAM_STATUS_URL CLAU_TEAM_MAX_AGENTS
+  export CLAU_TEAM_EXEC_MODEL="$(team_exec_model)"
+  export CLAU_BIN; CLAU_BIN="$(readlink -f "$0")"
+  export CLAU_API_ORDNER="${CLAU_API_ORDNER:-$PWD}"
+}
+
+# clau --api : HTTP-Dienst im Vordergrund (für systemd/devport)
+run_api_server() {
+  command -v tmux >/dev/null 2>&1 || { echo "tmux fehlt. Installieren:  sudo apt install tmux" >&2; exit 1; }
+  [[ -f "$CLAU_API_SCRIPT" ]] || { echo "clau_api.py nicht gefunden: $CLAU_API_SCRIPT" >&2; exit 1; }
+  _api_env_export
+  exec python3 "$CLAU_API_SCRIPT" serve
+}
+
+# CLAU_API=1: Dienst beim clau-Start im Hintergrund hochziehen, falls er
+# nicht schon läuft. Nicht aus einer API-Rollen-Session heraus.
+api_daemon_ensure() {
+  [[ "${CLAU_API:-0}" == "1" ]] || return 0
+  [[ -z "${CLAU_API_SESSION_ID:-}" ]] || return 0
+  [[ -f "$CLAU_API_SCRIPT" ]] && command -v tmux >/dev/null 2>&1 || return 0
+  local pidf="$CLAU_API_STATE_DIR/server.pid" pid
+  pid="$(cat "$pidf" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then return 0; fi
+  mkdir -p "$CLAU_API_STATE_DIR" 2>/dev/null || return 0
+  ( _api_env_export
+    setsid nohup python3 "$CLAU_API_SCRIPT" serve >>"$CLAU_API_STATE_DIR/server.log" 2>&1 &
+    echo "$!" > "$pidf" )
+  echo "Fernsteuerung gestartet: http://${CLAU_API_BIND:-127.0.0.1:7010} (Log: $CLAU_API_STATE_DIR/server.log)"
+}
+
+api_daemon_stop() {
+  local pidf="$CLAU_API_STATE_DIR/server.pid" pid
+  pid="$(cat "$pidf" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && kill "$pid" 2>/dev/null; then
+    rm -f "$pidf"; echo "Fernsteuerung (PID $pid) beendet."
+  else
+    echo "Keine laufende Fernsteuerung (Hintergrund) gefunden."
+  fi
+}
+
 # claude über owlAPI-Proxy starten (interaktiv)
 run_owl_via_claude() {
   local owl_id="$1"
@@ -1560,12 +1636,14 @@ run_owl_via_claude() {
   done
   local tool_args=()
   while IFS= read -r line; do tool_args+=("$line"); done < <(_owl_minimal_tool_args; _team_claude_args)
+  while IFS= read -r line; do tool_args+=("$line"); done < <(_api_claude_args interactive)
+  _api_prompt_args
   local cli_model; cli_model="$(owl_cli_model)"
   team_active && team_export_env
   # shellcheck disable=SC2086
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
   ANTHROPIC_API_KEY="sk-ant-api03-owl-dummy-key-not-real" \
-  claude --model "$cli_model" $extra "${tool_args[@]}" "${real_args[@]}" || true
+  claude --model "$cli_model" $extra "${tool_args[@]}" "${real_args[@]}" "${API_PROMPT_ARGS[@]}" || true
 
   _kill_owl_proxy
   trap - EXIT INT TERM
@@ -1614,8 +1692,10 @@ run_owl_headless_via_claude() {
 
   local tool_args=()
   while IFS= read -r line; do tool_args+=("$line"); done < <(_owl_minimal_tool_args; _team_claude_args)
+  while IFS= read -r line; do tool_args+=("$line"); done < <(_api_claude_args headless)
   local cli_model; cli_model="$(owl_cli_model)"
   local perm_args=()
+  [[ -n "${CLAU_API_SESSION_ID:-}" && "${DANGEROUS_SKIP:-0}" -eq 1 ]] && perm_args=(--dangerously-skip-permissions)
   if team_active; then
     team_export_env
     # Ohne Permission-Flag schickt claude für jeden Tool-Schritt eine
@@ -1654,7 +1734,18 @@ _conf_fallback_file() {
   echo "${d}/$(pwd | tr -c 'A-Za-z0-9' '_').conf"
 }
 
+# Diese Einstellungen dürfen aus der Umgebung kommen und schlagen dann die
+# .clau.conf (devport/VM, Fernsteuerung: CLAU_TEAM=1 clau ..., offline ohne
+# Update-Check/Websuche).
+CLAU_ENV_OVERRIDES=(CLAU_TEAM CLAU_TEAM_LEAD_MODEL CLAU_TEAM_EXEC_MODEL CLAU_TEAM_MAX_AGENTS
+  CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_API CLAU_API_BIND CLAU_API_TOKEN
+  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_OFFLINE CLAU_OWL_ROUTES)
+
 load_config() {
+  local _ov _envsave=()
+  for _ov in "${CLAU_ENV_OVERRIDES[@]}"; do
+    [[ -n "${!_ov+x}" ]] && _envsave+=("$_ov=${!_ov}")
+  done
   if [[ -f "$CONFIG_FILE" ]]; then
     # ./-Präfix: sonst durchsucht `source` erst $PATH (sourcepath) und lädt evtl.
     # eine fremde .clau.conf aus einem PATH-Verzeichnis statt der im aktuellen Ordner.
@@ -1665,6 +1756,16 @@ load_config() {
     local fb; fb="$(_conf_fallback_file)"
     # shellcheck disable=SC1090
     [[ -f "$fb" ]] && source "$fb"
+  fi
+  for _ov in "${_envsave[@]}"; do
+    printf -v "${_ov%%=*}" '%s' "${_ov#*=}"
+  done
+  # Offline (devport-VM ohne Internet): nichts darf ins Netz wollen oder hängen
+  : "${CLAU_OFFLINE:=0}"
+  if [[ "$CLAU_OFFLINE" == "1" ]]; then
+    CLAU_UPDATE_CHECK=0
+    CLAU_WEBSEARCH=0
+    export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_AUTOUPDATER=1
   fi
   : "${CLAU_MODEL:=sonnet}"
   : "${CLAU_SESSION_ID:=}"
@@ -1789,6 +1890,8 @@ CLAU_TEAM_STATUS_URL="${CLAU_TEAM_STATUS_URL:-http://127.0.0.1:8293/slots}"
 CLAU_API="${CLAU_API:-0}"
 CLAU_API_BIND="${CLAU_API_BIND:-127.0.0.1:7010}"
 CLAU_API_TOKEN="${CLAU_API_TOKEN:-}"
+CLAU_OFFLINE="${CLAU_OFFLINE:-0}"
+CLAU_OWL_ROUTES="${CLAU_OWL_ROUTES:-}"
 CLAU_BACKEND="${CLAU_BACKEND:-claude}"
 CLAU_TIMEOUT_DEFAULT="${CLAU_TIMEOUT_DEFAULT:-1800000}"
 CLAU_TIMEOUT_MAX="${CLAU_TIMEOUT_MAX:-7200000}"
@@ -1960,6 +2063,8 @@ Verwendung (interaktiv):
   clau --take ID                  Merkt sich eine feste Session-ID für dieses Verzeichnis
   clau --forget                   Entfernt die gemerkte Session-ID
   clau --current                  Zeigt aktuelle Session/Model-Config
+  clau --api                      Fernsteuerung (HTTP, CLAU_API_BIND) im Vordergrund starten
+  clau --api-stop                 Im Hintergrund laufende Fernsteuerung beenden
   clau --clear-model              Entfernt das gespeicherte Modell
   clau --install                  Installiert "clau" + claude-code + opencode nach ~/.local/bin
   clau --uninstall                Entfernt "clau" aus ~/.local/bin
@@ -2037,6 +2142,18 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_OWL_MINIMAL_TOOLS="1"         Schlankes Tool-Set + keine MCP-Server für owlAPI (Default an)
   CLAU_OWL_TOOLS="Bash,Edit,..."     Eigene Tool-Allowlist statt des Defaults (s.o.)
   CLAU_UPDATE_CHECK="1"              Beim Start gegen GitHub auf Updates prüfen (0 = aus)
+  CLAU_OFFLINE="0"                   1 = ohne Internet: kein Update-Check, keine Websuche, keine Netz-Installation
+  CLAU_TEAM="0"                      1 = Team-Modus (Teamleiter owl-120, Ausführer-Agenten owl-121)
+  CLAU_TEAM_LEAD_MODEL="120"         Teamleiter-Modell (QuiteQue-ID)
+  CLAU_TEAM_EXEC_MODEL="121"         Ausführer-Modell (Agenten mit model: sonnet)
+  CLAU_TEAM_MAX_AGENTS="5"           Max. parallele Ausführer bei freien Slots
+  CLAU_TEAM_SLOTS_121="3"            Max. gleichzeitige Anfragen an 121 (Rest wartet im Proxy)
+  CLAU_TEAM_STATUS_URL="http://127.0.0.1:8293/slots"  Slot-Status für das Tool llm_status
+  CLAU_API="0"                       1 = Fernsteuerung beim clau-Start im Hintergrund starten
+  CLAU_API_BIND="127.0.0.1:7010"     Adresse der Fernsteuerung
+  CLAU_API_TOKEN=""                  Bearer-Token (Pflicht bei nicht-lokalem Bind)
+  CLAU_OWL_ROUTES=""                 Modelle direkt statt über QuiteQue, z.B.
+                                     "120=http://h:8292/v1,121=http://h:8293/v1#qwen3.8-flash-next"
   CLAU_UPDATE_CHECK_INTERVAL="86400" Prüf-Intervall in Sekunden (Default 1×/Tag)
 HELP_EOF
 }
@@ -2522,6 +2639,10 @@ _ensure_claude_code() {
     echo "  claude-code: bereits vorhanden ($(command -v claude))"
     return 0
   fi
+  if [[ "${CLAU_OFFLINE:-0}" == "1" ]]; then
+    echo "  WARN: claude-code fehlt, CLAU_OFFLINE=1 → keine Installation aus dem Netz." >&2
+    return 1
+  fi
   echo "  claude-code: nicht gefunden — installiere ..."
   if _have curl; then
     if curl -fsSL https://claude.ai/install.sh | bash; then return 0; fi
@@ -2548,6 +2669,10 @@ _ensure_opencode() {
   if _have opencode; then
     echo "  opencode: bereits vorhanden ($(command -v opencode))"
     return 0
+  fi
+  if [[ "${CLAU_OFFLINE:-0}" == "1" ]]; then
+    echo "  opencode: fehlt, CLAU_OFFLINE=1 → übersprungen (nur für --backend opencode nötig)."
+    return 1
   fi
   echo "  opencode: nicht gefunden — installiere ..."
   if _have curl; then
@@ -3529,8 +3654,11 @@ run_new_session() {
   unset_token_saver_env
   apply_tg_hooks
   local extra; extra="$(_interaction_args)"
+  local api_args=()
+  while IFS= read -r line; do api_args+=("$line"); done < <(_api_claude_args interactive)
+  _api_prompt_args
   # shellcheck disable=SC2086
-  exec claude --model "$(claude_cli_model "$mdl")" $extra
+  exec claude --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}"
 }
 
 # Setzt eine konkrete Session-ID fort (z.B. nach custom-compact)
@@ -3557,8 +3685,11 @@ run_resume_id() {
   unset_token_saver_env
   apply_tg_hooks
   local extra; extra="$(_interaction_args)"
+  local api_args=()
+  while IFS= read -r line; do api_args+=("$line"); done < <(_api_claude_args interactive)
+  _api_prompt_args
   # shellcheck disable=SC2086
-  exec claude --resume "$rid" --model "$(claude_cli_model "$mdl")" $extra
+  exec claude --resume "$rid" --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}"
 }
 
 # Custom-Compact: komprimiert die aktuelle Session extern via QuiteQue (cc_compact.py)
@@ -4182,6 +4313,14 @@ parse_args() {
         ACTION="mirror"
         shift
         ;;
+      --api)
+        ACTION="api"
+        shift
+        ;;
+      --api-stop)
+        ACTION="api-stop"
+        shift
+        ;;
       --tg-pump)
         ACTION="tg-pump"
         TG_PUMP_ARGS=("${2:-}" "${3:-}" "${4:-}")
@@ -4296,8 +4435,14 @@ fi
 
 # Update-Check nur für interaktive Läufe (nicht headless/CI/tg)
 case "${ACTION}" in
-  tg-token|tg-setup|tg-test|tg-whoami|tg-bot|tg-hooks-off|mirror|tg-pump) : ;;
+  tg-token|tg-setup|tg-test|tg-whoami|tg-bot|tg-hooks-off|mirror|tg-pump|api|api-stop) : ;;
   *) [[ "${HEADLESS:-0}" -eq 1 ]] || check_for_updates ;;
+esac
+
+# Fernsteuerung im Hintergrund (nur mit CLAU_API=1, nicht für Hilfsaufrufe)
+case "${ACTION}" in
+  tg-*|mirror|api|api-stop) : ;;
+  *) [[ "${HEADLESS:-0}" -eq 1 ]] || api_daemon_ensure ;;
 esac
 
 case "${ACTION}" in
@@ -4335,6 +4480,12 @@ case "${ACTION}" in
     ;;
   mirror)
     tg_mirror
+    ;;
+  api)
+    run_api_server
+    ;;
+  api-stop)
+    api_daemon_stop
     ;;
   tg-whoami)
     tg_whoami
