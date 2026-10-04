@@ -13,8 +13,9 @@ Ablauf für jede Aufgabe, die mehr als eine Kleinigkeit ist:
 1. Zerlegen: Teile die Aufgabe in unabhängige Teilaufträge mit GETRENNTEN Dateibereichen.
    Lege gemeinsame Schnittstellen (Funktionsnamen, Signaturen, Dateiformate) vorher fest und schreibe
    sie in jeden Teilauftrag. Bei großen Aufgaben vorher `planer` aufrufen.
-2. Auslastung prüfen: Rufe VOR JEDER Verteilung das Tool `llm_status` auf.
-3. Verteilen nach `empfehlung_parallel` (bzw. `frei`):
+2. Auslastung prüfen: Wenn das Tool `llm_status` verfügbar ist, rufe es VOR JEDER Verteilung auf.
+   Ohne `llm_status` verteile bis zu {{MAX_AGENTS}} Teilaufträge gleichzeitig.
+3. Verteilen nach `empfehlung_parallel` (bzw. `frei`), falls `llm_status` vorhanden:
    - frei 0 oder 1, oder Fehler/`frei: null`: genau EIN `ausfuehrer` auf einmal, nacheinander.
    - frei 2: bis zu 2 Teilaufträge gleichzeitig.
    - frei 3 oder mehr: bis zu {{MAX_AGENTS}} Teilaufträge gleichzeitig.

@@ -205,6 +205,28 @@ Endpoint ist `POST /websearch`.
 
 ## Team-Modus
 
+Ein Teamleiter (Claude Code) zerlegt Aufgaben und verteilt sie an Subagenten. Drei Sets
+(Einstellungen → Team-Modus, oder `CLAU_TEAM_SET` in `.clau.conf`):
+
+| Set | Teamleiter | Subagenten |
+|---|---|---|
+| `lokal` (Standard) | owl:120 (Claude Code über owl_proxy) | owl:121 als pi-Prozesse |
+| `qwen` | qwen3.8-max (Claude Code über den Token Plan) | qwen3.8-flash als pi-Prozesse |
+| `claude` | Opus (Claude-Abo) | Sonnet als Claude-Code-Agenten |
+
+```bash
+CLAU_TEAM="1"
+CLAU_TEAM_SET="qwen"          # lokal | qwen | claude
+CLAU_TEAM_QWEN_LEAD="qwen3.8-max"   CLAU_TEAM_QWEN_EXEC="qwen3.8-flash"
+CLAU_TEAM_CLAUDE_LEAD="opus"        CLAU_TEAM_CLAUDE_EXEC="sonnet"
+```
+
+Beim Set `claude` laufen die Subagenten bewusst als Claude-Code-Agenten und nicht als pi
+(pi mit dem Claude-Abo-Login wäre eine Grauzone). `llm_status` (Slot-Abfrage) gibt es nur
+beim Set `lokal`; die anderen verteilen bis `CLAU_TEAM_MAX_AGENTS`.
+
+### Set `lokal` im Detail
+
 Ein kleines Frontend-Modell (Teamleiter, Default `owl:120` = Qwen 27B) zerlegt Aufgaben
 und verteilt sie an Ausführer-Subagenten auf dem großen Modell (Default `owl:121` =
 Qwen3.8-Flash-Next 176B). Wie viel parallel läuft, richtet sich nach den freien Slots des 176B.

@@ -1388,23 +1388,17 @@ _owl_mcp_config() {
     if [[ "${CLAU_WEBSEARCH:-1}" == "1" && -f "$WEBSEARCH_MCP_SCRIPT" ]]; then
       ws=1; _owl_activity_env "websearch"
     fi
-    local pi_bin=""
-    if team_pi_active && _team_pi_setup; then pi_bin="$(_team_pi_bin)"; fi
-    python3 - "$ws" "$LLM_STATUS_MCP_SCRIPT" "$WEBSEARCH_MCP_SCRIPT" "$pi_bin" "$PI_TEAM_MCP_SCRIPT" <<PY_MCP
+    local pi_json="{}"
+    team_pi_active && pi_json="$(_pi_team_server_json)"
+    python3 - "$ws" "$LLM_STATUS_MCP_SCRIPT" "$WEBSEARCH_MCP_SCRIPT" "$pi_json" <<PY_MCP
 import json, sys
-ws, llm, web, pi_bin, pi_mcp = sys.argv[1] == "1", sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+ws, llm, web, pi_json = sys.argv[1] == "1", sys.argv[2], sys.argv[3], json.loads(sys.argv[4] or "{}")
 servers = {"llm_status": {"type": "stdio", "command": "python3", "args": [llm], "env": {
     "CLAU_TEAM_STATUS_URL": "${CLAU_TEAM_STATUS_URL:-http://127.0.0.1:8293/slots}",
     "CLAU_TEAM_EXEC_MODEL": "$(team_exec_model)",
     "CLAU_TEAM_MAX_AGENTS": "${CLAU_TEAM_MAX_AGENTS:-5}"}}}
-if pi_bin:
-    servers["pi_team"] = {"type": "stdio", "command": "python3", "args": [pi_mcp], "env": {
-        "CLAU_PI_BIN": pi_bin, "PI_CODING_AGENT_DIR": "$TEAM_PI_AGENT_DIR",
-        "CLAU_TEAM_DIR": "$CLAU_TEAM_DIR",
-        "CLAU_TEAM_EXEC_MODEL": "$(team_exec_model)", "CLAU_TEAM_LEAD_MODEL": "$(team_lead_model)",
-        "CLAU_TEAM_PI_SLOTS": "$(team_exec_model)=$(_team_exec_slots)$([[ "$(team_lead_model)" != "$(team_exec_model)" ]] && echo ",$(team_lead_model)=1")",
-        "CLAU_TEAM_PI_TIMEOUT": "${CLAU_TEAM_PI_TIMEOUT:-1800}",
-        "PATH": "$PATH", "HOME": "$HOME"}}
+if pi_json:
+    servers["pi_team"] = pi_json
 if ws:
     servers["websearch"] = {"type": "stdio", "command": "python3", "args": [web], "env": {
         "QUITEQUE_URL": "$OWL_BASE_URL", "OWL_PROXY_USER": "$QQ_USER",
@@ -1447,9 +1441,38 @@ _owl_minimal_tool_args() {
 # Teamleiter (CLAU_TEAM_LEAD_MODEL, 27B) im Frontend, Ausführer-Subagenten
 # (model: sonnet → CLAU_TEAM_EXEC_MODEL, 176B) über dasselbe owl_proxy. Der
 # Proxy routet nach dem angefragten Modellnamen "owl-<ID>".
-team_active() { [[ "${CLAU_TEAM:-0}" == "1" ]]; }
-team_lead_model() { echo "${CLAU_TEAM_LEAD_MODEL:-120}"; }
-team_exec_model() { echo "${CLAU_TEAM_EXEC_MODEL:-121}"; }
+# Drei Team-Sets (CLAU_TEAM_SET):
+#   lokal  : Teamleiter owl:120 (Claude Code über owl_proxy), Subagenten owl:121 als pi
+#   qwen   : Teamleiter qwen3.8-max (Claude Code, Token Plan), Subagenten qwen3.8-flash als pi
+#   claude : Teamleiter Opus, Subagenten Sonnet als Claude-Code-Agenten (Claude-Abo)
+# team_active = Team an UND Set lokal -- daran hängt der ganze owl-Pfad (Proxy-
+# Routing, Slot-Sperre, llm_status); die anderen Sets prüfen team_on + team_set.
+team_on() { [[ "${CLAU_TEAM:-0}" == "1" ]]; }
+team_set() {
+  case "${CLAU_TEAM_SET:-lokal}" in qwen|claude) echo "$CLAU_TEAM_SET" ;; *) echo "lokal" ;; esac
+}
+team_active() { team_on && [[ "$(team_set)" == "lokal" ]]; }
+team_lead_model() {
+  case "$(team_set)" in
+    qwen)   echo "${CLAU_TEAM_QWEN_LEAD:-qwen3.8-max}" ;;
+    claude) echo "${CLAU_TEAM_CLAUDE_LEAD:-opus}" ;;
+    *)      echo "${CLAU_TEAM_LEAD_MODEL:-120}" ;;
+  esac
+}
+team_exec_model() {
+  case "$(team_set)" in
+    qwen)   echo "${CLAU_TEAM_QWEN_EXEC:-qwen3.8-flash}" ;;
+    claude) echo "${CLAU_TEAM_CLAUDE_EXEC:-sonnet}" ;;
+    *)      echo "${CLAU_TEAM_EXEC_MODEL:-121}" ;;
+  esac
+}
+team_set_label() {
+  case "$(team_set)" in
+    qwen)   echo "qwen: $(team_lead_model) leitet, $(team_exec_model) als pi" ;;
+    claude) echo "claude: $(team_lead_model) leitet, $(team_exec_model) als Claude-Code-Agent" ;;
+    *)      echo "lokal: owl:$(team_lead_model) leitet, owl:$(team_exec_model) als $(team_pi_active && echo pi || echo Claude-Code-Agent)" ;;
+  esac
+}
 
 # ── Team-Subagenten als pi-Prozesse ──────────────────────────────────────────
 # Statt Claude-Code-Subagenten (~36k Tokens System-Prompt + Tool-Schema pro
@@ -1466,16 +1489,53 @@ _team_pi_bin() {
 }
 
 team_pi_active() {
-  team_active && [[ "${CLAU_TEAM_SUBAGENTS:-pi}" == "pi" ]] && [[ -f "$PI_TEAM_MCP_SCRIPT" ]] && _team_pi_bin >/dev/null
+  team_on && [[ "$(team_set)" != "claude" ]] && [[ "${CLAU_TEAM_SUBAGENTS:-pi}" == "pi" ]] \
+    && [[ -f "$PI_TEAM_MCP_SCRIPT" ]] && _team_pi_bin >/dev/null
 }
 
+# Eigenes pi-Konfig-Verzeichnis je Set (parallele Sessions stören sich nicht)
 TEAM_PI_AGENT_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/clau/pi-agent"
+_team_pi_dir() { echo "${TEAM_PI_AGENT_DIR}-$(team_set)"; }
+_team_pi_provider() { [[ "$(team_set)" == "qwen" ]] && echo "qwen-token-plan-individual" || echo "owl"; }
+
+# MCP-Serverdefinition für pi_team (einzeiliges JSON), leer bei Fehler.
+_pi_team_server_json() {
+  _team_pi_setup || { echo "{}"; return; }
+  local lead exe slots
+  lead="$(team_lead_model)"; exe="$(team_exec_model)"
+  slots="${exe}=$(_team_exec_slots)"
+  [[ "$lead" != "$exe" ]] && slots+=",${lead}=1"
+  python3 -c '
+import json, sys
+a = sys.argv[1:]
+print(json.dumps({"type": "stdio", "command": "python3", "args": [a[0]], "env": {
+    "CLAU_PI_BIN": a[1], "PI_CODING_AGENT_DIR": a[2], "CLAU_TEAM_PI_PROVIDER": a[3],
+    "CLAU_TEAM_DIR": a[4], "CLAU_TEAM_EXEC_MODEL": a[5], "CLAU_TEAM_LEAD_MODEL": a[6],
+    "CLAU_TEAM_PI_SLOTS": a[7], "CLAU_TEAM_PI_TIMEOUT": a[8], "PATH": a[9], "HOME": a[10]}}))' \
+    "$PI_TEAM_MCP_SCRIPT" "$(_team_pi_bin)" "$(_team_pi_dir)" "$(_team_pi_provider)" "$CLAU_TEAM_DIR" \
+    "$exe" "$lead" "$slots" "${CLAU_TEAM_PI_TIMEOUT:-1800}" "$PATH" "$HOME"
+}
 
 # Schreibt models.json/settings.json für pi: Provider "owl" = QuiteQue mit den
 # Pflicht-Headern, Modelle Teamleiter + Ausführer mit echtem Kontextfenster.
 _team_pi_setup() {
-  mkdir -p "$TEAM_PI_AGENT_DIR" 2>/dev/null || return 1
-  python3 - "$TEAM_PI_AGENT_DIR" "${OWL_BASE_URL}/v1" "$QQ_USER" \
+  local d; d="$(_team_pi_dir)"
+  mkdir -p "$d" 2>/dev/null || return 1
+  if [[ "$(team_set)" == "qwen" ]]; then
+    # pis eingebauter Token-Plan-Provider kennt Alibabas Eigenheiten (z.B. keine
+    # "developer"-Rolle); der Key wird bei jeder Anfrage aus der Datei gelesen.
+    [[ -f "$QWENPLAN_KEY_FILE" ]] || { echo "Team qwen: kein Qwen-Key (clau --qwen-key)." >&2; return 1; }
+    python3 - "$d" "$QWENPLAN_KEY_FILE" "$(team_exec_model)" <<'PY_PIQ'
+import json, os, sys
+d, keyfile, exe = sys.argv[1:4]
+json.dump({"providers": {"qwen-token-plan-individual": {"apiKey": "!cat " + keyfile}}},
+          open(os.path.join(d, "models.json"), "w"), indent=1)
+json.dump({"defaultProvider": "qwen-token-plan-individual", "defaultModel": exe, "quietStartup": True},
+          open(os.path.join(d, "settings.json"), "w"), indent=1)
+PY_PIQ
+    return
+  fi
+  python3 - "$d" "${OWL_BASE_URL}/v1" "$QQ_USER" \
     "${CLAU_AGENT_TOOL:-ccclau-$(whoami)}" "${CLAU_SESSION_NAME:-$(basename "$PWD")}" "${CLAU_USER_TAG:-$(whoami)}" \
     "$(team_lead_model)" "$(owl_context_window "$(team_lead_model)")" \
     "$(team_exec_model)" "$(owl_context_window "$(team_exec_model)")" <<'PY_PI'
@@ -1545,9 +1605,12 @@ team_export_env() {
 # Projektordner schreibt. Ein gleichnamiger Agent in .claude/agents/ des
 # Projekts wird dabei von der CLI-Definition überdeckt.
 _team_agents_json() {
-  python3 - "$CLAU_TEAM_DIR/agents" <<'PY_AGENTS'
+  # Set claude: der Ausführer bekommt das eingestellte Modell (Default sonnet)
+  local exec_override=""
+  team_on && [[ "$(team_set)" == "claude" ]] && exec_override="$(team_exec_model)"
+  python3 - "$CLAU_TEAM_DIR/agents" "$exec_override" <<'PY_AGENTS'
 import json, os, sys
-d = sys.argv[1]
+d, exec_override = sys.argv[1], sys.argv[2]
 agents = {}
 for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
     if not fn.endswith(".md"):
@@ -1566,6 +1629,8 @@ for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
         a["model"] = meta["model"]
     if meta.get("tools"):
         a["tools"] = [t.strip() for t in meta["tools"].split(",") if t.strip()]
+    if name == "ausfuehrer" and exec_override:
+        a["model"] = exec_override
     agents[name] = a
 print(json.dumps(agents, ensure_ascii=False))
 PY_AGENTS
@@ -1574,7 +1639,7 @@ PY_AGENTS
 # Zusätzliche claude-Argumente im Team-Modus, eine pro Zeile (Aufrufer liest
 # mit "while read", deshalb einzeiliges JSON und Dateipfad statt Prompt-Text).
 _team_claude_args() {
-  team_active || return 0
+  team_on || return 0
   local tpl="$CLAU_TEAM_DIR/TEAM_ANWEISUNG.md"
   if team_pi_active; then
     tpl="$CLAU_TEAM_DIR/TEAM_ANWEISUNG_PI.md"
@@ -1595,6 +1660,18 @@ _team_claude_args() {
       echo "$out"
     fi
   fi
+}
+
+# Team-Set claude: Agent-Definitionen + Team-Anweisung für den normalen
+# Claude-Code-Pfad (Opus leitet, Sonnet-Agenten führen aus). Füllt TEAM_CC_ARGS.
+TEAM_CC_ARGS=()
+_team_cc_args_fill() {
+  TEAM_CC_ARGS=()
+  team_on && [[ "$(team_set)" == "claude" ]] || return 0
+  local line
+  while IFS= read -r line; do TEAM_CC_ARGS+=("$line"); done < <(_team_claude_args)
+  unset CLAUDE_CODE_SUBAGENT_MODEL
+  echo "Team claude: $(team_lead_model) leitet, $(team_exec_model)-Agenten führen aus" >&2
 }
 
 # Von der Fernsteuerung (clau_api.py) gestartete Rollen-Sessions: Status-Hooks
@@ -1847,7 +1924,7 @@ _conf_fallback_file() {
 # .clau.conf (devport/VM, Fernsteuerung: CLAU_TEAM=1 clau ..., offline ohne
 # Update-Check/Websuche).
 CLAU_ENV_OVERRIDES=(CLAU_TEAM CLAU_TEAM_LEAD_MODEL CLAU_TEAM_EXEC_MODEL CLAU_TEAM_MAX_AGENTS
-  CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_TEAM_SUBAGENTS CLAU_API CLAU_API_BIND CLAU_API_TOKEN
+  CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_TEAM_SUBAGENTS CLAU_TEAM_SET CLAU_API CLAU_API_BIND CLAU_API_TOKEN
   CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_OFFLINE CLAU_OWL_ROUTES)
 
 load_config() {
@@ -1897,6 +1974,11 @@ load_config() {
   : "${CLAU_TEAM_STATUS_URL:=http://127.0.0.1:8293/slots}"
   # Subagenten: "pi" (schlanke pi-Prozesse, Default wenn pi installiert) oder "claude"
   : "${CLAU_TEAM_SUBAGENTS:=pi}"
+  : "${CLAU_TEAM_SET:=lokal}"
+  : "${CLAU_TEAM_QWEN_LEAD:=qwen3.8-max}"
+  : "${CLAU_TEAM_QWEN_EXEC:=qwen3.8-flash}"
+  : "${CLAU_TEAM_CLAUDE_LEAD:=opus}"
+  : "${CLAU_TEAM_CLAUDE_EXEC:=sonnet}"
   : "${CLAU_API:=0}"
   : "${CLAU_API_BIND:=127.0.0.1:7010}"
   : "${CLAU_API_TOKEN:=}"
@@ -2002,6 +2084,11 @@ CLAU_TEAM_MAX_AGENTS="${CLAU_TEAM_MAX_AGENTS:-5}"
 CLAU_TEAM_SLOTS_121="${CLAU_TEAM_SLOTS_121:-3}"
 CLAU_TEAM_STATUS_URL="${CLAU_TEAM_STATUS_URL:-http://127.0.0.1:8293/slots}"
 CLAU_TEAM_SUBAGENTS="${CLAU_TEAM_SUBAGENTS:-pi}"
+CLAU_TEAM_SET="${CLAU_TEAM_SET:-lokal}"
+CLAU_TEAM_QWEN_LEAD="${CLAU_TEAM_QWEN_LEAD:-qwen3.8-max}"
+CLAU_TEAM_QWEN_EXEC="${CLAU_TEAM_QWEN_EXEC:-qwen3.8-flash}"
+CLAU_TEAM_CLAUDE_LEAD="${CLAU_TEAM_CLAUDE_LEAD:-opus}"
+CLAU_TEAM_CLAUDE_EXEC="${CLAU_TEAM_CLAUDE_EXEC:-sonnet}"
 CLAU_API="${CLAU_API:-0}"
 CLAU_API_BIND="${CLAU_API_BIND:-127.0.0.1:7010}"
 CLAU_API_TOKEN="${CLAU_API_TOKEN:-}"
@@ -2074,7 +2161,7 @@ auto_compact_status() {
 # Generiert/aktualisiert .claude/settings.json mit deny-Liste für CLAU_DISABLE_TOOLS
 apply_tool_blocking() {
   local disable_tools="${CLAU_DISABLE_TOOLS:-}"
-  if team_active && [[ ",${disable_tools// /}," == *",Agent,"* ]]; then
+  if team_on && [[ ",${disable_tools// /}," == *",Agent,"* ]]; then
     echo "Team-Modus: 'Agent' bleibt trotz CLAU_DISABLE_TOOLS erlaubt."
     disable_tools="$(echo ",${disable_tools// /}," | sed 's/,Agent,/,/g; s/^,//; s/,$//')"
   fi
@@ -2354,8 +2441,10 @@ effective_model() {
   if [[ -n "${CLI_MODEL_OVERRIDE:-}" ]]; then
     echo "$CLI_MODEL_OVERRIDE"
   elif team_active; then
-    # Team-Modus läuft immer über den lokalen Teamleiter
+    # Team-Set lokal läuft über den lokalen Teamleiter
     echo "owl:$(team_lead_model)"
+  elif team_on && [[ "$(team_set)" == "claude" ]]; then
+    team_lead_model
   elif [[ -n "${CLAU_MODEL:-}" ]]; then
     echo "$CLAU_MODEL"
   else
@@ -2368,6 +2457,9 @@ effective_model() {
 effective_backend() {
   if [[ -n "${CLI_BACKEND_OVERRIDE:-}" ]]; then
     echo "$CLI_BACKEND_OVERRIDE"
+  elif team_on; then
+    # Team braucht Claude Code als Teamleiter; Set qwen über den Token Plan
+    [[ "$(team_set)" == "qwen" ]] && echo "qwenplan" || echo "claude"
   else
     echo "${CLAU_BACKEND:-claude}"
   fi
@@ -2393,8 +2485,8 @@ show_current() {
   if is_owl_model "${CLAU_MODEL:-}"; then
     route="owlAPI Chat (${OWL_BASE_URL}, Modell $(owl_model_id "${CLAU_MODEL}"))"
   fi
-  if team_active; then
-    route="Team-Modus über owlAPI (${OWL_BASE_URL}, Teamleiter $(team_lead_model), Ausführer $(team_exec_model))"
+  if team_on; then
+    route="Team-Modus ($(team_set_label))"
   fi
   echo "Aktuelles Verzeichnis : $(pwd)"
   echo "Konfiguriertes Modell : $mdl"
@@ -2418,9 +2510,9 @@ show_current() {
   echo "Artifacts deaktiviert : ${CLAU_DISABLE_ARTIFACT:-0}"
   echo "Agent-View deaktiviert: ${CLAU_DISABLE_AGENT_VIEW:-0}"
   echo "Websuche (MCP)        : $([[ "${CLAU_WEBSEARCH:-1}" == "1" ]] && echo "an (depth=speed)" || echo "aus")"
-  if team_active; then
-    echo "Team-Modus            : AN (Teamleiter owl-$(team_lead_model), Ausführer owl-$(team_exec_model), max. $(_team_exec_slots) parallel / ${CLAU_TEAM_MAX_AGENTS:-5} Agenten, Subagenten: $(team_pi_active && echo pi || echo "Claude Code"))"
-    echo "Team-Status-URL       : ${CLAU_TEAM_STATUS_URL}"
+  if team_on; then
+    echo "Team-Modus            : AN ($(team_set_label), max. $(_team_exec_slots) parallel / ${CLAU_TEAM_MAX_AGENTS:-5} Agenten)"
+    team_active && echo "Team-Status-URL       : ${CLAU_TEAM_STATUS_URL}"
   else
     echo "Team-Modus            : aus"
   fi
@@ -2797,27 +2889,43 @@ choose_timeout_settings() {
 choose_team_settings() {
   while true; do
     echo
-    echo "Team-Modus:"
-    echo "  1) Team-Modus             : $(team_active && echo AN || echo aus)"
-    echo "  2) Teamleiter-Modell      : owl:$(team_lead_model)"
-    echo "  3) Ausführer-Modell       : owl:$(team_exec_model) (Slots: $(_team_exec_slots))"
-    echo "  4) Max. Agenten           : ${CLAU_TEAM_MAX_AGENTS:-5}"
-    echo "  5) Slot-Status-URL        : ${CLAU_TEAM_STATUS_URL}"
-    echo "  8) Subagenten             : ${CLAU_TEAM_SUBAGENTS:-pi}$([[ "${CLAU_TEAM_SUBAGENTS:-pi}" == "pi" ]] && ! _team_pi_bin >/dev/null && echo "  (pi nicht gefunden → claude)")"
+    echo "Team-Modus: ein Teamleiter (Claude Code) verteilt Teilaufträge an Subagenten."
+    echo "  1) Team-Modus             : $(team_on && echo AN || echo aus)"
+    echo "  2) Set                    : $(team_set_label)"
+    echo "       lokal  = owl:120 leitet, owl:121 führt aus (pi)"
+    echo "       qwen   = qwen3.8-max leitet, qwen3.8-flash führt aus (pi, Token Plan)"
+    echo "       claude = Opus leitet, Sonnet führt aus (Claude-Code-Agenten, Claude-Abo)"
+    echo "  3) Modelle dieses Sets    : Leitung $(team_lead_model), Ausführung $(team_exec_model)"
+    echo "  4) Max. Agenten           : ${CLAU_TEAM_MAX_AGENTS:-5}   (gleichzeitig: $(_team_exec_slots))"
+    if [[ "$(team_set)" == "lokal" ]]; then
+      echo "  5) Slot-Status-URL        : ${CLAU_TEAM_STATUS_URL}"
+      echo "  6) Subagenten             : ${CLAU_TEAM_SUBAGENTS:-pi}$([[ "${CLAU_TEAM_SUBAGENTS:-pi}" == "pi" ]] && ! _team_pi_bin >/dev/null && echo "  (pi nicht gefunden → Claude-Code-Agenten)")"
+    fi
     echo "  0) Zurück"
     printf "Auswahl: "
     local c v; read -r c
     case "$c" in
-      1) if team_active; then CLAU_TEAM=0; else CLAU_TEAM=1; fi ;;
-      2) printf "QuiteQue-ID Teamleiter [%s]: " "$(team_lead_model)"; read -r v; [[ -n "$v" ]] && CLAU_TEAM_LEAD_MODEL="${v#owl:}" ;;
-      3) printf "QuiteQue-ID Ausführer [%s]: " "$(team_exec_model)"; read -r v; [[ -n "$v" ]] && CLAU_TEAM_EXEC_MODEL="${v#owl:}"
-         if [[ "$(team_exec_model)" == "121" ]]; then
+      1) if team_on; then CLAU_TEAM=0; else CLAU_TEAM=1; fi ;;
+      2) printf "Set [lokal/qwen/claude] (aktuell %s): " "$(team_set)"; read -r v
+         case "$v" in lokal|qwen|claude) CLAU_TEAM_SET="$v" ;; "") ;; *) echo "Unbekanntes Set." ;; esac
+         [[ "$(team_set)" == "qwen" && ! -f "$QWENPLAN_KEY_FILE" ]] && qwenplan_set_key_interactive ;;
+      3) printf "Teamleiter-Modell [%s]: " "$(team_lead_model)"; read -r v
+         if [[ -n "$v" ]]; then
+           case "$(team_set)" in qwen) CLAU_TEAM_QWEN_LEAD="$v" ;; claude) CLAU_TEAM_CLAUDE_LEAD="$v" ;; *) CLAU_TEAM_LEAD_MODEL="${v#owl:}" ;; esac
+         fi
+         printf "Ausführer-Modell [%s]: " "$(team_exec_model)"; read -r v
+         if [[ -n "$v" ]]; then
+           case "$(team_set)" in qwen) CLAU_TEAM_QWEN_EXEC="$v" ;; claude) CLAU_TEAM_CLAUDE_EXEC="$v" ;; *) CLAU_TEAM_EXEC_MODEL="${v#owl:}" ;; esac
+         fi
+         if [[ "$(team_set)" == "lokal" && "$(team_exec_model)" == "121" ]]; then
            printf "Slots für 121 [%s]: " "${CLAU_TEAM_SLOTS_121:-3}"; read -r v
            [[ "$v" =~ ^[0-9]+$ ]] && CLAU_TEAM_SLOTS_121="$v"
          fi ;;
       4) printf "Max. Agenten [%s]: " "${CLAU_TEAM_MAX_AGENTS:-5}"; read -r v; [[ "$v" =~ ^[0-9]+$ ]] && CLAU_TEAM_MAX_AGENTS="$v" ;;
-      5) printf "Slot-Status-URL [%s]: " "$CLAU_TEAM_STATUS_URL"; read -r v; [[ -n "$v" ]] && CLAU_TEAM_STATUS_URL="$v" ;;
-      8) if [[ "${CLAU_TEAM_SUBAGENTS:-pi}" == "pi" ]]; then CLAU_TEAM_SUBAGENTS=claude; else CLAU_TEAM_SUBAGENTS=pi; fi ;;
+      5) [[ "$(team_set)" == "lokal" ]] && { printf "Slot-Status-URL [%s]: " "$CLAU_TEAM_STATUS_URL"; read -r v; [[ -n "$v" ]] && CLAU_TEAM_STATUS_URL="$v"; } ;;
+      6) if [[ "$(team_set)" == "lokal" ]]; then
+           if [[ "${CLAU_TEAM_SUBAGENTS:-pi}" == "pi" ]]; then CLAU_TEAM_SUBAGENTS=claude; else CLAU_TEAM_SUBAGENTS=pi; fi
+         fi ;;
       0|"") return 0 ;;
       *) echo "Ungültige Auswahl." ; continue ;;
     esac
@@ -3214,7 +3322,7 @@ run_qwenplan_session() {
   # Fernsteuerungs-Rollen (clau --api) sind Automation -- laut Token-Plan-AGB verboten.
   [[ -n "${CLAU_API_ROLE:-}${CLAU_API_SESSION_ID:-}" ]] && _qwenplan_refuse_headless
   local key; key="$(_qwenplan_key)" || exit 1
-  local model="${CLAU_QWEN_MODEL:-qwen3.8-max}"
+  local model; model="$(_qwen_model)"
   local fast="${CLAU_QWEN_FAST_MODEL:-qwen3.8-flash}"
   _have claude || { echo "claude nicht gefunden." >&2; exit 1; }
   echo "Prüfe Qwen Token Plan (Modell $model) ..."
@@ -3234,6 +3342,18 @@ run_qwenplan_session() {
   export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$qcw"
   CLAU_AUTO_COMPACT_WINDOW="${CLAU_QWEN_COMPACT_AT:-200000}" _apply_compact_window "$qcw" "$model"
 
+  # Team-Set qwen: pi-Subagenten (pi_team) bzw. Claude-Code-Agenten auf dem
+  # Ausführer-Modell, dazu die Team-Anweisung
+  local team_args=() mcp_json='{"mcpServers":{}}' sonnet="$model"
+  if team_on && [[ "$(team_set)" == "qwen" ]]; then
+    while IFS= read -r line; do team_args+=("$line"); done < <(_team_claude_args)
+    if team_pi_active; then
+      mcp_json="{\"mcpServers\":{\"pi_team\":$(_pi_team_server_json)}}"
+    else
+      sonnet="$(team_exec_model)"
+    fi
+    echo "Team qwen: $(team_lead_model) leitet, $(team_exec_model) führt aus ($(team_pi_active && echo "pi" || echo "Claude-Code-Agenten"), max. $(_team_exec_slots) parallel)"
+  fi
   local effort; effort="$(_qwenplan_effort "$model")"
   echo "Claude Code → Qwen Token Plan (Modell $model, schnell: $fast${effort:+, Effort: $effort}, Autonomie: $(interaction_label))"
   local extra; extra="$(_interaction_args)"
@@ -3252,13 +3372,12 @@ run_qwenplan_session() {
   ANTHROPIC_AUTH_TOKEN="$key" \
   ANTHROPIC_MODEL="$model" \
   ANTHROPIC_DEFAULT_OPUS_MODEL="$model" \
-  ANTHROPIC_DEFAULT_SONNET_MODEL="$model" \
+  ANTHROPIC_DEFAULT_SONNET_MODEL="$sonnet" \
   ANTHROPIC_DEFAULT_HAIKU_MODEL="$fast" \
   ANTHROPIC_SMALL_FAST_MODEL="$fast" \
-  CLAUDE_CODE_SUBAGENT_MODEL="$model" \
   CLAU_TG_SUPPRESS=1 \
   CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
-  exec claude --model "$model" --strict-mcp-config $extra "$@"
+  exec claude --model "$model" --strict-mcp-config --mcp-config "$mcp_json" $extra "${team_args[@]}" "$@"
 }
 
 # Effort-Stufe für ein Plan-Modell. Claude Code schickt die Stufe aus
@@ -4014,9 +4133,18 @@ PY
 }
 
 # Aktuelle Modellwahl als Kennung: opus | owl:120 | qwen:qwen3.8-max
+# Qwen-Modell der Session: im Team-Set qwen der Teamleiter
+_qwen_model() {
+  if team_on && [[ "$(team_set)" == "qwen" && -z "${CLI_QWEN_OVERRIDE:-}" ]]; then
+    team_lead_model
+  else
+    echo "${CLAU_QWEN_MODEL:-qwen3.8-max}"
+  fi
+}
+
 _current_model_spec() {
   if [[ "$(effective_backend)" == "qwenplan" ]]; then
-    echo "qwen:${CLAU_QWEN_MODEL:-qwen3.8-max}"
+    echo "qwen:$(_qwen_model)"
   else
     effective_model
   fi
@@ -4034,7 +4162,7 @@ _model_label() {
 # Stellt eine Modell-Kennung für diesen Aufruf ein (ohne .clau.conf zu ändern).
 _apply_model_spec() {
   case "${1:-}" in
-    qwen:*) CLI_BACKEND_OVERRIDE="qwenplan"; CLAU_QWEN_MODEL="${1#qwen:}" ;;
+    qwen:*) CLI_BACKEND_OVERRIDE="qwenplan"; CLAU_QWEN_MODEL="${1#qwen:}"; CLI_QWEN_OVERRIDE=1 ;;
     ""|owl:\?) return 1 ;;
     *) CLI_MODEL_OVERRIDE="$1"
        [[ "$(effective_backend)" == "qwenplan" ]] && CLI_BACKEND_OVERRIDE="claude"
@@ -4174,8 +4302,9 @@ run_resume_picker() {
   unset_token_saver_env
   apply_tg_hooks
   local extra; extra="$(_interaction_args)"
+  _team_cc_args_fill
   # shellcheck disable=SC2086
-  exec claude --resume --model "$(claude_cli_model "$mdl")" $extra
+  exec claude --resume --model "$(claude_cli_model "$mdl")" $extra "${TEAM_CC_ARGS[@]}"
 }
 
 run_saved_session() {
@@ -4204,8 +4333,9 @@ run_saved_session() {
   unset_token_saver_env
   apply_tg_hooks
   local extra; extra="$(_interaction_args)"
+  _team_cc_args_fill
   # shellcheck disable=SC2086
-  exec claude --resume "$CLAU_SESSION_ID" --model "$(claude_cli_model "$mdl")" $extra
+  exec claude --resume "$CLAU_SESSION_ID" --model "$(claude_cli_model "$mdl")" $extra "${TEAM_CC_ARGS[@]}"
 }
 
 run_new_session() {
@@ -4235,8 +4365,9 @@ run_new_session() {
   local api_args=()
   while IFS= read -r line; do api_args+=("$line"); done < <(_api_claude_args interactive)
   _api_prompt_args
+  _team_cc_args_fill
   # shellcheck disable=SC2086
-  exec claude --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}" "${NEW_SESSION_ARGS[@]}"
+  exec claude --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}" "${NEW_SESSION_ARGS[@]}" "${TEAM_CC_ARGS[@]}"
 }
 
 # Setzt eine konkrete Session-ID fort (z.B. nach custom-compact)
@@ -4271,8 +4402,9 @@ run_resume_id() {
   local api_args=()
   while IFS= read -r line; do api_args+=("$line"); done < <(_api_claude_args interactive)
   _api_prompt_args
+  _team_cc_args_fill
   # shellcheck disable=SC2086
-  exec claude --resume "$rid" --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}"
+  exec claude --resume "$rid" --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}" "${TEAM_CC_ARGS[@]}"
 }
 
 # Custom-Compact: komprimiert die aktuelle Session extern via QuiteQue (cc_compact.py)
@@ -4531,13 +4663,13 @@ interactive_start() {
   local mdl; mdl="$(effective_model)"
   local tag
   if [[ "$(effective_backend)" == "qwenplan" ]]; then
-    tag="Qwen:${CLAU_QWEN_MODEL}"
+    tag="Qwen:$(_qwen_model)"
   elif is_owl_model "$mdl"; then
     tag="owl:$(owl_model_id "$mdl")"
   else
     tag="Claude:$mdl"
   fi
-  team_active && tag+=", Team"
+  team_on && tag+=", Team $(team_set)"
 
   local recent=() l
   while IFS= read -r l; do recent+=("$l"); done < <(_here_sessions_scan | head -3)
@@ -4603,7 +4735,7 @@ choose_settings_menu() {
     echo "  1) CLI-Engine                : $(effective_backend)   (Claude Code / opencode / Qwen Token Plan)"
     echo "  2) Qwen-Token-Plan-Key       : $([[ -f "$QWENPLAN_KEY_FILE" ]] && echo "vom $(date -r "$QWENPLAN_KEY_FILE" '+%d.%m.%Y')" || echo "fehlt")"
     echo "  3) Bot-Einstellungen …       (Autonomie, sudo, Effort, Auto-Compact, Timeout)"
-    echo "  4) Team-Modus …              : $(team_active && echo "AN (Subagenten: $(team_pi_active && echo pi || echo "Claude Code"))" || echo aus)"
+    echo "  4) Team-Modus …              : $(team_on && echo "AN — $(team_set_label)" || echo aus)"
     echo "  5) Update von GitHub (self-update)"
     echo "  0) Zurück"
     printf "Auswahl [0-5]: "

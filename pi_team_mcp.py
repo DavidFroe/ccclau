@@ -28,6 +28,7 @@ Env:
   CLAU_TEAM_DIR           Ordner mit agents/*.md
   CLAU_TEAM_EXEC_MODEL    Default 121
   CLAU_TEAM_LEAD_MODEL    Default 120
+  CLAU_TEAM_PI_PROVIDER   pi-Provider: owl (QuiteQue, Default) oder qwen-token-plan-individual
   CLAU_TEAM_PI_SLOTS      z.B. "121=3,120=1" (Default: Ausführer 3, sonst 1)
   CLAU_TEAM_PI_TIMEOUT    Sekunden pro Auftrag, Default 1800
   CLAU_TEAM_LOG_DIR       Default ~/.cache/clau/team
@@ -44,6 +45,7 @@ PI_BIN = os.environ.get("CLAU_PI_BIN", "pi")
 TEAM_DIR = os.environ.get("CLAU_TEAM_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "team"))
 EXEC_MODEL = os.environ.get("CLAU_TEAM_EXEC_MODEL", "121")
 LEAD_MODEL = os.environ.get("CLAU_TEAM_LEAD_MODEL", "120")
+PROVIDER = os.environ.get("CLAU_TEAM_PI_PROVIDER", "owl")  # owl | qwen-token-plan-individual
 TIMEOUT = int(os.environ.get("CLAU_TEAM_PI_TIMEOUT", "1800") or 1800)
 LOG_DIR = os.environ.get("CLAU_TEAM_LOG_DIR",
                          os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "clau", "team"))
@@ -172,14 +174,14 @@ class Job:
             self.status = "läuft"
             self.t_start = time.time()
             cmd = [PI_BIN, "-p", "--no-session", "-ne", "-ns", "-np",
-                   "--model", f"owl/{self.model}",
+                   "--model", f"{PROVIDER}/{self.model}",
                    "--tools", ROLLEN[self.rolle]["tools"]]
             prompt = _rollen_prompt(self.rolle)
             if prompt:
                 cmd += ["--append-system-prompt", prompt]
             cmd += ["--", self.auftrag]
             env = dict(os.environ, PI_OFFLINE="1")
-            log(f"{self.id} ({self.rolle}, owl/{self.model}) startet")
+            log(f"{self.id} ({self.rolle}, {PROVIDER}/{self.model}) startet")
             try:
                 # stdin schließen: pi liest sonst im -p-Modus von stdin und hängt
                 p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True,
@@ -198,7 +200,7 @@ class Job:
         try:
             os.makedirs(LOG_DIR, exist_ok=True)
             with open(self._logfile(), "w", encoding="utf-8") as f:
-                f.write(f"# {self.id} {self.rolle} owl/{self.model} rc={self.rc} status={self.status}\n")
+                f.write(f"# {self.id} {self.rolle} {PROVIDER}/{self.model} rc={self.rc} status={self.status}\n")
                 f.write(f"## Auftrag\n{self.auftrag}\n\n## Ausgabe\n{self.ausgabe}\n")
         except OSError:
             pass
@@ -309,7 +311,7 @@ def _safe_handle(req):
 
 
 def main():
-    log(f"bereit: pi={PI_BIN}, Ausführer owl/{EXEC_MODEL}, Leitung owl/{LEAD_MODEL}, cwd={os.getcwd()}")
+    log(f"bereit: pi={PI_BIN}, Ausführer {PROVIDER}/{EXEC_MODEL}, Leitung {PROVIDER}/{LEAD_MODEL}, cwd={os.getcwd()}")
     for line in sys.stdin:
         line = line.strip()
         if not line:
