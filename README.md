@@ -90,7 +90,7 @@ daraus kommt auch das Kontext-Fenster für Auto-Compact.
 Claude Code direkt gegen Alibabas Anthropic-kompatiblen Token-Plan-Endpunkt, ohne Proxy.
 
 ```bash
-mkdir -p ~/.config/clau && (umask 077; cat > ~/.config/clau/qwenplan.key)   # Key einfügen, Strg-D
+clau --qwen-key                  # Key eintragen/erneuern (verdeckt, wird geprüft; auch Hauptmenü 13)
 clau --backend qwenplan          # oder Menü 3 → 5-14, oder: clau -m qwen:glm-5.3
 clau --qwen-model                # Modell wählen (Default qwen3.8-max, schnell qwen3.8-flash)
 ```

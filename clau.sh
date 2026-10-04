@@ -2250,6 +2250,7 @@ Headless-Optionen:
                                   "CLI-Engine wechseln"). qwenplan = Claude Code mit
                                   Alibaba Qwen Token Plan, nur interaktiv (AGB)
       --qwen-model [MODELL]       Modell für qwenplan setzen (ohne Wert: Auswahlmenü)
+      --qwen-key                  Qwen-Token-Plan-Key eintragen/erneuern (gilt einen Monat)
       --effort LEVEL              low | medium | high | max
       --max-turns N               Max. agentische Schritte
       --max-budget-usd USD        Kostenlimit
@@ -2527,7 +2528,8 @@ choose_model_interactive() {
       if [[ "$qi" -ge 1 && "$qi" -le "$nq" ]]; then
         CLAU_QWEN_MODEL="${QWENPLAN_MODELS[$((qi-1))]}"
         CLAU_BACKEND="qwenplan"
-        _qwenplan_key >/dev/null || echo "Ohne Key-Datei startet 'qwenplan' nicht." >&2
+        _qwenplan_key >/dev/null 2>&1 || qwenplan_set_key_interactive \
+          || echo "Ohne Key startet 'qwenplan' nicht — später: Menüpunkt 13 oder clau --qwen-key." >&2
         save_config
         echo "Engine: qwenplan, Qwen-Modell: $CLAU_QWEN_MODEL"
         return 0
@@ -2590,7 +2592,8 @@ choose_backend_interactive() {
       ;;
     3)
       CLAU_BACKEND="qwenplan"
-      _qwenplan_key >/dev/null || echo "Ohne Key-Datei startet 'qwenplan' nicht." >&2
+      _qwenplan_key >/dev/null 2>&1 || qwenplan_set_key_interactive \
+        || echo "Ohne Key startet 'qwenplan' nicht — später: Menüpunkt 13 oder clau --qwen-key." >&2
       choose_qwen_model_interactive
       ;;
     *) echo "Ungültige Auswahl."; return ;;
@@ -3094,8 +3097,47 @@ _qwenplan_key() {
     [[ -n "$k" ]] && { printf '%s' "$k"; return 0; }
   fi
   echo "Fehler: Kein Qwen-Token-Plan-Key gefunden." >&2
-  echo "  Ablegen mit:  mkdir -p ~/.config/clau && (umask 077; cat > $f)   # Key einfügen, Strg-D" >&2
+  echo "  Eintragen mit:  clau --qwen-key   (oder Hauptmenü Punkt 13)" >&2
   return 1
+}
+
+# Key eintragen/erneuern (der Token-Plan-Key gilt nur einen Monat). Liest
+# verdeckt ein, prüft kostenlos gegen /models (keine Credits) und speichert
+# mit chmod 600. Rückgabe 0, wenn danach ein Key gespeichert ist.
+# Eigene Rückfrage statt ask_yes_no: die sagt bei Autonomie-Level 0 automatisch
+# "ja" -- ein abgelehnter Key soll aber nie ungefragt den gültigen überschreiben.
+_qwenplan_confirm_save() {
+  printf "Trotzdem speichern? [j/N]: "
+  local a; read -r a
+  [[ "$a" =~ ^[jJyY] ]]
+}
+QWENPLAN_MODELS_URL="${QWENPLAN_MODELS_URL:-https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/models}"
+qwenplan_set_key_interactive() {
+  local f="$QWENPLAN_KEY_FILE"
+  echo
+  if [[ -f "$f" ]]; then
+    local old; old="$(tr -d '[:space:]' < "$f")"
+    echo "Aktueller Qwen-Token-Plan-Key: ${old:0:10}…  (eingetragen $(date -r "$f" '+%d.%m.%Y'))"
+  else
+    echo "Noch kein Qwen-Token-Plan-Key hinterlegt."
+  fi
+  printf "Neuen Key einfügen (Eingabe unsichtbar, Enter=abbrechen): "
+  local key; read -rs key; echo
+  key="$(printf '%s' "$key" | tr -d '[:space:]')"
+  [[ -n "$key" ]] || { echo "Abgebrochen."; [[ -f "$f" ]]; return; }
+  printf "Prüfe Key ... "
+  local http; http="$(curl -s -m 15 -o /dev/null -w '%{http_code}' "$QWENPLAN_MODELS_URL" \
+    -H "Authorization: Bearer ${key}" 2>/dev/null)"
+  case "$http" in
+    200) echo "gültig." ;;
+    401|403) echo "abgelehnt (HTTP $http)."
+             _qwenplan_confirm_save || { echo "Nicht gespeichert."; [[ -f "$f" ]]; return; } ;;
+    *)   echo "konnte nicht prüfen (HTTP ${http:-—}, Netz?)."
+         _qwenplan_confirm_save || { echo "Nicht gespeichert."; [[ -f "$f" ]]; return; } ;;
+  esac
+  mkdir -p "$(dirname "$f")" && chmod 700 "$(dirname "$f")" 2>/dev/null
+  ( umask 077; printf '%s\n' "$key" > "$f" ) && chmod 600 "$f"
+  echo "✓ Gespeichert: $f (chmod 600)"
 }
 
 # Kurzer Vorab-Request (max_tokens=1, ~60 Tokens): prüft Key, Modell und
@@ -4419,7 +4461,8 @@ interactive_start() {
   echo "  10) Alle Sessions (alle Projekte auf dieser Maschine)"
   echo "  11) Laufende Sessions (jetzt aktive, andere Terminals/Hintergrund)"
   echo "  12) Team-Modus / Fernsteuerung  [Team: $(team_active && echo AN || echo aus), API: $([[ "${CLAU_API:-0}" == "1" ]] && echo AN || echo aus)]"
-  printf "Auswahl [1-12, Enter=2]: "
+  echo "  13) Qwen-Token-Plan-Key eintragen/erneuern  [$([[ -f "$QWENPLAN_KEY_FILE" ]] && echo "vom $(date -r "$QWENPLAN_KEY_FILE" '+%d.%m.')" || echo "fehlt")]"
+  printf "Auswahl [1-13, Enter=2]: "
   read -r start_choice
 
   case "${start_choice:-2}" in
@@ -4469,6 +4512,7 @@ interactive_start() {
     10) choose_all_sessions ;;
     11) choose_all_sessions running ;;
     12) choose_team_settings; interactive_start ;;
+    13) qwenplan_set_key_interactive; interactive_start ;;
     *) echo "Ungültige Auswahl."; exit 1 ;;
   esac
 }
@@ -4676,6 +4720,10 @@ parse_args() {
         fi
         CLI_BACKEND_OVERRIDE="$2"
         shift 2
+        ;;
+      --qwen-key)
+        qwenplan_set_key_interactive
+        exit $?
         ;;
       --qwen-model)
         if [[ -z "${2:-}" || "$2" == -* ]]; then
