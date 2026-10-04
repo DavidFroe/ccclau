@@ -3290,6 +3290,7 @@ print(v)' 2>/dev/null)"
       esac ;;
     *) [[ -n "${CLAU_EFFORT:-}" ]] && echo "$CLAU_EFFORT" ;;
   esac
+  return 0   # sonst bricht der Aufrufer unter set -e ab, wenn nichts umzustellen ist
 }
 
 # Headless/Automation ist laut Token-Plan-AGB verboten.
