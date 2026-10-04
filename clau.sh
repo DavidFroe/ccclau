@@ -107,7 +107,7 @@ _owl_models_refresh() {
 }
 
 # Chat-taugliche Modelle als TSV: id status anbieter ctx preis name
-# Sortiert: lokal (propellera) → gratis → nach Eingabepreis. Ohne Bild/Audio/Suche.
+# Sortiert: lokal → gratis → nach Anbieter, darin nach Eingabepreis. Ohne Bild/Audio/Suche.
 _owl_models_tsv() {
   _owl_models_refresh "${1:-}" || return 1
   python3 - "$OWL_MODELS_CACHE" <<'PY'
@@ -123,7 +123,9 @@ for m in data:
     p = m.get("pricing") or {}
     free = bool(p.get("is_free"))
     price = "GRATIS" if free else "$%.2f/$%.2f" % (p.get("input_per_mtok", 0), p.get("output_per_mtok", 0))
-    grp = 0 if m.get("owned_by") == "propellera" else (1 if free else 2)
+    order = {"alibaba": 2, "openrouter": 3, "deepseek": 4, "xai": 5, "claude": 6, "anthropic": 6}
+    own = m.get("owned_by")
+    grp = 0 if own == "propellera" else (1 if free else order.get(own, 7))
     rows.append((grp, p.get("input_per_mtok", 0) or 0, str(m["numerical_id"]), st,
                  m.get("owned_by", ""), str(ctx), price, (m.get("name") or "").replace("\t", " ")))
 rows.sort(key=lambda r: (r[0], r[1]))
@@ -1914,7 +1916,7 @@ Git-Helfer (Repo aus GitHub via SSH):
 
 Model-Mappings:
   Claude Code (agentisch):  1=haiku(4.5)  2=sonnet(5)  3=opus(5.5)  4=fable(5)
-  owlAPI (für --model N):   5=owl:120  6=owl:121  0=owl:free
+  owlAPI (für --model N):   5=owl:120 (Q27B)  6=owl:121 (Flash-Next)  7=owl:126 (Flash-Next 262k)  0=owl:free
   owlAPI direkt:            -m owl:350  oder  -m 350   (interaktiv: Live-Liste der owlAPI)
   Qwen Token Plan:          -m qwen:qwen3.8-max  (setzt Engine qwenplan für diesen Aufruf)
 
@@ -1946,10 +1948,11 @@ model_from_number() {
     3) CLAU_MODEL="opus" ;;
     4) CLAU_MODEL="fable" ;;     # Claude Fable 5
     5) CLAU_MODEL="owl:120" ;;   # PropellerA lokal
-    6) CLAU_MODEL="owl:121" ;;   # Qwen3.8-Flash-Next lokal
+    6) CLAU_MODEL="owl:121" ;;   # Qwen3.8-Flash-Next lokal (97k)
+    7) CLAU_MODEL="owl:126" ;;   # Qwen3.8-Flash-Next lokal (262k, 1 Session)
     0) CLAU_MODEL="owl:free" ;;  # free Router gratis
     *)
-      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5/6/0=owlAPI, sonst -m owl:<ID>)" >&2
+      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5/6/7/0=owlAPI, sonst -m owl:<ID>)" >&2
       exit 1
       ;;
   esac
@@ -2059,44 +2062,101 @@ show_current() {
   echo "Timeout Max            : $(( CLAU_TIMEOUT_MAX / 60000 )) Min (${CLAU_TIMEOUT_MAX} ms)"
 }
 
+# Gibt Zellen spaltenweise aus (füllt Spalte für Spalte, Breite nach Terminal).
+# $1 = Zellenbreite, Rest = Zellen
+_print_cols() {
+  local w="$1"; shift
+  local n=$# tw="${COLUMNS:-}"
+  [[ -n "$tw" ]] || tw="$(tput cols 2>/dev/null || echo 120)"
+  local cols=$(( (tw - 2) / w )); [[ "$cols" -ge 1 ]] || cols=1
+  local rows=$(( (n + cols - 1) / cols ))
+  local cells=("$@") r c i line
+  for ((r = 0; r < rows; r++)); do
+    line=""
+    for ((c = 0; c < cols; c++)); do
+      i=$(( c * rows + r ))
+      [[ "$i" -lt "$n" ]] || continue
+      line+="$(printf "%-${w}s" "${cells[$i]}")"
+    done
+    echo "  ${line%"${line##*[![:space:]]}"}"
+  done
+}
+
+# Feste Presets (auch ohne owlAPI-Verbindung): Taste → owl-ID
+declare -gA OWL_PRESETS=( ["5"]="120" ["6"]="121" ["7"]="126" ["0"]="free" )
+
 choose_model_interactive() {
   local nq=${#QWENPLAN_MODELS[@]}
-  local last=$((4 + nq))
+  # owlAPI-Liste (gecacht, 3 s Timeout), ohne Presets und ohne Kleinst-Kontext
+  local rows=() line id st own ctx price name
+  while IFS= read -r line; do
+    IFS=$'\t' read -r id st own ctx price name <<< "$line"
+    [[ "$id" == "120" || "$id" == "121" || "$id" == "126" || "$id" == "free" ]] && continue
+    [[ "$ctx" -ge 64000 ]] || continue
+    rows+=("$line")
+  done < <(_owl_models_tsv 2>/dev/null)
+
   while true; do
     echo
     echo "Modell wählen:"
     echo "  --- Claude Code mit Claude-Abo ---"
-    echo "  1) haiku              Haiku 4.5   schnell, günstig"
-    echo "  2) sonnet             Sonnet 5    Standard         [Enter]"
-    echo "  3) opus               Opus 5.5    stärker, teurer"
-    echo "  4) fable              Fable 5     stärkstes Modell"
-    echo "  --- Claude Code mit Qwen Token Plan (Alibaba-Abo, nur interaktiv) ---"
-    local i=5 m
-    for m in "${QWENPLAN_MODELS[@]}"; do
-      printf "  %2d) %-19s %s\n" "$i" "$m" "$(_qwenplan_model_desc "$m")"
-      ((i++))
-    done
-    echo "  --- owlAPI / QuiteQue (live von ${OWL_BASE_URL}) ---"
-    echo "   w) owlAPI-Modell aus der Live-Liste wählen"
-    echo "   o) owlAPI-ID direkt eingeben"
-    printf "Auswahl [1-%d, w, o, Enter=2]: " "$last"
+    _print_cols 38 "1) haiku   Haiku 4.5" "2) sonnet  Sonnet 5  [Enter]" "3) opus    Opus 5.5" "4) fable   Fable 5"
+    echo "  --- Presets: lokal (PropellerA) + QuiteQue Free-Plan, via owlAPI ---"
+    _print_cols 38 "5) Q27B         owl:120  94k" "6) Flash-Next   owl:121  97k" \
+                   "7) Flash-Next   owl:126  262k" "0) Free-Plan    owl:free (Router)"
+    echo "  --- Qwen Token Plan (Alibaba-Abo, nur interaktiv) ---"
+    local cells=() i=1 m
+    for m in "${QWENPLAN_MODELS[@]}"; do cells+=("q${i}) ${m}"); ((i++)); done
+    _print_cols 26 "${cells[@]}"
+    if [[ "${#rows[@]}" -gt 0 ]]; then
+      echo "  --- owlAPI live (${OWL_BASE_URL}) · Auswahl per ID · Preis \$/MTok ein/aus ---"
+      local grp prev="" ctxs short
+      cells=()
+      for line in "${rows[@]}"; do
+        IFS=$'\t' read -r id st own ctx price name <<< "$line"
+        case "$own" in
+          openrouter) grp="OpenRouter" ;; alibaba) grp="Alibaba" ;; xai) grp="xAI" ;;
+          deepseek) grp="DeepSeek" ;; claude|anthropic) grp="Claude" ;;
+          *) [[ "$price" == "GRATIS" ]] && grp="gratis" || grp="$own" ;;
+        esac
+        if [[ "$grp" != "$prev" ]]; then
+          [[ "${#cells[@]}" -gt 0 ]] && _print_cols 47 "${cells[@]}"
+          echo "  · $grp"
+          cells=(); prev="$grp"
+        fi
+        if [[ "$ctx" -ge 1000000 ]]; then ctxs="$((ctx / 1000000))M"; else ctxs="$((ctx / 1000))k"; fi
+        short="${name%% (*}"; short="${short#Anthropic }"; short="${short#Google }"; short="${short#OpenAI }"
+        price="${price//\$/}"; [[ "$price" == "GRATIS" ]] && price="gratis"
+        short="${short#Meta }"; short="${short#MoonshotAI }"
+        cells+=("$(printf '%4s %-23.23s %4s %s' "$id" "$short" "$ctxs" "$price")")
+      done
+      [[ "${#cells[@]}" -gt 0 ]] && _print_cols 47 "${cells[@]}"
+    else
+      echo "  (owlAPI nicht erreichbar — Liste fehlt, Presets und 'o' gehen trotzdem)"
+    fi
+    echo "  o) owlAPI-ID direkt eingeben"
+    printf "Auswahl [1-7, 0, q1-q%d, owl-ID, o, Enter=2]: " "$nq"
     local choice; read -r choice
     choice="${choice:-2}"
 
-    if [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 5 && "$choice" -le "$last" ]]; then
-      CLAU_QWEN_MODEL="${QWENPLAN_MODELS[$((choice-5))]}"
-      CLAU_BACKEND="qwenplan"
-      _qwenplan_key >/dev/null || echo "Ohne Key-Datei startet 'qwenplan' nicht." >&2
-      save_config
-      echo "Engine: qwenplan, Qwen-Modell: $CLAU_QWEN_MODEL"
-      return 0
+    if [[ "$choice" =~ ^[qQ]([0-9]+)$ ]]; then
+      local qi="${BASH_REMATCH[1]}"
+      if [[ "$qi" -ge 1 && "$qi" -le "$nq" ]]; then
+        CLAU_QWEN_MODEL="${QWENPLAN_MODELS[$((qi-1))]}"
+        CLAU_BACKEND="qwenplan"
+        _qwenplan_key >/dev/null || echo "Ohne Key-Datei startet 'qwenplan' nicht." >&2
+        save_config
+        echo "Engine: qwenplan, Qwen-Modell: $CLAU_QWEN_MODEL"
+        return 0
+      fi
+      echo "Ungültige Auswahl."; continue
     fi
     case "$choice" in
       1) CLAU_MODEL="haiku"; break ;;
       2) CLAU_MODEL="sonnet"; break ;;
       3) CLAU_MODEL="opus"; break ;;
       4) CLAU_MODEL="fable"; break ;;
-      w|W) choose_owl_model_live && break ;;
+      5|6|7|0) CLAU_MODEL="owl:${OWL_PRESETS[$choice]}"; break ;;
       o|O)
         printf "owlAPI-Modell-ID: "
         local tmp_id; read -r tmp_id
@@ -2106,7 +2166,14 @@ choose_model_interactive() {
         fi
         echo "Abgebrochen."
         ;;
-      *) echo "Ungültige Auswahl." ;;
+      *)
+        local hit=""
+        for line in "${rows[@]}"; do
+          [[ "${line%%$'\t'*}" == "$choice" ]] && { hit="$choice"; break; }
+        done
+        if [[ -n "$hit" ]]; then CLAU_MODEL="owl:${hit}"; break; fi
+        echo "Ungültige Auswahl."
+        ;;
     esac
   done
 
@@ -2117,42 +2184,6 @@ choose_model_interactive() {
   apply_timeout_for_model "$CLAU_MODEL"
   save_config
   echo "Modell: $CLAU_MODEL"
-}
-
-# Live-Liste der owlAPI (lokal → gratis → nach Preis). Setzt CLAU_MODEL.
-# Rückgabe 1 bei Abbruch.
-choose_owl_model_live() {
-  local rows=()
-  while IFS= read -r line; do rows+=("$line"); done < <(_owl_models_tsv force)
-  if [[ "${#rows[@]}" -eq 0 ]]; then
-    echo "owlAPI nicht erreichbar und kein Cache vorhanden (${OWL_BASE_URL})." >&2
-    return 1
-  fi
-  local stamp; stamp="$(date -r "$OWL_MODELS_CACHE" '+%d.%m. %H:%M' 2>/dev/null)"
-  echo
-  echo "owlAPI-Modelle (Stand ${stamp}, Preis \$/MTok ein/aus):"
-  local i=1 r id st own ctx price name grp prev_grp="" ctxs
-  for r in "${rows[@]}"; do
-    IFS=$'\t' read -r id st own ctx price name <<< "$r"
-    if [[ "$own" == "propellera" ]]; then grp="lokal"
-    elif [[ "$price" == "GRATIS" ]]; then grp="gratis"
-    else grp="kostenpflichtig"; fi
-    [[ "$grp" != "$prev_grp" ]] && { echo "  --- $grp ---"; prev_grp="$grp"; }
-    if [[ "$ctx" -ge 1000000 ]]; then ctxs="$((ctx / 1000000))M"; else ctxs="$((ctx / 1000))k"; fi
-    printf "  %3d) %-5s %-5s %-13s %s%s\n" "$i" "$id" "$ctxs" "$price" "${name:0:58}" \
-      "$([[ "$st" != "OK" ]] && echo "  [$st]")"
-    ((i++))
-  done
-  printf "Auswahl [1-%d, Enter=Abbrechen]: " "${#rows[@]}"
-  local sel; read -r sel
-  if [[ "$sel" =~ ^[0-9]+$ && "$sel" -ge 1 && "$sel" -le "${#rows[@]}" ]]; then
-    IFS=$'\t' read -r id st own ctx price name <<< "${rows[$((sel-1))]}"
-    [[ "$st" != "OK" ]] && echo "Hinweis: Modell $id meldet gerade Status $st."
-    CLAU_MODEL="owl:${id}"
-    return 0
-  fi
-  echo "Abgebrochen."
-  return 1
 }
 
 choose_backend_interactive() {

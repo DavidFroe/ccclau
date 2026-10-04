@@ -73,8 +73,10 @@ clau --git-down               # Pull von origin
 | Taste | Engine | Modell |
 |-------|--------|--------|
 | 1-4 | Claude Code + Claude-Abo | haiku (4.5) / sonnet (5) / opus (5.5) / fable (5) |
-| 5-14 | Claude Code + Qwen Token Plan | qwen3.8-max (Standard), qwen3.8-flash, … glm-5.2, auto |
-| w | Claude Code + owlAPI | Live-Liste von `/v1/models` (lokal → gratis → nach Preis, mit Status) |
+| 5 / 6 / 7 | Claude Code + owlAPI (Preset) | Q27B `owl:120` / Flash-Next `owl:121` (97k) / Flash-Next `owl:126` (262k) |
+| 0 | Claude Code + owlAPI (Preset) | QuiteQue Free-Plan `owl:free` (Router) |
+| q1-q10 | Claude Code + Qwen Token Plan | qwen3.8-max (Standard), qwen3.8-flash, … glm-5.2, auto |
+| owl-ID (z.B. `350`) | Claude Code + owlAPI | alle übrigen Modelle, live aus `/v1/models`, in Spalten nach Anbieter |
 | o | Claude Code + owlAPI | ID direkt eingeben |
 
 Die owlAPI-Liste wird live abgefragt und in `~/.cache/clau/owl_models.json` gecacht (1 h);
