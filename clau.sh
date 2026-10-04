@@ -3263,21 +3263,58 @@ uninstall_self() {
   fi
 }
 
+# Bügelt den Stand von GitHub über die installierte Kopie -- auch wenn dort
+# lokal etwas geändert ist (git pull --rebase brach dann früher ab). Nichts
+# geht verloren: lokale Commits landen in einem Branch backup/self-update-*,
+# geänderte Dateien im git stash, die eigene .clau.conf bleibt erhalten.
 self_update() {
   local script_path repo_dir
   script_path="$(readlink -f "$0")"
   repo_dir="$(dirname "$script_path")"
+  local g=(git -C "$repo_dir")
 
-  if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if ! "${g[@]}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "Das clau-Verzeichnis ($repo_dir) ist kein Git-Repository." >&2
     exit 1
   fi
 
-  echo "Aktualisiere clau aus $(git -C "$repo_dir" remote get-url origin 2>/dev/null || echo 'origin') ..."
-  git -C "$repo_dir" pull --rebase
+  local branch; branch="$("${g[@]}" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  [[ -z "$branch" || "$branch" == "HEAD" ]] && branch="main"
+  echo "Hole $branch von $("${g[@]}" remote get-url origin 2>/dev/null || echo origin) ..."
+  if ! "${g[@]}" fetch -q origin "$branch"; then
+    echo "Fehler: git fetch fehlgeschlagen (Netz/Zugang?)." >&2
+    exit 1
+  fi
 
+  local old new stamp; old="$("${g[@]}" rev-parse --short HEAD)"; new="$("${g[@]}" rev-parse --short "origin/$branch")"
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  if [[ "$("${g[@]}" rev-parse HEAD)" == "$("${g[@]}" rev-parse "origin/$branch")" ]] \
+     && [[ -z "$("${g[@]}" status --porcelain --untracked-files=no)" ]]; then
+    echo "clau ist schon aktuell ($new)."
+    return 0
+  fi
+
+  local conf_bak=""
+  if [[ -f "$repo_dir/.clau.conf" ]]; then
+    conf_bak="$(mktemp)"; cp -p "$repo_dir/.clau.conf" "$conf_bak"
+  fi
+  local ahead; ahead="$("${g[@]}" rev-list --count "origin/$branch..HEAD" 2>/dev/null || echo 0)"
+  if [[ "$ahead" -gt 0 ]]; then
+    "${g[@]}" branch -q "backup/self-update-$stamp" HEAD
+    echo "  $ahead lokale(r) Commit(s) gesichert in Branch backup/self-update-$stamp"
+  fi
+  if [[ -n "$("${g[@]}" status --porcelain --untracked-files=no)" ]]; then
+    "${g[@]}" stash push -q -m "clau self-update $stamp" && \
+      echo "  Lokale Änderungen gesichert: git -C $repo_dir stash list"
+  fi
+
+  "${g[@]}" reset -q --hard "origin/$branch"
+  if [[ -n "$conf_bak" ]]; then
+    cp -p "$conf_bak" "$repo_dir/.clau.conf"; rm -f "$conf_bak"
+  fi
   chmod +x "$script_path"
-  echo "clau wurde aktualisiert."
+  echo "clau aktualisiert: $old → $new"
+  "${g[@]}" log --oneline "$old..$new" 2>/dev/null | head -15 | sed 's/^/  /'
 
   # Symlink neu setzen falls vorhanden
   local target_path="${INSTALL_DIR}/${INSTALL_NAME}"
