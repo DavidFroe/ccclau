@@ -13,7 +13,7 @@ import sys
 import time
 import uuid
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 import requests
 
@@ -115,7 +115,7 @@ _CTX_ERR_RE = re.compile(
     r"prompt is too long|input is too long|reduce the length", re.I)
 
 
-def _ctx_overflow_message(body_text, est_input_tokens):
+def _ctx_overflow_message(body_text, est_input_tokens, ctx_limit=0):
     """Liefert eine Fehlermeldung im Anthropic-Format ("prompt is too long:
     N tokens > M maximum"), wenn body_text einen Kontext-Überlauf meldet --
     sonst None. Nur auf genau diese Form reagiert Claude Code mit seiner
@@ -123,7 +123,7 @@ def _ctx_overflow_message(body_text, est_input_tokens):
     if not _CTX_ERR_RE.search(body_text or ""):
         return None
     nums = [int(n) for n in re.findall(r"(\d{4,7})\s*tokens?", body_text or "")]
-    limit = OWL_CTX_LIMIT or (min(nums) if nums else 0)
+    limit = ctx_limit or (min(nums) if nums else 0)
     actual = max([est_input_tokens] + [n for n in nums if n > limit]) if limit else est_input_tokens
     if not limit:
         limit = max(1, int(actual * 0.9))
@@ -138,6 +138,72 @@ REQUEST_TIMEOUT = int(os.environ.get("OWL_PROXY_TIMEOUT", "600"))
 # Backends liefern oft minutenlang kein einziges Byte, bevor das erste Token
 # kommt — ohne Keep-Alive hält claude CLI die Verbindung dann für tot.
 HEARTBEAT_INTERVAL = float(os.environ.get("OWL_PROXY_HEARTBEAT", "15"))
+
+# ── Modell-Routing + Slot-Sperre (Team-Modus) ─────────────────────────────────
+# Angefragter Modellname "owl-<ID>" → QuiteQue-Modell <ID>; alles andere
+# (z.B. "claude-sonnet-4-6" aus dem Normalbetrieb) → OWL_MODEL wie bisher.
+# Damit landen Subagenten mit eigenem Modell (ANTHROPIC_DEFAULT_SONNET_MODEL=
+# owl-121) auf einem anderen Backend-Modell als das Frontend.
+def resolve_model(requested):
+    if isinstance(requested, str):
+        requested = re.sub(r"\[[^\]]*\]$", "", requested)  # z.B. "[1m]"-Suffix von Claude Code
+    if isinstance(requested, str) and requested.startswith("owl-") and len(requested) > 4:
+        return requested[4:]
+    return OWL_MODEL
+
+
+# OWL_SLOT_LIMITS="121=3,126=1": höchstens so viele gleichzeitige Anfragen pro
+# Zielmodell, der Rest wartet hier im Proxy (mit SSE-Pings, damit claude CLI
+# nicht abbricht). Gilt nur innerhalb DIESES Proxy-Prozesses -- mehrere clau-
+# Instanzen teilen sich keine Sperre, die Verteil-Entscheidung trifft der
+# Teamleiter deshalb anhand von /slots (llm_status), das hier ist nur Schutz.
+def _parse_slot_limits(spec):
+    out = {}
+    for part in (spec or "").split(","):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        try:
+            n = int(v.strip())
+        except ValueError:
+            continue
+        if k.strip() and n > 0:
+            out[k.strip()] = threading.BoundedSemaphore(n)
+    return out
+
+
+# OWL_ROUTES="120=http://127.0.0.1:8292/v1,121=http://127.0.0.1:8293/v1#qwen3.8-flash-next":
+# einzelne Zielmodelle direkt an einen OpenAI-kompatiblen Server statt über
+# QuiteQue (OWL_BASE) -- für Umgebungen ohne QuiteQue/Internet. Hinter "#"
+# optional der Modellname, den dieser Server erwartet. Leer = alles über OWL_BASE.
+def _parse_routes(spec):
+    out = {}
+    for part in (spec or "").split(","):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        url, _, name = v.strip().partition("#")
+        if k.strip() and url:
+            out[k.strip()] = (url.rstrip("/"), name.strip() or None)
+    return out
+
+
+ROUTES = _parse_routes(os.environ.get("OWL_ROUTES", ""))
+
+
+def backend_for(target):
+    """(Basis-URL, Modellname fürs Backend) für ein Zielmodell."""
+    url, name = ROUTES.get(target, (OWL_BASE, None))
+    return url, name or target
+
+
+SLOT_LIMITS_SPEC = os.environ.get("OWL_SLOT_LIMITS", "")
+SLOT_SEMS = _parse_slot_limits(SLOT_LIMITS_SPEC)
+SLOT_WAIT_MAX = float(os.environ.get("OWL_SLOT_WAIT_MAX", str(REQUEST_TIMEOUT)))
+# Parallele Client-Requests: im Normalbetrieb bleibt der Proxy single-threaded
+# (bisheriges Verhalten), im Team-Modus müssen mehrere Agenten gleichzeitig
+# durch -- sonst stünden sie hier hintereinander an.
+THREADED = os.environ.get("OWL_PROXY_THREADED", "0") == "1"
 # ── Format-Konvertierung ───────────────────────────────────────────────────────
 
 def content_to_str(content):
@@ -168,6 +234,16 @@ def messages_ant_to_oai(messages, system=None):
     for msg in messages:
         role = msg["role"]
         content = msg["content"]
+
+        # Claude Code schickt (z.B. mit aktivem Agent-Tool) zusätzliche
+        # role=system-Nachrichten MITTEN im Verlauf (Umgebung, Agent-Typen).
+        # Qwen-Chat-Templates werfen dann "System message must be at the
+        # beginning" (Backend-502). Als User-Hinweis weitergeben statt in den
+        # System-Prompt mischen -- so bleibt der Prefix-Cache stabil.
+        if role == "system":
+            result.append({"role": "user", "content":
+                           "<system-reminder>\n" + content_to_str(content) + "\n</system-reminder>"})
+            continue
 
         if isinstance(content, str):
             result.append({"role": role, "content": content})
@@ -273,8 +349,9 @@ def oai_resp_to_ant(oai_resp, model_name, est_input_tokens=0):
 # ── Streaming-Übersetzer ───────────────────────────────────────────────────────
 
 class StreamTranslator:
-    def __init__(self, model_name, input_tokens=0):
+    def __init__(self, model_name, input_tokens=0, target_model=None):
         self.model = model_name
+        self.target = target_model or OWL_MODEL
         # Schätzung bis das Backend echte prompt_tokens liefert (kommt erst
         # im letzten Chunk, message_start braucht den Wert aber sofort).
         self.input_tokens = input_tokens
@@ -412,15 +489,15 @@ class StreamTranslator:
                 self.next_index += 1
                 if finish_reason == "length" and self.thinking_started:
                     fallback_text = (
-                        f"[Modell {OWL_MODEL} hat das Token-Limit erreicht, während es noch "
+                        f"[Modell {self.target} hat das Token-Limit erreicht, während es noch "
                         f"nachgedacht hat, und keinen Antworttext geschrieben — kein Inhaltsfilter. "
                         f"Anfrage evtl. aufteilen/vereinfachen, oder max_tokens erhöhen.]"
                     )
                 elif finish_reason == "length":
-                    fallback_text = f"[Modell {OWL_MODEL} hat das Token-Limit erreicht, ohne Text zu schreiben.]"
+                    fallback_text = f"[Modell {self.target} hat das Token-Limit erreicht, ohne Text zu schreiben.]"
                 else:
                     fallback_text = (
-                        f"[Modell {OWL_MODEL} hat leere Antwort zurückgegeben — möglicherweise "
+                        f"[Modell {self.target} hat leere Antwort zurückgegeben — möglicherweise "
                         f"Inhaltsfilter. Bitte Anfrage umformulieren.]"
                     )
                 out.append(self._evt("content_block_start", {
@@ -501,7 +578,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if "/health" in self.path:
-            self._json(200, {"status": "ok", "proxy": "owl_proxy", "model": OWL_MODEL})
+            self._json(200, {"status": "ok", "proxy": "owl_proxy", "model": OWL_MODEL,
+                             "slot_limits": SLOT_LIMITS_SPEC, "threaded": THREADED})
         else:
             self.send_response(200)
             self.end_headers()
@@ -528,10 +606,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _handle(self, req):
         model_name = req.get("model", "claude-sonnet-4-6")
+        target = resolve_model(model_name)
         stream = req.get("stream", False)
 
+        base, backend_model = backend_for(target)
         oai_payload = {
-            "model": OWL_MODEL,
+            "model": backend_model,
             "messages": messages_ant_to_oai(req.get("messages", []), req.get("system")),
             "stream": stream,
             "temperature": req.get("temperature", 0.3),
@@ -547,12 +627,52 @@ class ProxyHandler(BaseHTTPRequestHandler):
         n_msgs = len(oai_payload["messages"])
         est_input_tokens = _estimate_input_tokens(oai_payload)
         _dump_debug_payload(oai_payload)
-        t0 = time.monotonic()
         roles_summary = ", ".join(
             f"{m.get('role','?')}({len(str(m.get('content') or ''))}c)"
             for m in oai_payload["messages"]
         )
-        log(f"→ POST {OWL_BASE}/chat/completions model={OWL_MODEL} stream={stream} messages={n_msgs} [{roles_summary}]")
+        requested = ""
+        if str(model_name).startswith("owl-") or SLOT_SEMS:
+            requested = f" (angefragt: {model_name})"
+
+        # Slot-Sperre: sind alle Slots des Zielmodells in diesem Proxy belegt,
+        # hier warten. Bei Streams schon jetzt den SSE-Kopf schicken und pingen,
+        # sonst hält claude CLI die stumme Verbindung für tot. Ist sofort ein
+        # Slot frei, ändert sich am Ablauf nichts.
+        sem = SLOT_SEMS.get(target)
+        sse = None
+        if sem is not None and not sem.acquire(blocking=False):
+            t_wait = time.monotonic()
+            log(f"⏳ Slot-Sperre model={target}: alle Slots belegt, Anfrage wartet{requested}")
+            if stream:
+                sse = self._sse_open(model_name, est_input_tokens, target)
+            got = False
+            while time.monotonic() - t_wait < SLOT_WAIT_MAX:
+                if sem.acquire(timeout=1.0):
+                    got = True
+                    break
+                if sse is not None and sse["dead"].is_set():
+                    break
+            if not got:
+                if sse is not None and sse["dead"].is_set():
+                    log(f"  Client trennte Verbindung während des Wartens auf Slot ({time.monotonic()-t_wait:.1f}s)")
+                    sse["stop"].set()
+                    return
+                log(f"✗ Slot-Sperre model={target}: nach {SLOT_WAIT_MAX:.0f}s kein Slot frei")
+                self._fail(503, f"owl_proxy: kein freier Slot für Modell {target} nach {SLOT_WAIT_MAX:.0f}s", sse)
+                return
+            log(f"  Slot für model={target} frei nach {time.monotonic()-t_wait:.1f}s Wartezeit")
+        try:
+            log(f"→ POST {base}/chat/completions model={target}{requested} stream={stream} messages={n_msgs} [{roles_summary}]")
+            self._forward(oai_payload, model_name, target, stream, est_input_tokens, sse, base)
+        finally:
+            if sem is not None:
+                sem.release()
+            if sse is not None:
+                sse["stop"].set()
+
+    def _forward(self, oai_payload, model_name, target, stream, est_input_tokens, sse, base=OWL_BASE):
+        t0 = time.monotonic()
         try:
             # Bei 429/503 (Überlast bzw. owlAPIs Liveness-Probe-Fenster nach
             # einem verpassten TCP-Connect) genau einmal mit Backoff neu
@@ -563,7 +683,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             resp = None
             for attempt in range(2):
                 resp = requests.post(
-                    f"{OWL_BASE}/chat/completions",
+                    f"{base}/chat/completions",
                     json=oai_payload,
                     headers={
                         "Content-Type": "application/json",
@@ -597,7 +717,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # für einen transienten Serverfehler und wiederholt ihn sinnlos.
             status = e.response.status_code if e.response is not None else 502
             body_text = (e.response.text or "")[:2000] if e.response is not None else str(e)
-            log(f"✗ Backend HTTP {status} nach {time.monotonic()-t0:.1f}s: {body_text!r}")
+            log(f"✗ Backend HTTP {status} (model={target}) nach {time.monotonic()-t0:.1f}s: {body_text!r}")
             if 400 <= status < 500:
                 dump_path = _dump_request_payload(oai_payload)
                 if dump_path:
@@ -607,30 +727,42 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # Sessions: der Prompt überschreitet das Modell-Context-Window.
             # Dann den User direkt auf clau --compact hinweisen statt ihn
             # raten zu lassen.
-            ctx_msg = _ctx_overflow_message(body_text, est_input_tokens)
+            # OWL_CTX_LIMIT gilt fürs Hauptmodell; bei umgeleiteten Zielen
+            # (Team-Modus) zählen die Zahlen aus der Fehlermeldung.
+            ctx_msg = _ctx_overflow_message(
+                body_text, est_input_tokens,
+                OWL_CTX_LIMIT if str(target) == str(OWL_MODEL) else 0)
             if ctx_msg:
                 log(f"  → als Kontext-Überlauf an Claude Code gemeldet: {ctx_msg[:120]}")
-                self._error_json(400, ctx_msg)
+                self._fail(400, ctx_msg, sse)
                 return
             msg = f"owlAPI backend {status}: {body_text}"
             if status == 400 and est_input_tokens > 60000:
                 msg += ("  [Kontext-Window des Modells wahrscheinlich überschritten — "
                         "Session ist zu groß. Beende die Session und starte "
                         "`clau --compact`, um sie zu komprimieren und fortzusetzen.]")
-            self._error_json(status, msg)
+            self._fail(status, msg, sse)
             return
         except requests.exceptions.RequestException as e:
             # Kein HTTP-Response da (Verbindungsabbruch, Timeout, ...) — das ist
             # tatsächlich transient, 502 bleibt hier angemessen.
-            log(f"✗ Request-Fehler nach {time.monotonic()-t0:.1f}s: {e!r}")
-            self._error_json(502, f"owlAPI error: {e}")
+            log(f"✗ Request-Fehler (model={target}) nach {time.monotonic()-t0:.1f}s: {e!r}")
+            self._fail(502, f"owlAPI error: {e}", sse)
             return
-        log(f"← Header nach {time.monotonic()-t0:.1f}s, status={resp.status_code}")
+        log(f"← Header nach {time.monotonic()-t0:.1f}s, status={resp.status_code}, model={target}")
 
         if stream:
-            self._stream(resp, model_name, est_input_tokens)
+            self._stream(resp, model_name, est_input_tokens, target, sse)
         else:
             self._single(resp, model_name, est_input_tokens)
+
+    def _fail(self, status, message, sse):
+        # Ist der SSE-Kopf schon raus (Wartezeit an der Slot-Sperre), lässt
+        # sich kein HTTP-Status mehr setzen -- dann als Text im Stream melden.
+        if sse is not None:
+            self._stream_abort(sse["tr"], f"[{message}]", sse["lock"])
+        else:
+            self._error_json(status, message)
 
     def _single(self, owl_resp, model_name, est_input_tokens=0):
         try:
@@ -641,38 +773,50 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
         self._json_raw(200, body)
 
-    def _stream(self, owl_resp, model_name, est_input_tokens=0):
+    def _sse_open(self, model_name, est_input_tokens, target):
+        """Schickt SSE-Kopf + message_start und startet den Heartbeat.
+        Gibt den Stream-Zustand zurück (Translator, Schreib-Lock, Stop-Event)."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        tr = StreamTranslator(model_name, est_input_tokens)
-        write_lock = threading.Lock()
-        stop_heartbeat = threading.Event()
-        t0 = time.monotonic()
-        n_lines = 0
-        n_pings = [0]
+        sse = {
+            "tr": StreamTranslator(model_name, est_input_tokens, target),
+            "lock": threading.Lock(),
+            "stop": threading.Event(),
+            "dead": threading.Event(),
+            "pings": [0],
+            "t0": time.monotonic(),
+        }
 
         def heartbeat():
             # Solange das (evtl. langsame) Backend noch kein Datenpaket
             # geschickt hat, hier regelmäßig pingen, damit claude CLI die
             # Verbindung nicht wegen Inaktivität als tot ansieht.
-            while not stop_heartbeat.wait(HEARTBEAT_INTERVAL):
+            while not sse["stop"].wait(HEARTBEAT_INTERVAL):
                 try:
-                    with write_lock:
-                        self.wfile.write(tr._evt("ping", {"type": "ping"}).encode())
+                    with sse["lock"]:
+                        self.wfile.write(sse["tr"]._evt("ping", {"type": "ping"}).encode())
                         self.wfile.flush()
-                    n_pings[0] += 1
+                    sse["pings"][0] += 1
                 except Exception as e:
-                    log(f"  heartbeat write fehlgeschlagen nach {time.monotonic()-t0:.1f}s: {e!r}")
+                    log(f"  heartbeat write fehlgeschlagen nach {time.monotonic()-sse['t0']:.1f}s: {e!r}")
+                    sse["dead"].set()
                     return
 
-        hb_thread = threading.Thread(target=heartbeat, daemon=True)
+        with sse["lock"]:
+            self.wfile.write(sse["tr"].start().encode())
+            self.wfile.flush()
+        threading.Thread(target=heartbeat, daemon=True).start()
+        return sse
+
+    def _stream(self, owl_resp, model_name, est_input_tokens=0, target=None, sse=None):
+        t0 = time.monotonic()
+        n_lines = 0
         try:
-            with write_lock:
-                self.wfile.write(tr.start().encode())
-                self.wfile.flush()
-            hb_thread.start()
+            if sse is None:
+                sse = self._sse_open(model_name, est_input_tokens, target)
+            tr, write_lock, n_pings = sse["tr"], sse["lock"], sse["pings"]
             for line in owl_resp.iter_lines():
                 if n_lines == 0:
                     log(f"  erste Zeile vom Backend nach {time.monotonic()-t0:.1f}s ({n_pings[0]} Pings gesendet)")
@@ -709,19 +853,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 with write_lock:
                     self.wfile.write(end_evts.encode())
                     self.wfile.flush()
-            log(f"  Stream fertig nach {time.monotonic()-t0:.1f}s, {n_lines} Zeilen, "
+            log(f"  Stream fertig (model={tr.target}) nach {time.monotonic()-t0:.1f}s, {n_lines} Zeilen, "
                 f"{n_pings[0]} Pings, in={tr.input_tokens} out={tr.output_tokens} "
                 f"cached={tr.cached_tokens if tr.cached_tokens is not None else '?'} Tokens")
         except BrokenPipeError:
-            log(f"  Client trennte Verbindung nach {time.monotonic()-t0:.1f}s ({n_lines} Zeilen, {n_pings[0]} Pings)")
+            log(f"  Client trennte Verbindung nach {time.monotonic()-t0:.1f}s ({n_lines} Zeilen)")
         except requests.exceptions.RequestException as e:
             # Backend-Verbindung riss mitten im Stream ab (Timeout, Reset, ...) —
             # sauberen Fehlertext + Stream-Ende senden statt Client mit toter
             # Verbindung hängen zu lassen (führte sonst zu doppeltem Retry + 502).
-            log(f"  Backend-Verbindung riss nach {time.monotonic()-t0:.1f}s ab ({n_lines} Zeilen, {n_pings[0]} Pings): {e!r}")
-            self._stream_abort(tr, f"[owlAPI-Verbindung abgebrochen: {e}]", write_lock)
+            log(f"  Backend-Verbindung riss nach {time.monotonic()-t0:.1f}s ab ({n_lines} Zeilen): {e!r}")
+            if sse is not None:
+                self._stream_abort(sse["tr"], f"[owlAPI-Verbindung abgebrochen: {e}]", sse["lock"])
         finally:
-            stop_heartbeat.set()
+            if sse is not None:
+                sse["stop"].set()
             try:
                 owl_resp.close()
             except Exception:
@@ -784,8 +930,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
-    srv = HTTPServer(("127.0.0.1", port), ProxyHandler)
-    print(f"owl_proxy :{port} → {OWL_BASE} model={OWL_MODEL}", flush=True)
+    srv_cls = ThreadingHTTPServer if THREADED else HTTPServer
+    srv = srv_cls(("127.0.0.1", port), ProxyHandler)
+    extra = ""
+    if ROUTES:
+        extra += " routes=" + ",".join(f"{k}→{u}" for k, (u, _) in ROUTES.items())
+    if THREADED or SLOT_LIMITS_SPEC:
+        extra += f" routing=owl-<ID> threaded={THREADED} slots={SLOT_LIMITS_SPEC or '-'}"
+    print(f"owl_proxy :{port} → {OWL_BASE} model={OWL_MODEL}{extra}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

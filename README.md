@@ -19,6 +19,9 @@ Wrapper für Claude Code und eigene Modelle via QuiteQue (opencode wird mitinsta
 - **Git-Helfer**: `--git-up` (commit + push), `--git-down` (pull / klonen)
 - **Auto-Update-Check**: prüft beim Start (max. 1×/Tag) gegen GitHub und bietet `--self-update` an
 - **Bot-Einstellungen**: Autonomie-Level (0-2), sudo NOPASSWD, Effort-Level
+- **Team-Modus** (`CLAU_TEAM=1`): 27B-Teamleiter verteilt an bis zu 5 Ausführer-Agenten auf dem 176B, je nach freien Slots
+- **Fernsteuerung** (`clau --api`, Default aus): HTTP-Schnittstelle für Rollen-Sessions (teamleiter/planer/tester)
+- **Offline-Betrieb** (`CLAU_OFFLINE=1`): kein Update-Check, keine Websuche, keine Netz-Installation
 
 ## Installation
 
@@ -173,6 +176,110 @@ Quellen-URLs.
 Chat-Pfad, der die Query nie an die Suche weiterreicht — das Modell antwortet
 dann blind aus dem Trainingswissen und erfindet Quellen dazu. Der richtige
 Endpoint ist `POST /websearch`.
+
+## Team-Modus
+
+Ein kleines Frontend-Modell (Teamleiter, Default `owl:120` = Qwen 27B) zerlegt Aufgaben
+und verteilt sie an Ausführer-Subagenten auf dem großen Modell (Default `owl:121` =
+Qwen3.8-Flash-Next 176B). Wie viel parallel läuft, richtet sich nach den freien Slots des 176B.
+
+```bash
+CLAU_TEAM="1"                 # in .clau.conf oder als Umgebungsvariable
+CLAU_TEAM_LEAD_MODEL="120"    # Teamleiter
+CLAU_TEAM_EXEC_MODEL="121"    # Ausführer (Agenten mit model: sonnet)
+CLAU_TEAM_MAX_AGENTS="5"      # max. parallele Ausführer bei 3 freien Slots
+CLAU_TEAM_SLOTS_121="3"       # max. gleichzeitige Anfragen an 121, der Rest wartet im Proxy
+CLAU_TEAM_STATUS_URL="http://127.0.0.1:8293/slots"   # Slot-Status (Flash-Tor)
+```
+
+Einschalten auch über Menüpunkt 12 im interaktiven Menü; `clau --current` zeigt den Zustand.
+Mit `CLAU_TEAM=1` läuft die Session immer über den Teamleiter, egal welches `CLAU_MODEL`
+gesetzt ist (`-m` überschreibt weiterhin).
+
+So funktioniert es:
+
+- **Routing im owl_proxy:** Fordert Claude Code das Modell `owl-<ID>` an, geht die Anfrage an
+  QuiteQue-Modell `<ID>`; alles andere wie bisher an das Session-Modell. clau setzt im Team-Modus
+  `--model owl-120` und `ANTHROPIC_DEFAULT_SONNET_MODEL=owl-121` (Opus/Haiku → owl-120).
+  Im Proxy-Log steht pro Anfrage `model=120` bzw. `model=121 (angefragt: owl-121)`.
+- **Slot-Sperre:** Höchstens `CLAU_TEAM_SLOTS_121` Anfragen gleichzeitig an 121; überzählige warten
+  im Proxy (mit SSE-Pings, Claude Code bricht nicht ab). Die Sperre gilt pro clau-Prozess.
+- **Agenten** (`team/agents/*.md`, per `--agents` übergeben, nichts landet im Projektordner):
+  `ausfuehrer` (model: sonnet → 121, eigener Dateibereich, fester Bericht), `tester` und
+  `planer` (model: opus → 120).
+- **Tool `llm_status`** (`llm_status_mcp.py`): liefert z.B.
+  `{"modell":"121","slots":3,"frei":1,"belegt":2,"ctx_pro_slot":99328,"empfehlung_parallel":1}`;
+  bei nicht erreichbarem Tor nach 3 s `{"frei":null,"fehler":"..."}`. Direkt testen:
+  `python3 llm_status_mcp.py --once`.
+- **Team-Anweisung** (`team/TEAM_ANWEISUNG.md`, als System-Prompt-Zusatz): vor jeder Verteilung
+  `llm_status`; 0–1 frei → nacheinander, 2 frei → bis 2, ab 3 frei → bis `CLAU_TEAM_MAX_AGENTS`
+  parallele Agent-Aufrufe **in einer Antwort**; danach `tester`, gezielt nachbessern.
+- **Auto-Compact** richtet sich nach dem kleineren Kontextfenster von Teamleiter und Ausführer.
+
+Headless im Team-Modus mit `--dangerously-skip-permissions` starten: ohne das Flag schickt Claude
+Code für jeden Tool-Schritt eine Klassifikator-Anfrage (~40k Tokens) an das sonnet-Alias, also an
+das Ausführer-Modell, und belegt dessen Slots.
+
+```bash
+CLAU_TEAM=1 clau --headless --dangerously-skip-permissions -p "Baue 5 Module mit Tests ..."
+```
+
+Hinweis zu `owl:126`: Das ist dasselbe 176B hinter demselben Flash-Tor, nur als 262k-Einzelslot-
+Variante. Eine Anfrage an 126 lässt das Tor in diese Variante umladen – parallele Ausführer
+gibt es dann nicht mehr. Für den Team-Modus deshalb bei 121 bleiben.
+
+## Fernsteuerung (`clau --api`)
+
+HTTP-Schnittstelle, um Rollen-Sessions von außen zu sehen und anzusprechen. **Standardmäßig aus.**
+
+```bash
+clau --api                         # Vordergrund (systemd/devport), Rollen-Ordner = aktueller Ordner
+CLAU_API="1"                       # oder: beim interaktiven clau-Start im Hintergrund starten
+clau --api-stop                    # Hintergrund-Dienst beenden
+CLAU_API_BIND="127.0.0.1:7010"
+CLAU_API_TOKEN=""                  # Pflicht bei nicht-lokalem Bind (sonst startet der Dienst nicht)
+```
+
+Drei feste Rollen: `teamleiter` (Team-Modus), `planer`, `tester`. Jede läuft als interaktive
+clau-Session in tmux (`tmux attach -t clau-api-teamleiter`). Zustand unter `~/.config/clau/api/`
+(`rollen.json` mit Ordner/Session-ID/Modell, `status/<session>.json` aus den Hooks, `logs/`).
+Die Status-Hooks bekommt nur die jeweilige Rollen-Session per `--settings`; globale Settings und
+Telegram bleiben unberührt. Jede Rolle hat ein eigenes Proxy-Log (`owl_proxy-<rolle>.log`).
+
+| Methode | Pfad | Zweck |
+|---|---|---|
+| GET  | `/status` | Rollen mit `zustand` (arbeitet / wartet_auf_eingabe / fertig / beendet), `letzte_aktivitaet`, `session_id`, `ordner` + Slot-Status |
+| GET  | `/llm` | `llm_status` |
+| GET  | `/sessions/<rolle>/verlauf?n=50` | letzte Nachrichten aus dem Session-JSONL (Tool-Aufrufe gekürzt) |
+| GET  | `/sessions/<rolle>/bildschirm` | tmux `capture-pane` |
+| POST | `/sessions/<rolle>/start` | `{"ordner": "...", "auftrag": "...", "modell": "owl:120"}` – alles optional, setzt vorhandene Session fort |
+| POST | `/sessions/<rolle>/nachricht` | `{"text": "..."}` – tippt in die laufende Session; läuft keine, ein Headless-Turn |
+| POST | `/sessions/<rolle>/taste` | `{"taste": "esc"}` (esc, enter, ctrl-c, tab, shift-tab, up, down, left, right, y, n, 1–3) |
+| POST | `/sessions/<rolle>/stop` | Session beenden (Doppel-Strg-C, nach 8 s hart) |
+
+```bash
+curl -s localhost:7010/status
+curl -s -XPOST localhost:7010/sessions/planer/start -d '{"modell":"owl:120","auftrag":"Lies README.md und schreibe PLAN.md"}'
+curl -s -XPOST localhost:7010/sessions/planer/nachricht -d '{"text":"Fasse PLAN.md in 3 Sätzen zusammen"}'
+curl -s -H "Authorization: Bearer $TOKEN" http://vm:7010/status     # mit Token
+```
+
+## Offline-Betrieb
+
+Für Umgebungen ohne Internet (devport-VMs: nur Gitea, apt-Cache, lokale LLMs):
+
+```bash
+CLAU_OFFLINE="1"    # kein Update-Check, keine Websuche, --install installiert nichts aus dem Netz,
+                    # Claude Code ohne Telemetrie/Auto-Update (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)
+OWL_BASE_URL / CLAU_TEAM_STATUS_URL   # auf die erreichbaren Adressen zeigen lassen
+CLAU_OWL_ROUTES="120=http://host:8292/v1,121=http://host:8293/v1#qwen3.8-flash-next"
+                    # optional: Modelle direkt an die llama-server statt über QuiteQue
+```
+
+`clau --install` funktioniert mit vorinstalliertem `claude` (Symlink; fehlende Tools werden mit
+`CLAU_OFFLINE=1` nur gemeldet). Telegram ist ohnehin nur aktiv, wenn es eingerichtet ist.
+Die Team- und API-Einstellungen sowie `CLAU_OFFLINE`, `CLAU_UPDATE_CHECK`, `CLAU_WEBSEARCH` und
+`CLAU_OWL_ROUTES` dürfen als Umgebungsvariablen kommen und schlagen dann die `.clau.conf`.
 
 ## Timeout-Konfiguration
 
