@@ -3225,8 +3225,10 @@ run_qwenplan_session() {
   export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$qcw"
   CLAU_AUTO_COMPACT_WINDOW="${CLAU_QWEN_COMPACT_AT:-200000}" _apply_compact_window "$qcw" "$model"
 
-  echo "Claude Code → Qwen Token Plan (Modell $model, schnell: $fast, Autonomie: $(interaction_label))"
+  local effort; effort="$(_qwenplan_effort "$model")"
+  echo "Claude Code → Qwen Token Plan (Modell $model, schnell: $fast${effort:+, Effort: $effort}, Autonomie: $(interaction_label))"
   local extra; extra="$(_interaction_args)"
+  [[ -n "$effort" ]] && extra+=" --effort $effort"
   # ANTHROPIC_AUTH_TOKEN (Bearer) statt ANTHROPIC_API_KEY: kein Bestätigungs-
   # dialog in Claude Code, und es gibt keinen Rückfall, bei dem das
   # Claude-Abo-OAuth-Token an den fremden Endpunkt geschickt würde.
@@ -3248,6 +3250,37 @@ run_qwenplan_session() {
   CLAU_TG_SUPPRESS=1 \
   CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
   exec claude --model "$model" --strict-mcp-config $extra "$@"
+}
+
+# Effort-Stufe für ein Plan-Modell. Claude Code schickt die Stufe aus
+# CLAU_EFFORT bzw. effortLevel der settings.json (bei David global "xhigh")
+# als output_config.effort mit; Alibaba reicht sie als reasoning_effort weiter.
+# glm-5.3 nimmt nur low/high/max (gemessen 04.10.2026, alle anderen Modelle
+# nehmen alle fünf) -- sonst HTTP 400 "'reasoning_effort' must be one of".
+# Gibt die passende Stufe aus, oder nichts, wenn nichts umzustellen ist.
+_qwenplan_effort() {
+  local model="$1" want="${CLAU_EFFORT:-}"
+  if [[ -z "$want" ]]; then
+    want="$(python3 -c '
+import json, os, sys
+v = ""
+for f in (".claude/settings.local.json", ".claude/settings.json", os.path.expanduser("~/.claude/settings.json")):
+    try:
+        v = json.load(open(f)).get("effortLevel") or ""
+    except Exception:
+        continue
+    if v:
+        break
+print(v)' 2>/dev/null)"
+  fi
+  case "$model" in
+    glm-5.3)
+      case "$want" in
+        low|high|max) echo "$want" ;;
+        *) echo "high" ;;   # medium, xhigh oder unbekannt → high
+      esac ;;
+    *) [[ -n "${CLAU_EFFORT:-}" ]] && echo "$CLAU_EFFORT" ;;
+  esac
 }
 
 # Headless/Automation ist laut Token-Plan-AGB verboten.
