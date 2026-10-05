@@ -25,8 +25,8 @@ echo "==> Installiere clau nach: $TARGET_DIR"
 if [[ -d "$TARGET_DIR/.git" ]]; then
   echo "==> Repo vorhanden — bringe es auf den GitHub-Stand ..."
   G=(git -C "$TARGET_DIR")
-  BRANCH="$("${G[@]}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
-  [[ "$BRANCH" == "HEAD" ]] && BRANCH=main
+  BRANCH="${CLAU_BRANCH:-main}"   # immer main, ein alter Arbeits-Branch bleibt nicht kleben
+  CUR="$("${G[@]}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
   "${G[@]}" fetch -q origin "$BRANCH"
   STAMP="$(date +%Y%m%d-%H%M%S)"
   CONF_BAK=""
@@ -38,7 +38,12 @@ if [[ -d "$TARGET_DIR/.git" ]]; then
   if [[ -n "$("${G[@]}" status --porcelain --untracked-files=no)" ]]; then
     "${G[@]}" stash push -q -m "clau install $STAMP" && echo "    lokale Änderungen gesichert (git stash list)"
   fi
-  "${G[@]}" reset -q --hard "origin/$BRANCH"
+  if [[ "$CUR" != "$BRANCH" ]]; then
+    echo "    wechsle von Branch '$CUR' auf '$BRANCH' (alter Stand bleibt als Branch '$CUR')"
+    "${G[@]}" checkout -q -B "$BRANCH" "origin/$BRANCH"
+  else
+    "${G[@]}" reset -q --hard "origin/$BRANCH"
+  fi
   [[ -n "$CONF_BAK" ]] && { cp -p "$CONF_BAK" "$TARGET_DIR/.clau.conf"; rm -f "$CONF_BAK"; }
 elif [[ -e "$TARGET_DIR" ]]; then
   echo "Fehler: $TARGET_DIR existiert, ist aber kein Git-Repo." >&2

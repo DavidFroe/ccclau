@@ -3489,8 +3489,10 @@ self_update() {
     exit 1
   fi
 
-  local branch; branch="$("${g[@]}" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-  [[ -z "$branch" || "$branch" == "HEAD" ]] && branch="main"
+  # Immer main (CLAU_BRANCH überschreibt) -- ein alter Arbeits-Branch wie
+  # team-modus soll beim Update nicht kleben bleiben.
+  local branch="${CLAU_BRANCH:-main}"
+  local cur; cur="$("${g[@]}" rev-parse --abbrev-ref HEAD 2>/dev/null)"
   echo "Hole $branch von $("${g[@]}" remote get-url origin 2>/dev/null || echo origin) ..."
   if ! "${g[@]}" fetch -q origin "$branch"; then
     echo "Fehler: git fetch fehlgeschlagen (Netz/Zugang?)." >&2
@@ -3499,7 +3501,7 @@ self_update() {
 
   local old new stamp; old="$("${g[@]}" rev-parse --short HEAD)"; new="$("${g[@]}" rev-parse --short "origin/$branch")"
   stamp="$(date +%Y%m%d-%H%M%S)"
-  if [[ "$("${g[@]}" rev-parse HEAD)" == "$("${g[@]}" rev-parse "origin/$branch")" ]] \
+  if [[ "$cur" == "$branch" && "$("${g[@]}" rev-parse HEAD)" == "$("${g[@]}" rev-parse "origin/$branch")" ]] \
      && [[ -z "$("${g[@]}" status --porcelain --untracked-files=no)" ]]; then
     echo "clau ist schon aktuell ($new)."
     return 0
@@ -3519,7 +3521,12 @@ self_update() {
       echo "  Lokale Änderungen gesichert: git -C $repo_dir stash list"
   fi
 
-  "${g[@]}" reset -q --hard "origin/$branch"
+  if [[ "$cur" != "$branch" ]]; then
+    echo "  Wechsle von Branch '$cur' auf '$branch' (alter Stand bleibt als Branch '$cur' erhalten)"
+    "${g[@]}" checkout -q -B "$branch" "origin/$branch"
+  else
+    "${g[@]}" reset -q --hard "origin/$branch"
+  fi
   if [[ -n "$conf_bak" ]]; then
     cp -p "$conf_bak" "$repo_dir/.clau.conf"; rm -f "$conf_bak"
   fi
