@@ -2624,7 +2624,7 @@ choose_model_interactive() {
         CLAU_QWEN_MODEL="${QWENPLAN_MODELS[$((qi-1))]}"
         CLAU_BACKEND="qwenplan"
         _qwenplan_key >/dev/null 2>&1 || qwenplan_set_key_interactive \
-          || echo "Ohne Key startet 'qwenplan' nicht — später: Menüpunkt 13 oder clau --qwen-key." >&2
+          || echo "Ohne Key startet 'qwenplan' nicht — später: Einstellungen (e → 2) oder clau --qwen-key." >&2
         save_config
         echo "Engine: qwenplan, Qwen-Modell: $CLAU_QWEN_MODEL"
         return 0
@@ -2688,7 +2688,7 @@ choose_backend_interactive() {
     3)
       CLAU_BACKEND="qwenplan"
       _qwenplan_key >/dev/null 2>&1 || qwenplan_set_key_interactive \
-        || echo "Ohne Key startet 'qwenplan' nicht — später: Menüpunkt 13 oder clau --qwen-key." >&2
+        || echo "Ohne Key startet 'qwenplan' nicht — später: Einstellungen (e → 2) oder clau --qwen-key." >&2
       choose_qwen_model_interactive
       ;;
     *) echo "Ungültige Auswahl."; return ;;
@@ -4846,26 +4846,30 @@ interactive_start() {
   fi
   team_on && tag+=", Team $(team_set)"
 
-  local recent=() l
-  while IFS= read -r l; do recent+=("$l"); done < <(_here_sessions_scan | head -3)
+  local recent=() l nhere=0
+  while IFS= read -r l; do
+    ((nhere++)) || true
+    [[ "$nhere" -le 3 ]] && recent+=("$l")
+  done < <(_here_sessions_scan)
 
   echo
   echo "clau — $(basename "$(pwd)")  [$tag, Engine: $(effective_backend)]"
   if [[ "${#recent[@]}" -gt 0 ]]; then
     echo "  Letzte Sessions hier:"
     _session_table 0 1 "${recent[@]}"
+    [[ "$nhere" -gt 3 ]] && echo "   m) mehr …                       (alle $nhere Sessions in diesem Verzeichnis)"
   fi
   echo
   echo "   n) Neue Session                 [Enter]"
   echo "   s) Weitere Sessions …           (alle hier / alle auf dem System / laufende)"
-  echo "   m) Modell wechseln"
+  echo "   w) Modell wechseln"
   echo "   i) Markdown importieren         (neue Session aus Datei)"
   local ntm=0; _have tmux && ntm="$(tmux ls 2>/dev/null | wc -l)"
   echo "   t) tmux-Sitzungen …             ($ntm laufen auf diesem Rechner)"
   echo "   f) Fernsteuerung …              (Telegram/Handy, API)"
   echo "   e) Einstellungen …              (Engine, Qwen-Key, Bot, Team, Update)"
   echo "   q) Beenden"
-  printf "Auswahl [%sn s m i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")"
+  printf "Auswahl [%sn s w i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt 3 ]] && echo "m, ")"
   local c; read -r c
   case "${c:-n}" in
     [1-3])
@@ -4873,7 +4877,8 @@ interactive_start() {
       interactive_start ;;
     n|N) run_new_session_named ;;
     s|S) choose_sessions_menu; interactive_start ;;
-    m|M) choose_model_interactive; interactive_start ;;
+    m|M) choose_session_list here; interactive_start ;;
+    w|W) choose_model_interactive; interactive_start ;;
     i|I) choose_import_md_interactive || interactive_start ;;
     t|T) choose_tmux_menu; interactive_start ;;
     f|F) choose_remote_menu; interactive_start ;;

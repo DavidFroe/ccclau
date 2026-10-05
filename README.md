@@ -81,9 +81,11 @@ clau — mario  [owl:120, Engine: claude]
    2)  Super Marius leveldesign     qwen3.8-flash  vor 1 Std      36k
    3)  Grafik für Super Marius      opus           gestern        28k
 
+   m) mehr …                       (alle 12 Sessions in diesem Verzeichnis)
+
    n) Neue Session                 [Enter]
    s) Weitere Sessions …           (alle hier / alle auf dem System / laufende)
-   m) Modell wechseln
+   w) Modell wechseln
    i) Markdown importieren         (neue Session aus Datei)
    f) Fernsteuerung …              (Telegram/Handy, API)
    e) Einstellungen …              (Engine, Qwen-Key, Bot, Team, Update)
@@ -110,7 +112,7 @@ clau — mario  [owl:120, Engine: claude]
   wie `cockpit`): reinlinken (zurück ins Menü mit `Strg-b d`), beenden, neue clau-Session in tmux.
   Von einem anderen Rechner: `ssh -t <user>@<host> tmux attach -t clau-<id8>` (zeigt das Menü an).
 
-### Modellwahl (interaktiv, Taste m)
+### Modellwahl (interaktiv, Taste w)
 
 | Taste | Engine | Modell |
 |-------|--------|--------|
@@ -129,8 +131,8 @@ daraus kommt auch das Kontext-Fenster für Auto-Compact.
 Claude Code direkt gegen Alibabas Anthropic-kompatiblen Token-Plan-Endpunkt, ohne Proxy.
 
 ```bash
-clau --qwen-key                  # Key eintragen/erneuern (verdeckt, wird geprüft; auch Hauptmenü 13)
-clau --backend qwenplan          # oder Menü 3 → 5-14, oder: clau -m qwen:glm-5.3
+clau --qwen-key                  # Key eintragen/erneuern (verdeckt, wird geprüft; auch Einstellungen e → 2)
+clau --backend qwenplan          # oder Hauptmenü w → q1-q10, oder: clau -m qwen:glm-5.3
 clau --qwen-model                # Modell wählen (Default qwen3.8-max, schnell qwen3.8-flash)
 ```
 
@@ -269,9 +271,9 @@ der Teamleiter schlanke `pi -p`-Prozesse (~1,7k Tokens). Gemessen: erste Anfrage
   Pflicht-Headern); die persönliche `~/.pi` bleibt unberührt. Volle Ausgaben je Auftrag:
   `~/.cache/clau/team/<zeit>-<pid>-<id>.log`.
 - Umschalten: `CLAU_TEAM_SUBAGENTS="pi"` (Default) oder `"claude"` (alte Agent-Variante),
-  auch über Menü 12 → 8. Ohne installiertes pi fällt clau automatisch auf `claude` zurück.
+  auch über Einstellungen e → 4 → 6. Ohne installiertes pi fällt clau automatisch auf `claude` zurück.
 
-Einschalten auch über Menüpunkt 12 im interaktiven Menü; `clau --current` zeigt den Zustand.
+Einschalten auch über Einstellungen (e → 4) im interaktiven Menü; `clau --current` zeigt den Zustand.
 Mit `CLAU_TEAM=1` läuft die Session immer über den Teamleiter, egal welches `CLAU_MODEL`
 gesetzt ist (`-m` überschreibt weiterhin).
 
