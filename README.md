@@ -106,6 +106,9 @@ clau — mario  [owl:120, Engine: claude]
   sich an die laufende tmux-Sitzung an, statt sie doppelt zu starten. Loslösen: `Strg-b d`.
 - Stürzt Claude Code selbst ab, bleibt das tmux-Fenster offen: Enter setzt die Session fort,
   `q` schließt das Fenster.
+- **Hauptmenü `t)`** listet alle tmux-Sitzungen des Rechners (clau-Sessions mit Namen, dazu fremde
+  wie `cockpit`): reinlinken (zurück ins Menü mit `Strg-b d`), beenden, neue clau-Session in tmux.
+  Von einem anderen Rechner: `ssh -t <user>@<host> tmux attach -t clau-<id8>` (zeigt das Menü an).
 
 ### Modellwahl (interaktiv, Taste m)
 

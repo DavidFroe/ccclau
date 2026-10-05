@@ -2980,7 +2980,7 @@ run_new_session_named() {
       mkdir -p "$(_claude_projects_dir)/$(_project_hash_for)"
       _set_session_title "$(_claude_projects_dir)/$(_project_hash_for)" "$sid" "$sname"; }
     _session_meta_set "$sid" "$(_current_model_spec)"
-    if [[ "${CLAU_TMUX:-0}" == "1" ]]; then
+    if [[ "${CLAU_TMUX:-0}" == "1" || "${CLAU_TMUX_ONCE:-0}" == "1" ]]; then
       _session_tmux_set "$sid" 1
       _tmux_wrap new "$sid" "$sname" || true
     fi
@@ -4213,6 +4213,75 @@ TMUXLOOP
   exec tmux new-session -s "$tn" -c "$PWD" "bash $(printf %q "$script")"
 }
 
+# Alle tmux-Sitzungen dieses Rechners: anzeigen, reinlinken, beenden, neu
+# starten. clau-<id8>-Sitzungen bekommen den Session-Namen aus dem Scan.
+choose_tmux_menu() {
+  _ensure_tmux || return 0
+  while true; do
+    local rows=() l
+    # "|" als Trenner: tmux gibt Steuerzeichen wie \x1f nur escaped aus
+    while IFS= read -r l; do rows+=("$l"); done < <(tmux ls -F \
+      '#{session_name}|#{session_attached}|#{session_created}|#{pane_current_path}|#{pane_current_command}' 2>/dev/null)
+    # Namen der clau-Sessions (sid8 → Name) aus den clau-Titel-Dateien --
+    # schnell (kein Scan aller Session-Dateien) und auch für neue Sessions
+    declare -A tnames=()
+    local k v
+    while IFS='|' read -r k v; do [[ -n "$k" ]] && tnames["clau-$k"]="$v"; done < <(python3 - "$(_claude_projects_dir)" <<'PY' 2>/dev/null
+import glob, json, os, sys
+for f in glob.glob(os.path.join(sys.argv[1], "*", ".clau-session-titles.json")):
+    try:
+        for sid, name in json.load(open(f)).items():
+            print(sid[:8] + "|" + str(name).replace("|", "/").replace("\n", " "))
+    except Exception:
+        pass
+PY
+)
+    echo
+    echo "tmux-Sitzungen auf $(hostname):"
+    if [[ "${#rows[@]}" -eq 0 ]]; then
+      echo "  (keine)"
+    else
+      printf "  %3s  %s %s %s %s\n" "" "$(_pad "tmux-Name" 16)" "$(_pad "Inhalt" 30)" "$(_pad "Status" 12)" "Ordner"
+      local i=1 sn att cre path cmd what
+      for l in "${rows[@]}"; do
+        IFS='|' read -r sn att cre path cmd <<< "$l"
+        what="${tnames[$sn]:-}"; [[ -z "$what" ]] && what="$cmd"
+        printf "  %3s  %s %s %s %s\n" "$i)" "$(_pad "$sn" 16)" "$(_pad "$what" 30)" \
+          "$(_pad "$([[ "$att" -gt 0 ]] && echo angehängt || echo Hintergrund)" 12)" "${path/#$HOME/\~}"
+        ((i++))
+      done
+    fi
+    echo
+    echo "  <Nr>) Sitzung öffnen (reinlinken / beenden)"
+    echo "     n) Neue clau-Session in tmux starten"
+    echo "     0) Zurück"
+    printf "Auswahl: "
+    local c; read -r c
+    case "$c" in
+      0|"") return 0 ;;
+      n|N) ( CLAU_TMUX_ONCE=1; run_new_session_named ) || true ;;
+      *)
+        [[ "$c" =~ ^[0-9]+$ && "$c" -ge 1 && "$c" -le "${#rows[@]}" ]] || { echo "Ungültige Auswahl."; continue; }
+        local sn; sn="${rows[$((c-1))]%%|*}"
+        echo
+        echo "tmux-Sitzung $sn${tnames[$sn]:+ ($(printf '%s' "${tnames[$sn]}"))}:"
+        echo "  1) Reinlinken (anhängen)        [Enter]   — loslösen mit Strg-b d"
+        echo "  2) Beenden (kill-session)"
+        echo "  0) Zurück"
+        echo "  Von einem anderen Rechner:  ssh -t $(whoami)@$(hostname) tmux attach -t $sn"
+        printf "Auswahl [0-2, Enter=1]: "
+        local a; read -r a
+        case "${a:-1}" in
+          1) if [[ -n "${TMUX:-}" ]]; then tmux switch-client -t "=$sn"; else tmux attach -t "=$sn" || true; fi ;;
+          2) printf "Sitzung %s wirklich beenden? Laufende Programme darin werden beendet [j/N]: " "$sn"
+             local y; read -r y
+             if [[ "$y" =~ ^[jJyY] ]]; then tmux kill-session -t "=$sn" && echo "✓ Beendet."; fi ;;
+        esac
+        ;;
+    esac
+  done
+}
+
 # Merkt sich zu einer Session im aktuellen Ordner das Modell, mit dem clau sie
 # startet (bei owl sieht man es der Session-Datei sonst nicht an).
 _session_meta_set() {
@@ -4791,10 +4860,12 @@ interactive_start() {
   echo "   s) Weitere Sessions …           (alle hier / alle auf dem System / laufende)"
   echo "   m) Modell wechseln"
   echo "   i) Markdown importieren         (neue Session aus Datei)"
+  local ntm=0; _have tmux && ntm="$(tmux ls 2>/dev/null | wc -l)"
+  echo "   t) tmux-Sitzungen …             ($ntm laufen auf diesem Rechner)"
   echo "   f) Fernsteuerung …              (Telegram/Handy, API)"
   echo "   e) Einstellungen …              (Engine, Qwen-Key, Bot, Team, Update)"
   echo "   q) Beenden"
-  printf "Auswahl [%sn s m i f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")"
+  printf "Auswahl [%sn s m i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")"
   local c; read -r c
   case "${c:-n}" in
     [1-3])
@@ -4804,6 +4875,7 @@ interactive_start() {
     s|S) choose_sessions_menu; interactive_start ;;
     m|M) choose_model_interactive; interactive_start ;;
     i|I) choose_import_md_interactive || interactive_start ;;
+    t|T) choose_tmux_menu; interactive_start ;;
     f|F) choose_remote_menu; interactive_start ;;
     e|E) choose_settings_menu; interactive_start ;;
     q|Q) exit 0 ;;
