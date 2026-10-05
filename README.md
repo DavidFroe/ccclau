@@ -97,6 +97,16 @@ clau — mario  [owl:120, Engine: claude]
   mit der Voreinstellung oder mit dem alten Modell fortsetzen.
 - Bei alten owl-Sessions zeigt die Tabelle `owl:?` (die Modell-ID steht nicht in der Session-Datei).
 
+### Sessions in tmux (gegen Abstürze)
+
+- **Pro Session:** Session wählen → `6) In tmux fixieren`. Fixierte Sessions starten immer in einer
+  eigenen tmux-Sitzung `clau-<id8>`.
+- **Für alle neuen Sessions:** Einstellungen → `6) Neue Sessions in tmux` (`CLAU_TMUX="1"`).
+- Stürzt das Terminal ab, läuft die Session weiter. `clau` zeigt sie mit `⧉` an; Fortsetzen hängt
+  sich an die laufende tmux-Sitzung an, statt sie doppelt zu starten. Loslösen: `Strg-b d`.
+- Stürzt Claude Code selbst ab, bleibt das tmux-Fenster offen: Enter setzt die Session fort,
+  `q` schließt das Fenster.
+
 ### Modellwahl (interaktiv, Taste m)
 
 | Taste | Engine | Modell |

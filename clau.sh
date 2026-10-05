@@ -1975,6 +1975,8 @@ load_config() {
   # Subagenten: "pi" (schlanke pi-Prozesse, Default wenn pi installiert) oder "claude"
   : "${CLAU_TEAM_SUBAGENTS:=pi}"
   : "${CLAU_TEAM_SET:=lokal}"
+  # 1 = neue Sessions immer in tmux starten (überleben Terminal-Abstürze)
+  : "${CLAU_TMUX:=0}"
   : "${CLAU_TEAM_QWEN_LEAD:=qwen3.8-max}"
   : "${CLAU_TEAM_QWEN_EXEC:=qwen3.8-flash}"
   : "${CLAU_TEAM_CLAUDE_LEAD:=opus}"
@@ -2085,6 +2087,7 @@ CLAU_TEAM_SLOTS_121="${CLAU_TEAM_SLOTS_121:-3}"
 CLAU_TEAM_STATUS_URL="${CLAU_TEAM_STATUS_URL:-http://127.0.0.1:8293/slots}"
 CLAU_TEAM_SUBAGENTS="${CLAU_TEAM_SUBAGENTS:-pi}"
 CLAU_TEAM_SET="${CLAU_TEAM_SET:-lokal}"
+CLAU_TMUX="${CLAU_TMUX:-0}"
 CLAU_TEAM_QWEN_LEAD="${CLAU_TEAM_QWEN_LEAD:-qwen3.8-max}"
 CLAU_TEAM_QWEN_EXEC="${CLAU_TEAM_QWEN_EXEC:-qwen3.8-flash}"
 CLAU_TEAM_CLAUDE_LEAD="${CLAU_TEAM_CLAUDE_LEAD:-opus}"
@@ -2977,6 +2980,10 @@ run_new_session_named() {
       mkdir -p "$(_claude_projects_dir)/$(_project_hash_for)"
       _set_session_title "$(_claude_projects_dir)/$(_project_hash_for)" "$sid" "$sname"; }
     _session_meta_set "$sid" "$(_current_model_spec)"
+    if [[ "${CLAU_TMUX:-0}" == "1" ]]; then
+      _session_tmux_set "$sid" 1
+      _tmux_wrap new "$sid" "$sname" || true
+    fi
   fi
   run_new_session
 }
@@ -3858,8 +3865,9 @@ session_action_menu() {
   echo "  3) Umbenennen"
   echo "  4) Als Markdown exportieren"
   echo "  5) Löschen (unwiderruflich!)"
+  echo "  6) In tmux fixieren          : $(_session_tmux_get "$sid" && echo an || echo aus)$(_tmux_running "$sid" && echo "   (läuft gerade in tmux → Fortsetzen hängt sich an)")"
   echo "  0) Zurück"
-  printf "Auswahl [0-5, Enter=1]: "
+  printf "Auswahl [0-6, Enter=1]: "
   local action; read -r action
   case "${action:-1}" in
     1)
@@ -3909,6 +3917,13 @@ session_action_menu() {
         echo "✓ Gelöscht."
       else
         echo "Abgebrochen (nichts gelöscht)."
+      fi
+      ;;
+    6)
+      if _session_tmux_get "$sid"; then
+        _session_tmux_set "$sid" 0; echo "✓ Nicht mehr in tmux fixiert."
+      else
+        _session_tmux_set "$sid" 1; echo "✓ Fixiert: startet ab jetzt immer in tmux ($(_tmux_name "$sid"))."
       fi
       ;;
     *) return 0 ;;
@@ -4113,6 +4128,84 @@ PYEOF
 _all_sessions_scan() { _sessions_scan ""; }
 _here_sessions_scan() { _sessions_scan "$(_claude_projects_dir)/$(_project_hash_for)"; }
 
+# ── Sessions in tmux ─────────────────────────────────────────────────────────
+# Eine Session läuft in tmux, wenn sie fixiert ist (.clau-session-meta.json →
+# "tmux": true) oder CLAU_TMUX=1 beim Anlegen galt. tmux-Sitzung "clau-<id8>":
+# überlebt Terminal-Abstürze; stürzt Claude Code selbst ab, bleibt das Fenster
+# offen und bietet Fortsetzen an. Läuft sie schon, wird nur angehängt.
+_tmux_name() { echo "clau-${1:0:8}"; }
+_tmux_running() { _have tmux && tmux has-session -t "=$(_tmux_name "$1")" 2>/dev/null; }
+
+_session_tmux_get() {
+  local bdir; bdir="$(_claude_projects_dir)/$(_project_hash_for)"
+  [[ -f "$bdir/.clau-session-meta.json" ]] || return 1
+  python3 -c 'import json,sys; sys.exit(0 if (json.load(open(sys.argv[1])).get(sys.argv[2]) or {}).get("tmux") else 1)' \
+    "$bdir/.clau-session-meta.json" "$1" 2>/dev/null
+}
+
+_session_tmux_set() {  # $1 = sid, $2 = 1|0
+  local bdir; bdir="$(_claude_projects_dir)/$(_project_hash_for)"
+  mkdir -p "$bdir" 2>/dev/null || return 0
+  python3 - "$bdir/.clau-session-meta.json" "$1" "$2" <<'PY' 2>/dev/null || true
+import json, sys
+path, sid, on = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+try:
+    d = json.load(open(path))
+except Exception:
+    d = {}
+e = d.setdefault(sid, {})
+if on:
+    e["tmux"] = True
+else:
+    e.pop("tmux", None)
+json.dump(d, open(path, "w"), indent=1)
+PY
+}
+
+# Startet bzw. hängt die Session in tmux an (kehrt nur zurück, wenn tmux nicht
+# geht -- dann läuft die Session normal weiter). $1 = new|resume, $2 = sid, $3 = Name
+_tmux_wrap() {
+  local action="$1" sid="$2" name="${3:-}"
+  [[ -z "${TMUX:-}" ]] || return 1          # schon in tmux → normal starten
+  _ensure_tmux || { echo "tmux nicht verfügbar — starte ohne tmux." >&2; return 1; }
+  local tn; tn="$(_tmux_name "$sid")"
+  if tmux has-session -t "=$tn" 2>/dev/null; then
+    echo "Session läuft schon in tmux ($tn) — hänge mich an. Loslösen: Strg-b d"
+    sleep 1
+    exec tmux attach -t "=$tn"
+  fi
+  local dir="${XDG_CACHE_HOME:-$HOME/.cache}/clau/tmux"
+  mkdir -p "$dir"
+  local script="$dir/$tn.sh" self; self="$(readlink -f "$0")"
+  {
+    echo "#!/usr/bin/env bash"
+    printf 'cd %q || exit 1
+' "$PWD"
+    local v
+    for v in CLI_MODEL_OVERRIDE CLI_BACKEND_OVERRIDE CLI_QWEN_OVERRIDE CLAU_QWEN_MODEL; do
+      [[ -n "${!v:-}" ]] && printf 'export %s=%q
+' "$v" "${!v}"
+    done
+    printf 'action=%q; sid=%q; name=%q; self=%q
+' "$action" "$sid" "$name" "$self"
+    cat <<'TMUXLOOP'
+while true; do
+  bash "$self" --tmux-inner "$action" "$sid" "$name"
+  rc=$?
+  action=resume
+  echo
+  echo "── Claude Code beendet (Exit $rc). Enter = Session "${name:-$sid}" wieder fortsetzen, q = Fenster schließen"
+  read -r a || break
+  [[ "$a" == q || "$a" == Q ]] && break
+done
+TMUXLOOP
+  } > "$script"
+  chmod +x "$script"
+  echo "Starte in tmux ($tn). Loslösen: Strg-b d — wieder ran: clau → Session wählen (oder tmux attach -t $tn)"
+  sleep 1
+  exec tmux new-session -s "$tn" -c "$PWD" "bash $(printf %q "$script")"
+}
+
 # Merkt sich zu einer Session im aktuellen Ordner das Modell, mit dem clau sie
 # startet (bei owl sieht man es der Session-Datei sonst nicht an).
 _session_meta_set() {
@@ -4196,9 +4289,12 @@ _session_table() {
   else
     printf "  %3s  %-28s %-14s %-11s %6s\n" "" "Name" "Modell" "Zuletzt" "Tokens"
   fi
+  local tm=""
+  _have tmux && tm=" $(tmux ls -F '#S' 2>/dev/null | tr '\n' ' ')"
   for l in "$@"; do
     IFS=$'\x1f' read -r mstr cwd sid tokens name model preview epoch <<< "$l"
     if [[ "${tokens:-0}" -ge 1000 ]]; then tok="$(( tokens / 1000 ))k"; else tok="${tokens:-0}"; fi
+    [[ "$tm" == *" clau-${sid:0:8} "* ]] && name="⧉ $name"
     printf "  %3s  %s %s %s %6s" "$i)" "$(_pad "$name" 28)" "$(_pad "$(_model_label "$model")" 14)" \
       "$(_pad "$(_rel_time "$epoch")" 11)" "$tok"
     [[ "$show_cwd" == "1" ]] && printf "  %s" "${cwd/#$HOME/\~}"
@@ -4379,6 +4475,9 @@ run_resume_id() {
     mdl="$(effective_model)"
   fi
   [[ "$(effective_backend)" != "opencode" ]] && _session_meta_set "$rid" "$(_current_model_spec)"
+  if [[ -z "${TMUX:-}" ]] && { _tmux_running "$rid" || _session_tmux_get "$rid"; }; then
+    _tmux_wrap resume "$rid" "$(_get_session_title "$(_claude_projects_dir)/$(_project_hash_for)" "$rid")" || true
+  fi
   if [[ "$(effective_backend)" == "qwenplan" ]]; then
     run_qwenplan_session --resume "$rid"
     return
@@ -4737,8 +4836,9 @@ choose_settings_menu() {
     echo "  3) Bot-Einstellungen …       (Autonomie, sudo, Effort, Auto-Compact, Timeout)"
     echo "  4) Team-Modus …              : $(team_on && echo "AN — $(team_set_label)" || echo aus)"
     echo "  5) Update von GitHub (self-update)"
+    echo "  6) Neue Sessions in tmux     : $([[ "${CLAU_TMUX:-0}" == "1" ]] && echo an || echo aus)   (überleben Terminal-Abstürze)"
     echo "  0) Zurück"
-    printf "Auswahl [0-5]: "
+    printf "Auswahl [0-6]: "
     local c; read -r c
     case "$c" in
       1) choose_backend_interactive ;;
@@ -4746,6 +4846,8 @@ choose_settings_menu() {
       3) choose_bot_settings ;;
       4) choose_team_settings ;;
       5) self_update; echo; echo "Bitte 'clau' erneut starten, um die neue Version zu nutzen."; exit 0 ;;
+      6) if [[ "${CLAU_TMUX:-0}" == "1" ]]; then CLAU_TMUX=0; else CLAU_TMUX=1; _ensure_tmux || CLAU_TMUX=0; fi
+         save_config ;;
       *) return 0 ;;
     esac
   done
@@ -5065,6 +5167,11 @@ parse_args() {
         ACTION="running-sessions"
         shift
         ;;
+      --tmux-inner)
+        # intern: Start innerhalb der tmux-Sitzung (siehe _tmux_wrap)
+        ACTION="tmux-inner"; TMUX_INNER_ACTION="${2:-resume}"; TMUX_INNER_SID="${3:-}"; TMUX_INNER_NAME="${4:-}"
+        shift $(( $# < 4 ? $# : 4 ))
+        ;;
       --tg-token)
         ACTION="tg-token"
         shift
@@ -5241,6 +5348,14 @@ case "${ACTION}" in
     ;;
   running-sessions)
     choose_all_sessions running
+    ;;
+  tmux-inner)
+    if [[ "$TMUX_INNER_ACTION" == "new" ]]; then
+      NEW_SESSION_ARGS=(--session-id "$TMUX_INNER_SID" --name "$TMUX_INNER_NAME")
+      run_new_session
+    else
+      run_resume_id "$TMUX_INNER_SID"
+    fi
     ;;
   tg-token)
     tg_token
