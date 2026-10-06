@@ -580,7 +580,7 @@ _kill_owl_proxy() {
   fi
   rm -f "${OWL_PROXY_LOG_DIR}/team_anweisung_$$.md" 2>/dev/null || true
   # Claude CLI aktiviert Mouse-Tracking — bei Exit sauber deaktivieren
-  printf '\e[?1000l\e[?1002l\e[?1003l\e[?1004l\e[?1006l\e[?1015l\e[?1016l' > /dev/tty 2>/dev/null || true
+  { printf '\e[?1000l\e[?1002l\e[?1003l\e[?1004l\e[?1006l\e[?1015l\e[?1016l' > /dev/tty; } 2>/dev/null || true
 }
 
 # ── Telegram-Integration ────────────────────────────────────────────────────
@@ -2290,6 +2290,8 @@ Verwendung (interaktiv):
   clau --compact                  Custom-Compact: aktuelle Session extern komprimieren (QuiteQue)
   clau --import-md datei.md       Startet eine neue Session mit dem Inhalt von datei.md als erster
                                   Nachricht (Session-Auswahl → Punkt 5 exportiert umgekehrt als .md)
+  clau "AUFTRAG"                  Kurzauftrag im aktuellen Ordner (agentisch, Antwort im Terminal),
+                                  z.B. clau "zeige mir die größten Dateien im Home" · clau -m opus "…"
   clau --all-sessions             Alle Claude-Code-Sessions (alle Projekte) auflisten & fortsetzen
   clau --running-sessions         Nur die JETZT laufenden Sessions (andere Terminals/Hintergrund)
   clau --model N                  Setzt das Standardmodell (1=haiku, 2=sonnet, 3=opus5.5, 4=fable)
@@ -4692,7 +4694,7 @@ run_headless_here() {
   fi
   build_headless_cmd
   apply_tg_hooks
-  echo "Starte headless im Verzeichnis: $(pwd)"
+  [[ "${QUICK_TASK:-0}" == "1" ]] || echo "Starte headless im Verzeichnis: $(pwd)"
   exec "${CLAUDE_CMD[@]}"
 }
 
@@ -5372,11 +5374,19 @@ parse_args() {
           shift
         fi
         ;;
-      *)
+      -*)
         echo "Unbekannte Option: $1" >&2
         echo
         print_help
         exit 1
+        ;;
+      *)
+        # Kurzauftrag: clau "zeige mir alle Dateien im Home" -- alles ab hier
+        # ist der Prompt, läuft wie --headless im aktuellen Ordner.
+        PROMPT_TEXT="$*"
+        HEADLESS=1
+        QUICK_TASK=1
+        break
         ;;
     esac
   done
@@ -5384,6 +5394,7 @@ parse_args() {
 
 ACTION="interactive"
 RESUME_SESSION_ID=""
+QUICK_TASK=0
 TG_PUMP_ARGS=("" "" "")
 
 load_config
