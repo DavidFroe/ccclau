@@ -36,7 +36,7 @@ LLM_STATUS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/llm_statu
 CLAU_TEAM_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/team"
 PI_TEAM_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pi_team_mcp.py"
 CLAU_API_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/clau_api.py"
-OWL_BASE_URL="http://11.0.0.13:7077"
+OWL_BASE_URL="${OWL_BASE_URL:-http://11.0.0.13:7077}"
 QQ_USER="opencode"
 
 # Telegram-Integration (lokale Config außerhalb des Repos)
@@ -62,9 +62,10 @@ declare -gA OWL_CONTEXT_WINDOWS=(
   ["53"]="4000"     # SkinnyJoe W4: Whisper-large-v3 (ASR)
   ["54"]="0"        # SkinnyJoe B3: SD-Turbo (Image-Gen, CPU)
   ["90"]="1048000"  # GPT-5.1
-  ["120"]="97000"   # PropellerA: Qwen3.6 27B (Tools+Vision+Thinking)
+  ["120"]="97000"   # PropellerA: Qwen3.8-27B Heretic (Tools+Vision+Thinking, 97k)
   ["121"]="97000"   # Qwen3.8-Flash-Next: 176B MoE, Tools+Vision+Reasoning (3 Slots à 99k)
   ["126"]="262000"  # Qwen3.8-Flash-Next: 176B MoE, 262k, nur 1 Session
+  ["129"]="32000"   # Qwen3.8-35B-A3B lokal (Such-Set, 3 Slots a 32k, Tools+Vision, ~110 tok/s)
   ["317"]="1048000" # OpenRouter Owl Alpha (1M ctx, Agentic, FREE)
   ["350"]="1048000" # DeepSeek V4 Pro (1M ctx, Reasoning)
   ["351"]="1048000" # MiniMax M3 (1M ctx)
@@ -198,8 +199,9 @@ declare -gA TIMEOUT_PRESET_DEFAULT=(
   ["50"]="600000"    # SkinnyJoe T79: Qwen3 4B (CPU) → 10 Min
   ["51"]="600000"    # SkinnyJoe T77: Dolphin3 3B (CPU) → 10 Min
   ["52"]="600000"    # SkinnyJoe T78: L3.1 Dark-Planet 8B (CPU) → 10 Min
-  ["120"]="1800000"  # PropellerA: Qwen3.6 27B → 30 Min
+  ["120"]="1800000"  # PropellerA: Qwen3.8-27B → 30 Min
   ["121"]="1800000"  # Qwen3.8-Flash-Next (176B MoE, 97k) → 30 Min
+  ["129"]="1800000"  # Qwen3.8-35B-A3B lokal (32k) → 30 Min
   ["317"]="3600000"  # OpenRouter Owl Alpha (1M ctx) → 60 Min
   ["350"]="3600000"  # DeepSeek V4 Pro (1M ctx) → 60 Min
   ["351"]="3600000"  # MiniMax M3 (1M ctx) → 60 Min
@@ -223,6 +225,7 @@ declare -gA TIMEOUT_PRESET_MAX=(
   ["52"]="1800000"
   ["120"]="3600000"  # PropellerA → 60 Min
   ["121"]="3600000"  # Qwen3.8-Flash-Next → 60 Min
+  ["129"]="3600000"  # Qwen3.8-35B-A3B → 60 Min
   ["317"]="10800000" # OpenRouter Owl Alpha → 180 Min
   ["350"]="10800000" # DeepSeek V4 Pro → 180 Min
   ["351"]="10800000" # MiniMax M3 → 180 Min
@@ -2362,7 +2365,7 @@ Git-Helfer (Repo aus GitHub via SSH):
 
 Model-Mappings:
   Claude Code (agentisch):  1=haiku(4.5)  2=sonnet(5)  3=opus(5.5)  4=fable(5)
-  owlAPI (für --model N):   5=owl:120 (Q27B)  6=owl:121 (Flash-Next)  7=owl:126 (Flash-Next 262k)  0=owl:free
+  owlAPI (für --model N):   5=owl:120 (Q27B)  6=owl:121 (Flash-Next)  7=owl:126 (Flash-Next 262k)  8=owl:129 (35B schnell)  0=owl:free
   owlAPI direkt:            -m owl:350  oder  -m 350   (interaktiv: Live-Liste der owlAPI)
   Qwen Token Plan:          -m qwen:qwen3.8-max  (setzt Engine qwenplan für diesen Aufruf)
 
@@ -2409,9 +2412,10 @@ model_from_number() {
     5) CLAU_MODEL="owl:120" ;;   # PropellerA lokal
     6) CLAU_MODEL="owl:121" ;;   # Qwen3.8-Flash-Next lokal (97k)
     7) CLAU_MODEL="owl:126" ;;   # Qwen3.8-Flash-Next lokal (262k, 1 Session)
+    8) CLAU_MODEL="owl:129" ;;   # Qwen3.8-35B-A3B lokal (32k, schnell, Bilder)
     0) CLAU_MODEL="owl:free" ;;  # free Router gratis
     *)
-      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5/6/7/0=owlAPI, sonst -m owl:<ID>)" >&2
+      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5/6/7/8/0=owlAPI, sonst -m owl:<ID>)" >&2
       exit 1
       ;;
   esac
@@ -2564,7 +2568,7 @@ _print_cols() {
 }
 
 # Feste Presets (auch ohne owlAPI-Verbindung): Taste → owl-ID
-declare -gA OWL_PRESETS=( ["5"]="120" ["6"]="121" ["7"]="126" ["0"]="free" )
+declare -gA OWL_PRESETS=( ["5"]="120" ["6"]="121" ["7"]="126" ["8"]="129" ["0"]="free" )
 
 choose_model_interactive() {
   local nq=${#QWENPLAN_MODELS[@]}
@@ -2572,7 +2576,7 @@ choose_model_interactive() {
   local rows=() line id st own ctx price name
   while IFS= read -r line; do
     IFS=$'\t' read -r id st own ctx price name <<< "$line"
-    [[ "$id" == "120" || "$id" == "121" || "$id" == "126" || "$id" == "free" ]] && continue
+    [[ "$id" == "120" || "$id" == "121" || "$id" == "126" || "$id" == "129" || "$id" == "free" ]] && continue
     [[ "$ctx" -ge 64000 ]] || continue
     rows+=("$line")
   done < <(_owl_models_tsv 2>/dev/null)
@@ -2583,8 +2587,9 @@ choose_model_interactive() {
     echo "  --- Claude Code mit Claude-Abo ---"
     _print_cols 38 "1) haiku   Haiku 4.5" "2) sonnet  Sonnet 5  [Enter]" "3) opus    Opus 5.5" "4) fable   Fable 5"
     echo "  --- Presets: lokal (PropellerA) + QuiteQue Free-Plan, via owlAPI ---"
-    _print_cols 38 "5) Q27B         owl:120  94k" "6) Flash-Next   owl:121  97k" \
-                   "7) Flash-Next   owl:126  262k" "0) Free-Plan    owl:free (Router)"
+    _print_cols 38 "5) Q27B         owl:120  97k" "6) Flash-Next   owl:121  97k" \
+                   "7) Flash-Next   owl:126  262k" "8) 35B schnell  owl:129  32k" \
+                   "0) Free-Plan    owl:free (Router)"
     echo "  --- Qwen Token Plan (Alibaba-Abo, nur interaktiv) ---"
     local cells=() i=1 m
     for m in "${QWENPLAN_MODELS[@]}"; do cells+=("q${i}) ${m}"); ((i++)); done

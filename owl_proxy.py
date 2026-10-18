@@ -57,6 +57,22 @@ def _dump_debug_payload(payload):
         pass
 
 
+# Lokale Qwen-Denkmodelle (PropellerA 27B, Flash-Next 176B, 35B-A3B). Qwen warnt ausdruecklich:
+# fast-greedy Dekodieren fuehrt bei Denkmodellen zu Endlosschleifen; empfohlen sind 0.6.
+# 2026-10-18 gesehen: temperature 0.1 ohne max_tokens -> 63.399 Token Schleife auf dem 27B.
+# Claude Code schickt selbst KEINE Temperatur, bisher setzte der Proxy dann 0.3.
+QWEN_LOKAL = {"120", "121", "126", "129"}
+QWEN_TEMP_MIN = float(os.environ.get("OWL_QWEN_TEMP_MIN", "0.6"))
+
+
+def _temperatur(gewuenscht, target):
+    if str(target) in QWEN_LOKAL:
+        if gewuenscht is None or gewuenscht < QWEN_TEMP_MIN:
+            return QWEN_TEMP_MIN
+        return gewuenscht
+    return 0.3 if gewuenscht is None else gewuenscht
+
+
 def _estimate_input_tokens(payload):
     """Grobe Token-Schätzung des Request-Inputs (~3.5 chars/Token).
 
@@ -614,7 +630,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "model": backend_model,
             "messages": messages_ant_to_oai(req.get("messages", []), req.get("system")),
             "stream": stream,
-            "temperature": req.get("temperature", 0.3),
+            "temperature": _temperatur(req.get("temperature"), target),
         }
         if req.get("max_tokens"):
             oai_payload["max_tokens"] = req["max_tokens"]
