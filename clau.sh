@@ -3024,6 +3024,20 @@ _ensure_tmux() {
   _have tmux && echo "tmux installiert."
 }
 
+# python3 + requests (für owl_proxy.py / local_chat.py)
+_ensure_python_requests() {
+  if _have python3 && python3 -c 'import requests' 2>/dev/null; then
+    echo "  python3-requests: bereits vorhanden"
+    return 0
+  fi
+  echo "  python3-requests: fehlt — installiere ..."
+  if _have apt-get; then sudo apt-get install -y python3 python3-requests >/dev/null 2>&1 || return 1
+  elif _have dnf; then sudo dnf install -y python3 python3-requests >/dev/null 2>&1 || return 1
+  elif _have pacman; then sudo pacman -S --noconfirm python python-requests >/dev/null 2>&1 || return 1
+  else echo "  → bitte python3 + requests manuell installieren" >&2; return 1; fi
+  python3 -c 'import requests' 2>/dev/null && echo "  python3-requests installiert."
+}
+
 _ensure_opencode() {
   if _have opencode; then
     echo "  opencode: bereits vorhanden ($(command -v opencode))"
@@ -3445,6 +3459,7 @@ install_self() {
   _ensure_claude_code || true
   _ensure_opencode || true
   _ensure_tmux || true
+  _ensure_python_requests || true
 
   case ":$PATH:" in
     *":${INSTALL_DIR}:"*)
@@ -4368,7 +4383,7 @@ _session_table() {
     printf "  %3s  %-28s %-14s %-11s %6s\n" "" "Name" "Modell" "Zuletzt" "Tokens"
   fi
   local tm=""
-  _have tmux && tm=" $(tmux ls -F '#S' 2>/dev/null | tr '\n' ' ')"
+  _have tmux && tm=" $( { tmux ls -F '#S' 2>/dev/null || true; } | tr '\n' ' ')"
   for l in "$@"; do
     IFS=$'\x1f' read -r mstr cwd sid tokens name model preview epoch <<< "$l"
     if [[ "${tokens:-0}" -ge 1000 ]]; then tok="$(( tokens / 1000 ))k"; else tok="${tokens:-0}"; fi
@@ -4866,7 +4881,7 @@ interactive_start() {
   echo "   s) Weitere Sessions …           (alle hier / alle auf dem System / laufende)"
   echo "   w) Modell wechseln"
   echo "   i) Markdown importieren         (neue Session aus Datei)"
-  local ntm=0; _have tmux && ntm="$(tmux ls 2>/dev/null | wc -l)"
+  local ntm=0; _have tmux && ntm="$( { tmux ls 2>/dev/null || true; } | wc -l)"
   echo "   t) tmux-Sitzungen …             ($ntm laufen auf diesem Rechner)"
   echo "   f) Fernsteuerung …              (Telegram/Handy, API)"
   echo "   e) Einstellungen …              (Engine, Qwen-Key, Bot, Team, Update)"
