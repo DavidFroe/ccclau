@@ -173,7 +173,7 @@ effective_context_window() {
     echo "200000"
     return
   elif [[ "$model" == "sonnet" || "$model" == "claude-sonnet"* ]]; then
-    echo "1000000"   # Sonnet 5: 1M Kontext
+    echo "1000000"   # Sonnet 5.5: 1M Kontext
     return
   elif [[ "$model" == "opus" || "$model" == "claude-opus"* ]]; then
     echo "1000000"   # Opus 5.5: 1M Kontext
@@ -2364,7 +2364,7 @@ Git-Helfer (Repo aus GitHub via SSH):
   clau --git-down NAME            Klont git@github.com:DavidFroe/NAME.git ins aktuelle Verzeichnis
 
 Model-Mappings:
-  Claude Code (agentisch):  1=haiku(4.5)  2=sonnet(5)  3=opus(5.5)  4=fable(5)
+  Claude Code (agentisch):  1=haiku(4.5)  2=sonnet(5.5)  3=opus(5.5)  4=fable(5)
   owlAPI (für --model N):   5=owl:120 (Q27B)  6=owl:121 (Flash-Next)  7=owl:126 (Flash-Next 262k)  8=owl:129 (35B schnell)  0=owl:free
   owlAPI direkt:            -m owl:350  oder  -m 350   (interaktiv: Live-Liste der owlAPI)
   Qwen Token Plan:          -m qwen:qwen3.8-max  (setzt Engine qwenplan für diesen Aufruf)
@@ -2476,12 +2476,12 @@ effective_backend() {
 
 # Übersetzt den internen Claude-Modell-Kurznamen in die volle Modell-ID, die die
 # claude-CLI erwartet. Explizit gepinnt auf die aktuelle Generation (Stand 2026-09):
-#   haiku=Haiku 4.5, sonnet=Sonnet 5, opus=Opus 5.5, fable=Fable 5.
+#   haiku=Haiku 4.5, sonnet=Sonnet 5.5, opus=Opus 5.5, fable=Fable 5.
 # Bei neuer Generation hier einmalig aktualisieren.
 claude_cli_model() {
   case "${1:-}" in
     haiku)  echo "claude-haiku-4-5" ;;
-    sonnet) echo "claude-sonnet-5" ;;
+    sonnet) echo "claude-sonnet-5-5" ;;
     opus)   echo "claude-opus-5-5" ;;
     fable)  echo "claude-fable-5" ;;
     *) echo "$1" ;;
@@ -2585,7 +2585,7 @@ choose_model_interactive() {
     echo
     echo "Modell wählen:"
     echo "  --- Claude Code mit Claude-Abo ---"
-    _print_cols 38 "1) haiku   Haiku 4.5" "2) sonnet  Sonnet 5  [Enter]" "3) opus    Opus 5.5" "4) fable   Fable 5"
+    _print_cols 38 "1) haiku   Haiku 4.5" "2) sonnet  Sonnet 5.5 [Enter]" "3) opus    Opus 5.5" "4) fable   Fable 5"
     echo "  --- Presets: lokal (PropellerA) + QuiteQue Free-Plan, via owlAPI ---"
     _print_cols 38 "5) Q27B         owl:120  97k" "6) Flash-Next   owl:121  97k" \
                    "7) Flash-Next   owl:126  262k" "8) 35B schnell  owl:129  32k" \
@@ -4768,7 +4768,7 @@ run_new_project_interactive() {
         echo
         echo "Bitte Modell wählen:"
         echo "  1) haiku   Haiku 4.5   schnell, günstig"
-        echo "  2) sonnet  Sonnet 5    Standard"
+        echo "  2) sonnet  Sonnet 5.5   Standard"
         echo "  3) opus    Opus 5.5    stärker, teurer"
         echo "  4) fable   Fable 5     stärkstes Modell"
         printf "Auswahl [1-4, Enter=2]: "

@@ -7,9 +7,9 @@ Wrapper für Claude Code und eigene Modelle via QuiteQue (opencode wird mitinsta
 - **Modell pro Projektordner** in `.clau.conf` speichern
 - **Session-Auswahl** beim Start (Resume-Picker, neue Session, feste Session-ID)
 - **Zwei Backends**:
-  - **Claude Code** (agentisch) — `haiku` (4.5), `sonnet` (5), `opus` (5), `fable` (5)
+  - **Claude Code** (agentisch) — `haiku` (4.5), `sonnet` (5.5), `opus` (5.5), `fable` (5)
   - **QuiteQue** (lokale/cloud-Modelle) — `owl:<ID>` (z.B. `owl:120` = PropellerA)
-- **Standard**: Modell `sonnet` (Sonnet 5), Autonomie-Level `0` (vollautomatisch/durchlaufen)
+- **Standard**: Modell `sonnet` (Sonnet 5.5), Autonomie-Level `0` (vollautomatisch/durchlaufen)
 - **opencode** wird beim `--install` automatisch mitinstalliert (eigenständiges Tool, spricht QuiteQue direkt im OpenAI-Format)
 - **Pre-Flight-Check**: Session-Größe vs. Modell-Context-Window vor Start
 - **Auto-Compact**: Konfigurierbarer Threshold (Prozent oder festes Token-Limit)
@@ -116,7 +116,7 @@ clau — mario  [owl:120, Engine: claude]
 
 | Taste | Engine | Modell |
 |-------|--------|--------|
-| 1-4 | Claude Code + Claude-Abo | haiku (4.5) / sonnet (5) / opus (5.5) / fable (5) |
+| 1-4 | Claude Code + Claude-Abo | haiku (4.5) / sonnet (5.5) / opus (5.5) / fable (5) |
 | 5 / 6 / 7 | Claude Code + owlAPI (Preset) | Q27B `owl:120` / Flash-Next `owl:121` (97k) / Flash-Next `owl:126` (262k) |
 | 0 | Claude Code + owlAPI (Preset) | QuiteQue Free-Plan `owl:free` (Router) |
 | q1-q10 | Claude Code + Qwen Token Plan | qwen3.8-max (Standard), qwen3.8-flash, … glm-5.2, auto |
