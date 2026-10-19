@@ -36,6 +36,7 @@ LLM_STATUS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/llm_statu
 CLAU_TEAM_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/team"
 PI_TEAM_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pi_team_mcp.py"
 CLAU_API_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/clau_api.py"
+CLAU_GUI_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/clau_gui.py"
 OWL_BASE_URL="${OWL_BASE_URL:-http://11.0.0.13:7077}"
 QQ_USER="opencode"
 
@@ -2301,12 +2302,21 @@ Verwendung (interaktiv):
   clau --take ID                  Merkt sich eine feste Session-ID für dieses Verzeichnis
   clau --forget                   Entfernt die gemerkte Session-ID
   clau --current                  Zeigt aktuelle Session/Model-Config
+  clau --gui                      Grafische Oberfläche (tkinter): Config, Modell, Sessions, tmux
   clau --api                      Fernsteuerung (HTTP, CLAU_API_BIND) im Vordergrund starten
   clau --api-stop                 Im Hintergrund laufende Fernsteuerung beenden
   clau --clear-model              Entfernt das gespeicherte Modell
   clau --install                  Installiert "clau" + claude-code + opencode nach ~/.local/bin
   clau --uninstall                Entfernt "clau" aus ~/.local/bin
   clau --self-update              Aktualisiert clau auf die neueste Version aus dem Git-Repo
+
+Nicht-interaktiv (auch von der GUI genutzt):
+  clau --sessions-json [here|all] Eine JSON-Zeile pro Session (Name, Modell, Tokens, Ordner)
+  clau --set-model <spec>         Modell dauerhaft setzen: haiku|sonnet|opus|fable|owl:<ID>|qwen:<modell>
+  clau --rename <SID> <Name>      Session umbenennen
+  clau --export-md <SID>          Session als Markdown exportieren
+  clau --delete-session <SID>     Session löschen (unwiderruflich)
+  clau --tmux-pin <SID> <on|off>  Session in tmux fixieren / lösen
 
 Telegram / Handy:
   clau --tg-token                 Bot-Token reinpasten (wird geprüft & gespeichert)
@@ -4148,9 +4158,15 @@ for bdir in buckets:
                          clean(m.get("model") or model), preview))
 
 sessions.sort(key=lambda s: s[0], reverse=True)
+scan_json = os.environ.get("CLAU_SCAN_JSON") == "1"
 for mtime, cwd, sid, tokens, name, model, preview in sessions:
     mstr = time.strftime("%d.%m.%Y %H:%M", time.localtime(mtime))
-    print(SEP.join([mstr, cwd, sid, str(tokens), name, model, preview, str(int(mtime))]))
+    if scan_json:
+        print(json.dumps({"mtime": mstr, "epoch": int(mtime), "cwd": cwd, "sid": sid,
+                          "tokens": tokens, "name": name, "model": model, "preview": preview},
+                         ensure_ascii=False))
+    else:
+        print(SEP.join([mstr, cwd, sid, str(tokens), name, model, preview, str(int(mtime))]))
 PYEOF
 }
 
@@ -5224,6 +5240,77 @@ parse_args() {
         echo "Feste Session-ID entfernt."
         exit 0
         ;;
+      --gui)
+        ACTION="gui"
+        shift
+        ;;
+      --sessions-json)
+        # JSON-Zeile pro Session (für die GUI): --sessions-json [here|all]
+        ACTION="sessions-json"
+        SESSIONS_JSON_SCOPE="${2:-here}"
+        [[ "$SESSIONS_JSON_SCOPE" == "here" || "$SESSIONS_JSON_SCOPE" == "all" ]] || SESSIONS_JSON_SCOPE="here"
+        shift
+        [[ $# -gt 0 && "${1:0:1}" != "-" ]] && shift
+        ;;
+      --set-model)
+        # Dauerhaftes Modell setzen (GUI): haiku|sonnet|opus|fable|owl:<ID>|qwen:<modell>
+        if [[ -z "${2:-}" ]]; then
+          echo "--set-model erwartet: haiku|sonnet|opus|fable|owl:<ID>|qwen:<modell>" >&2
+          exit 1
+        fi
+        case "$2" in
+          haiku|sonnet|opus|fable) CLAU_MODEL="$2"; CLAU_BACKEND="claude" ;;
+          owl:*) CLAU_MODEL="$2"; CLAU_BACKEND="claude" ;;
+          qwen:*) CLAU_BACKEND="qwenplan"; CLAU_QWEN_MODEL="${2#qwen:}"; CLAU_MODEL="" ;;
+          *) echo "--set-model: ungültiges Modell: $2" >&2; exit 1 ;;
+        esac
+        save_config
+        if [[ "$(effective_backend)" == "qwenplan" ]]; then
+          echo "Qwen-Modell gesetzt auf: $CLAU_QWEN_MODEL (Engine: qwenplan)"
+        else
+          echo "Standardmodell gesetzt auf: $CLAU_MODEL"
+        fi
+        exit 0
+        ;;
+      --rename)
+        if [[ -z "${2:-}" || -z "${3:-}" ]]; then
+          echo "--rename erwartet: <Session-ID> <Name>" >&2; exit 1
+        fi
+        _set_session_title "$(_claude_projects_dir)/$(_project_hash_for)" "$2" "$3"
+        echo "✓ Session umbenannt."
+        exit 0
+        ;;
+      --export-md)
+        if [[ -z "${2:-}" ]]; then
+          echo "--export-md erwartet: <Session-ID>" >&2; exit 1
+        fi
+        local _esf; _esf="$(_session_file_for_id "$2")" || { echo "Session nicht gefunden: $2" >&2; exit 1; }
+        local _eout; _eout="$(_session_export_md "$_esf")"
+        [[ -n "$_eout" ]] && echo "✓ Exportiert: $_eout" || { echo "✗ Export fehlgeschlagen." >&2; exit 1; }
+        exit 0
+        ;;
+      --delete-session)
+        if [[ -z "${2:-}" ]]; then
+          echo "--delete-session erwartet: <Session-ID>" >&2; exit 1
+        fi
+        local _dsf; _dsf="$(_session_file_for_id "$2")" || { echo "Session nicht gefunden: $2" >&2; exit 1; }
+        rm -f "$_dsf"
+        _delete_session_title "$(_claude_projects_dir)/$(_project_hash_for)" "$2"
+        if [[ "${CLAU_SESSION_ID:-}" == "$2" ]]; then CLAU_SESSION_ID=""; save_config; fi
+        echo "✓ Session gelöscht."
+        exit 0
+        ;;
+      --tmux-pin)
+        if [[ -z "${2:-}" || -z "${3:-}" ]]; then
+          echo "--tmux-pin erwartet: <Session-ID> <on|off>" >&2; exit 1
+        fi
+        case "${3:-}" in
+          on|1|true) _session_tmux_set "$2" 1; echo "✓ In tmux fixiert." ;;
+          off|0|false) _session_tmux_set "$2" 0; echo "✓ Nicht mehr in tmux fixiert." ;;
+          *) echo "--tmux-pin: <on|off> erwartet" >&2; exit 1 ;;
+        esac
+        exit 0
+        ;;
       --clear-model)
         CLAU_MODEL=""
         save_config
@@ -5433,13 +5520,13 @@ fi
 
 # Update-Check nur für interaktive Läufe (nicht headless/CI/tg)
 case "${ACTION}" in
-  tg-token|tg-setup|tg-test|tg-whoami|tg-bot|tg-hooks-off|mirror|tg-pump|api|api-stop) : ;;
+  tg-token|tg-setup|tg-test|tg-whoami|tg-bot|tg-hooks-off|mirror|tg-pump|api|api-stop|gui|sessions-json) : ;;
   *) [[ "${HEADLESS:-0}" -eq 1 ]] || check_for_updates ;;
 esac
 
 # Fernsteuerung im Hintergrund (nur mit CLAU_API=1, nicht für Hilfsaufrufe)
 case "${ACTION}" in
-  tg-*|mirror|api|api-stop) : ;;
+  tg-*|mirror|api|api-stop|gui|sessions-json) : ;;
   *) [[ "${HEADLESS:-0}" -eq 1 ]] || api_daemon_ensure ;;
 esac
 
@@ -5492,6 +5579,20 @@ case "${ACTION}" in
     ;;
   api-stop)
     api_daemon_stop
+    ;;
+  gui)
+    if [[ ! -f "$CLAU_GUI_SCRIPT" ]]; then
+      echo "Fehler: GUI-Skript nicht gefunden: $CLAU_GUI_SCRIPT" >&2
+      exit 1
+    fi
+    exec python3 "$CLAU_GUI_SCRIPT"
+    ;;
+  sessions-json)
+    export CLAU_SCAN_JSON=1
+    case "${SESSIONS_JSON_SCOPE:-here}" in
+      all) _all_sessions_scan ;;
+      *)   _here_sessions_scan ;;
+    esac
     ;;
   tg-whoami)
     tg_whoami

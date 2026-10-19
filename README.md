@@ -21,6 +21,7 @@ Wrapper für Claude Code und eigene Modelle via QuiteQue (opencode wird mitinsta
 - **Bot-Einstellungen**: Autonomie-Level (0-2), sudo NOPASSWD, Effort-Level
 - **Team-Modus** (`CLAU_TEAM=1`): 27B-Teamleiter verteilt an bis zu 5 Ausführer-Agenten auf dem 176B, je nach freien Slots
 - **Fernsteuerung** (`clau --api`, Default aus): HTTP-Schnittstelle für Rollen-Sessions (teamleiter/planer/tester)
+- **Python-GUI** (`clau --gui`, tkinter): Config, Modellwechsel, Session-Liste (fortsetzen/umbenennen/exportieren/löschen) und tmux-Panel
 - **Offline-Betrieb** (`CLAU_OFFLINE=1`): kein Update-Check, keine Websuche, keine Netz-Installation
 
 ## Installation
@@ -344,6 +345,34 @@ curl -s -XPOST localhost:7010/sessions/planer/start -d '{"modell":"owl:120","auf
 curl -s -XPOST localhost:7010/sessions/planer/nachricht -d '{"text":"Fasse PLAN.md in 3 Sätzen zusammen"}'
 curl -s -H "Authorization: Bearer $TOKEN" http://vm:7010/status     # mit Token
 ```
+
+## Python-GUI (`clau --gui`)
+
+Grafisches Steuerpanel (tkinter, nur Standardbibliothek) als Alternative zum Terminal-Menü.
+Start:
+
+```bash
+clau --gui                       # GUI im aktuellen Ordner
+python3 clau_gui.py --dir <pfad> # direkt, optional anderer Projektordner
+python3 clau_gui.py --no-launch  # Terminal-Start nur simulieren (Testen)
+```
+
+Die GUI ist eine dünne Schicht über `clau.sh` — sie liest `.clau.conf` und die Session-Liste
+und führt Aktionen über die nicht-interaktiven Flags aus (Kernlogik bleibt in `clau.sh`):
+
+| Bereich | Funktion |
+|---|---|
+| **Konfiguration** | Ordner + Zusammenfassung (Modell, Engine, Autonomie, Team, Websuche, tmux) aus `.clau.conf` |
+| **Modell** | Presets (haiku/sonnet/opus/fable, `owl:120/121/126/129/free`) + Qwen-Optionen + freies Feld → `clau --set-model` |
+| **Sessions** | Tabelle (Hier/Alle) mit Name, Ordner, Modell, Zuletzt, Tokens; Aktionen: Neue, Fortsetzen, Umbenennen, Export `.md`, tmux fixieren, Löschen |
+| **tmux** | `tmux ls` + Anbinden / Beenden |
+
+**Start** öffnet `clau` (neue Session bzw. `clau --resume <sid>`) in einem neuen
+Terminal-Fenster (gnome-terminal/konsole/xfce4-terminal/xterm, Fallback: tmux). Doppelklick auf
+eine Session = Fortsetzen. Ohne `DISPLAY` zeigt die GUI einen klaren Fehler statt abzustürzen.
+
+Nicht-interaktive Flags (auch von der GUI genutzt): `--sessions-json [here|all]`, `--set-model <spec>`,
+`--rename <sid> <name>`, `--export-md <sid>`, `--delete-session <sid>`, `--tmux-pin <sid> <on|off>`.
 
 ## Offline-Betrieb
 
