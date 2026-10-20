@@ -69,6 +69,8 @@ clau -m owl:120               # Mit eigenem Modell (QuiteQue) starten
 clau --headless -p "Prompt"   # Headless-Modus
 clau --current                # Aktuelle Config anzeigen
 clau --git-up                 # Commit & Push
+clau --doctor                 # Claude Code prüfen (claude doctor), auch Einstellungen → 7 und GUI
+clau --claude-update          # Claude Code aktualisieren (claude update), Einstellungen → 8
 clau --git-down               # Pull von origin
 ```
 

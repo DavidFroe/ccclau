@@ -18,6 +18,7 @@ Bereiche:
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -151,9 +152,13 @@ def _launch_terminal(cmd, cwd):
         (["xfce4-terminal", "-e"], "xfce4-terminal"),
         (["xterm", "-e"], "xterm"),
     ]
+    if isinstance(cmd, list):
+        # Liste = Programm + Argumente; für Terminals, die nur EIN Wort nach
+        # -e/-- erwarten, als bash -c verpacken
+        cmd = "bash -c " + shlex.quote(" ".join(shlex.quote(c) for c in cmd))
     for args, _ in candidates:
         if shutil.which(args[0]):
-            full = args + [cmd]
+            full = args + shlex.split(cmd)
             try:
                 subprocess.Popen(full, cwd=cwd,
                                  stdout=subprocess.DEVNULL,
@@ -226,6 +231,10 @@ class ClauGui:
             row=1, column=1, sticky="w", padx=4, pady=(4, 0))
         ttk.Button(mod, text="Modell speichern",
                    command=self.on_set_model).grid(row=0, column=2, sticky="e", padx=4)
+        ttk.Button(mod, text="Claude Code prüfen (doctor)",
+                   command=self.on_doctor).grid(row=1, column=2, sticky="e", padx=4, pady=(4, 0))
+        ttk.Button(mod, text="Claude Code aktualisieren",
+                   command=self.on_claude_update).grid(row=2, column=2, sticky="e", padx=4, pady=(4, 0))
 
         # --- Session-Tabelle ---
         sess = ttk.LabelFrame(root, text="Sessions", padding=6)
@@ -376,6 +385,24 @@ class ClauGui:
         else:
             messagebox.showerror("clau", "Modell konnte nicht gesetzt werden:\n" +
                                  (err.strip() or out.strip() or "unbekannter Fehler"))
+
+    def _launch_clau_tool(self, flag, label):
+        # Im Terminal laufen lassen (doctor ist interaktiv) und Fenster offen
+        # halten, bis Enter gedrückt wird.
+        if self.no_launch:
+            self.status.set("[no-launch] clau %s" % flag)
+            return
+        script = "%s %s; echo; read -rp 'Enter zum Schließen ' _" % (shlex.quote(_clau_bin()), flag)
+        if _launch_terminal(["bash", "-c", script], self.base_dir):
+            self.status.set("%s gestartet (Terminal-Fenster)." % label)
+        else:
+            self.status.set("Kein Terminal-Fenster verfügbar (DISPLAY/tmux fehlt).")
+
+    def on_doctor(self):
+        self._launch_clau_tool("--doctor", "claude doctor")
+
+    def on_claude_update(self):
+        self._launch_clau_tool("--claude-update", "Claude-Code-Update")
 
     def on_new(self):
         if self.no_launch:

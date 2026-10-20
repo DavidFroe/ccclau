@@ -2316,6 +2316,8 @@ Verwendung (interaktiv):
   clau --install                  Installiert "clau" + claude-code + opencode nach ~/.local/bin
   clau --uninstall                Entfernt "clau" aus ~/.local/bin
   clau --self-update              Aktualisiert clau auf die neueste Version aus dem Git-Repo
+  clau --doctor                   Claude Code prüfen (claude doctor)
+  clau --claude-update            Claude Code aktualisieren (claude update)
 
 Nicht-interaktiv (auch von der GUI genutzt):
   clau --sessions-json [here|all] Eine JSON-Zeile pro Session (Name, Modell, Tokens, Ordner)
@@ -3517,6 +3519,33 @@ uninstall_self() {
 # lokal etwas geändert ist (git pull --rebase brach dann früher ab). Nichts
 # geht verloren: lokale Commits landen in einem Branch backup/self-update-*,
 # geänderte Dateien im git stash, die eigene .clau.conf bleibt erhalten.
+# ── Claude Code selbst: Diagnose und Update ─────────────────────────────────
+# "Auto-update failed · Run claude doctor" kommt von Claude Code, nicht von
+# clau -- meist ist beim Auto-Update das Netz weggebrochen. Beides hier
+# erreichbar, damit man nicht erst eine Shell braucht.
+claude_doctor() {
+  _have claude || { echo "claude nicht gefunden." >&2; return 1; }
+  echo "Claude Code $(claude --version 2>/dev/null) — $(command -v claude)"
+  echo "Starte 'claude doctor' (Beenden mit Enter/Esc) ..."
+  echo
+  claude doctor || true
+}
+
+claude_update() {
+  _have claude || { echo "claude nicht gefunden." >&2; return 1; }
+  if [[ "${CLAU_OFFLINE:-0}" == "1" ]]; then
+    echo "CLAU_OFFLINE=1 → kein Update aus dem Netz." >&2; return 1
+  fi
+  local before; before="$(claude --version 2>/dev/null)"
+  echo "Claude Code: $before — suche Update ..."
+  if claude update; then
+    echo "Jetzt: $(claude --version 2>/dev/null)"
+  else
+    echo "Update fehlgeschlagen. Diagnose:  clau --doctor" >&2
+    return 1
+  fi
+}
+
 self_update() {
   local script_path repo_dir
   script_path="$(readlink -f "$0")"
@@ -4966,8 +4995,10 @@ choose_settings_menu() {
     echo "  4) Team-Modus …              : $(team_on && echo "AN — $(team_set_label)" || echo aus)"
     echo "  5) Update von GitHub (self-update)"
     echo "  6) Neue Sessions in tmux     : $([[ "${CLAU_TMUX:-0}" == "1" ]] && echo an || echo aus)   (überleben Terminal-Abstürze)"
+    echo "  7) Claude Code prüfen        (claude doctor, $(claude --version 2>/dev/null | cut -d' ' -f1))"
+    echo "  8) Claude Code aktualisieren (claude update)"
     echo "  0) Zurück"
-    printf "Auswahl [0-6]: "
+    printf "Auswahl [0-8]: "
     local c; read -r c
     case "$c" in
       1) choose_backend_interactive ;;
@@ -4977,6 +5008,8 @@ choose_settings_menu() {
       5) self_update; echo; echo "Bitte 'clau' erneut starten, um die neue Version zu nutzen."; exit 0 ;;
       6) if [[ "${CLAU_TMUX:-0}" == "1" ]]; then CLAU_TMUX=0; else CLAU_TMUX=1; _ensure_tmux || CLAU_TMUX=0; fi
          save_config ;;
+      7) claude_doctor ;;
+      8) claude_update || true ;;
       *) return 0 ;;
     esac
   done
@@ -5190,6 +5223,14 @@ parse_args() {
       --self-update)
         self_update
         exit 0
+        ;;
+      --doctor)
+        claude_doctor
+        exit 0
+        ;;
+      --claude-update)
+        claude_update
+        exit $?
         ;;
       --model)
         if [[ -z "${2:-}" ]]; then
