@@ -725,9 +725,16 @@ print("MSG=" + msg)
 
   local proj; proj="$(basename "${CWD:-$PWD}")"
   local topic_name="📁 ${proj} · ${SID:0:6}"
-  local thread; thread="$(_tg_topic_for "$SID" "$topic_name")"
-  _tg_send "$thread" "$text"
-  [[ "$key" == "sessionend" ]] && _tg_close_topic "$SID" "$thread"
+  # Netzwerk abgekoppelt im Hintergrund: Claude Code bricht Hooks (v. a.
+  # SessionEnd) nach kurzer Frist ab ("Hook cancelled"); bei langsamer
+  # Leitung schaffen die Telegram-Aufrufe das nicht.
+  (
+    trap '' HUP
+    local thread; thread="$(_tg_topic_for "$SID" "$topic_name")"
+    _tg_send "$thread" "$text"
+    [[ "$key" == "sessionend" ]] && _tg_close_topic "$SID" "$thread"
+  ) </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
   exit 0
 }
 
