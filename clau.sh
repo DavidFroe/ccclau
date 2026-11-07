@@ -2149,6 +2149,13 @@ _apply_compact_window() {
   echo "Auto-Compact: ab ~$(( w - CC_COMPACT_RESERVE )) Tokens (Fenster $cw, $label)"
 }
 
+# Räumt Compact-/Context-Variablen eines früheren (lokalen) Modells ab, damit ein
+# Cloud-Modell (Sonnet/Opus) nicht mit dem alten ~100k-Fenster startet und
+# dauernd kompaktiert.
+_reset_cc_context_env() {
+  unset CLAUDE_CODE_MAX_CONTEXT_TOKENS CLAUDE_CODE_AUTO_COMPACT_WINDOW
+}
+
 # Kurzstatus für die Menüleiste
 auto_compact_status() {
   if [[ "${CLAU_AUTO_COMPACT_ENABLED:-1}" == "0" ]]; then
@@ -4483,6 +4490,7 @@ run_resume_picker() {
   local extra; extra="$(_interaction_args)"
   _team_cc_args_fill
   # shellcheck disable=SC2086
+  _reset_cc_context_env
   exec claude --resume --model "$(claude_cli_model "$mdl")" $extra "${TEAM_CC_ARGS[@]}"
 }
 
@@ -4514,6 +4522,7 @@ run_saved_session() {
   local extra; extra="$(_interaction_args)"
   _team_cc_args_fill
   # shellcheck disable=SC2086
+  _reset_cc_context_env
   exec claude --resume "$CLAU_SESSION_ID" --model "$(claude_cli_model "$mdl")" $extra "${TEAM_CC_ARGS[@]}"
 }
 
@@ -4546,6 +4555,7 @@ run_new_session() {
   _api_prompt_args
   _team_cc_args_fill
   # shellcheck disable=SC2086
+  _reset_cc_context_env
   exec claude --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}" "${NEW_SESSION_ARGS[@]}" "${TEAM_CC_ARGS[@]}"
 }
 
@@ -4586,6 +4596,7 @@ run_resume_id() {
   _api_prompt_args
   _team_cc_args_fill
   # shellcheck disable=SC2086
+  _reset_cc_context_env
   exec claude --resume "$rid" --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}" "${TEAM_CC_ARGS[@]}"
 }
 
@@ -4634,6 +4645,7 @@ run_compact() {
 build_headless_cmd() {
   local mdl
   mdl="$(effective_model)"
+  _reset_cc_context_env
 
   CLAUDE_CMD=(claude)
 
@@ -4778,6 +4790,7 @@ EOF
       unset_token_saver_env
       apply_tg_hooks
     fi
+    _reset_cc_context_env
     exec claude --model "$(claude_cli_model "${CLAU_MODEL}")"
   )
 }
