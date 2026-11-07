@@ -1312,7 +1312,7 @@ tg_mirror() {
   local extra; extra="$(_interaction_args)"
   # shellcheck disable=SC2086
   tmux new-session -d -s "$sess" -c "$(pwd)" \
-    "claude --model '$(claude_cli_model "$mdl")' $extra"
+    "env -u CLAUDE_CODE_AUTO_COMPACT_WINDOW -u CLAUDE_CODE_MAX_CONTEXT_TOKENS claude --model '$(claude_cli_model "$mdl")' $extra"
   tmux pipe-pane -t "$sess" -o "cat >> '$log'"
 
   # Pump losschicken (ueberlebt das Ablegen des Terminals)
@@ -2276,6 +2276,11 @@ with open('$settings_file', 'w') as f:
 unset_token_saver_env() {
   unset CLAUDE_CODE_DISABLE_ARTIFACT
   unset CLAUDE_CODE_DISABLE_AGENT_VIEW
+  # Compact-/Fenster-Grenzen stammen von einer vorherigen owl-/Qwen-Session
+  # (z.B. 100k für ein lokales Modell) und dürfen echten Claude-Modellen nicht
+  # anhaften -- sonst kompaktiert Sonnet ständig schon bei ~67k.
+  unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  unset CLAUDE_CODE_MAX_CONTEXT_TOKENS
 }
 
 print_help() {
