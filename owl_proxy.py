@@ -2,7 +2,7 @@
 """
 owl_proxy.py — Anthropic-API → QuiteQue (OpenAI-Format) Proxy
 Lauscht auf localhost:PORT, übersetzt /v1/messages für claude CLI.
-Setzt X-OwlTrail-User Header (User 'opencode' per default) für QuiteQue-Auth.
+Setzt X-OwlTrail-User Header (User ccclau per default) für QuiteQue-Auth.
 """
 
 import json
@@ -81,7 +81,37 @@ def _estimate_input_tokens(payload):
 
 OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.13:7077/v1")
 OWL_MODEL = os.environ.get("OWL_MODEL", "120")
-OWL_USER = os.environ.get("OWL_PROXY_USER", "opencode")
+OWL_USER = os.environ.get("OWL_PROXY_USER", "ccclau")
+
+# Token-Protokoll je Session: eine JSON-Zeile pro Anfrage (Modell, Ein-/Ausgabe).
+# "action" markiert den Beginn einer neuen Nutzer-Aktion (letzte Nachricht ist
+# keine Tool-Antwort) -- daraus rechnet clau die Kosten einer einzelnen Aktion.
+USAGE_FILE = os.environ.get("OWL_USAGE_FILE", "")
+_USAGE_LOCK = threading.Lock()
+
+
+def record_usage(target, in_tok, out_tok, cached=None, real=True, action=False):
+    if not USAGE_FILE:
+        return
+    try:
+        line = json.dumps({"ts": round(time.time(), 1), "model": str(target),
+                           "in": int(in_tok or 0), "out": int(out_tok or 0),
+                           "cached": cached, "real": real, "action": action})
+        with _USAGE_LOCK, open(USAGE_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception as e:
+        log(f"  Token-Protokoll fehlgeschlagen: {e!r}")
+
+
+def _is_new_action(messages):
+    if not messages:
+        return False
+    last = messages[-1]
+    if last.get("role") != "user":
+        return False
+    c = last.get("content")
+    return not (isinstance(c, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in c))
 
 # Freiwillige Aktivitäts-Header fürs PropellerA-Panel (power-activity.jsonl):
 # wer/was/wofür fragt an. Fehlt einer, zeigt das Panel "unbekannt" -- daher
@@ -364,6 +394,7 @@ class StreamTranslator:
         self.text_index = None
         self.tool_buffers = {}   # oai_index → {id, name, args, block_index}
         self.output_tokens = 0
+        self.usage_seen = False
         self.cached_tokens = None
         self.text_closed = False
         self.tools_closed = False
@@ -395,6 +426,7 @@ class StreamTranslator:
             self.output_tokens = data["usage"].get("completion_tokens", self.output_tokens)
             # Echte prompt_tokens ersetzen die Schätzung, sobald sie da sind.
             self.input_tokens = data["usage"].get("prompt_tokens") or self.input_tokens
+            self.usage_seen = True
             self.cached_tokens = (data["usage"].get("prompt_tokens_details") or {}).get("cached_tokens")
 
         if not choices:
@@ -565,6 +597,7 @@ class StreamTranslator:
 # ── HTTP-Handler ───────────────────────────────────────────────────────────────
 
 class ProxyHandler(BaseHTTPRequestHandler):
+    _action = False
     def log_message(self, fmt, *args):
         pass  # kein Log-Spam
 
@@ -624,6 +657,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if stream:
             oai_payload["stream_options"] = {"include_usage": True}
 
+        self._action = _is_new_action(req.get("messages", []))
         n_msgs = len(oai_payload["messages"])
         est_input_tokens = _estimate_input_tokens(oai_payload)
         _dump_debug_payload(oai_payload)
@@ -754,7 +788,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if stream:
             self._stream(resp, model_name, est_input_tokens, target, sse)
         else:
-            self._single(resp, model_name, est_input_tokens)
+            self._single(resp, model_name, est_input_tokens, target)
 
     def _fail(self, status, message, sse):
         # Ist der SSE-Kopf schon raus (Wartezeit an der Slot-Sperre), lässt
@@ -764,10 +798,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
         else:
             self._error_json(status, message)
 
-    def _single(self, owl_resp, model_name, est_input_tokens=0):
+    def _single(self, owl_resp, model_name, est_input_tokens=0, target=None):
         try:
-            body = json.dumps(oai_resp_to_ant(owl_resp.json(), model_name,
-                                              est_input_tokens)).encode()
+            ant = oai_resp_to_ant(owl_resp.json(), model_name, est_input_tokens)
+            record_usage(target or OWL_MODEL, ant["usage"]["input_tokens"],
+                         ant["usage"]["output_tokens"],
+                         real=bool((owl_resp.json().get("usage") or {}).get("prompt_tokens")),
+                         action=self._action)
+            body = json.dumps(ant).encode()
         except Exception:
             self.send_error(502, "Bad owlAPI response")
             return
@@ -853,6 +891,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 with write_lock:
                     self.wfile.write(end_evts.encode())
                     self.wfile.flush()
+            record_usage(tr.target, tr.input_tokens, tr.output_tokens, tr.cached_tokens,
+                         real=tr.usage_seen, action=self._action)
             log(f"  Stream fertig (model={tr.target}) nach {time.monotonic()-t0:.1f}s, {n_lines} Zeilen, "
                 f"{n_pings[0]} Pings, in={tr.input_tokens} out={tr.output_tokens} "
                 f"cached={tr.cached_tokens if tr.cached_tokens is not None else '?'} Tokens")

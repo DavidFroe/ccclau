@@ -1,6 +1,6 @@
 # ccclau
 
-Wrapper für Claude Code und eigene Modelle via QuiteQue (opencode wird mitinstalliert).
+Wrapper für Claude Code, nano und eigene Modelle via QuiteQue (opencode wird mitinstalliert).
 
 ## Features
 
@@ -117,14 +117,46 @@ clau — mario  [owl:120, Engine: claude]
 | Taste | Engine | Modell |
 |-------|--------|--------|
 | 1-4 | Claude Code + Claude-Abo | haiku (4.5) / sonnet (5) / opus (5.5) / fable (5) |
-| 5 / 6 / 7 | Claude Code + owlAPI (Preset) | Q27B `owl:120` / Flash-Next `owl:121` (97k) / Flash-Next `owl:126` (262k) |
-| 0 | Claude Code + owlAPI (Preset) | QuiteQue Free-Plan `owl:free` (Router) |
+| 9 (Standard, Enter) | gewählte Engine + owlAPI | Universal `owl:222` (ab 96k, lädt nie um) |
+| 5 | Engine + owlAPI | Turbo 27B `owl:122` (97k) |
+| 6 | Engine + owlAPI | Flash-Next `owl:121`, 2 Sessions à 97k, MTP |
+| 7 | Engine + owlAPI | Flash-Next `owl:126`, 261k, 1 Session, ohne MTP |
+| a | Engine + owlAPI | Flash-Next `owl:139`, 97k, 1 Session, MTP |
+| 8 | Engine + owlAPI | Coder `owl:137` (97k) |
+| 0 | Engine + owlAPI | QuiteQue Free-Plan `owl:free` (Router) |
 | q1-q10 | Claude Code + Qwen Token Plan | qwen3.8-max (Standard), qwen3.8-flash, … glm-5.2, auto |
-| owl-ID (z.B. `350`) | Claude Code + owlAPI | alle übrigen Modelle, live aus `/v1/models`, in Spalten nach Anbieter |
-| o | Claude Code + owlAPI | ID direkt eingeben |
+| owl-ID (z.B. `350`) | Engine + owlAPI | alle übrigen Modelle, live aus `/v1/models`, in Spalten nach Anbieter |
+| o | Engine + owlAPI | ID direkt eingeben |
+
+(Engine = Claude Code, oder nano mit `CLAU_BACKEND=nano`.)
 
 Die owlAPI-Liste wird live abgefragt und in `~/.cache/clau/owl_models.json` gecacht (1 h);
 daraus kommt auch das Kontext-Fenster für Auto-Compact.
+
+## Engines (nano, Claude Code, opencode)
+
+Standard-Engine ist **Claude Code** (`CLAU_BACKEND="claude"`); **nano** (`CLAU_BACKEND="nano"`) ist wählbar: ein Python-Nachbau von Claude Code
+([nano-claude-code](https://github.com/DavidFroe/Propellerlabs-Coder), MIT, im Repo unter `vendor/nano/`).
+Er wird beim ersten Start in eine eigene venv installiert (`~/.local/share/clau/nano-venv`, braucht Python ≥ 3.10)
+und spricht über den lokalen owl-Proxy mit QuiteQue. Claude Code muss dafür nicht installiert sein.
+
+| Engine | Wann |
+|--------|------|
+| `nano` (wählbar) | alle `owl:*`-Modelle, interaktiv und als Kurzauftrag `clau "AUFTRAG"` |
+| `claude` (Standard) | alle Modelle, besonders Claude-Abo-Modelle (haiku/sonnet/opus/fable), Team-Modus, Fernsteuerung (`--api`), Qwen Token Plan |
+| `opencode` / `qwenplan` | wie bisher |
+
+Rückfall auf Claude Code passiert automatisch, wenn nano nicht installierbar ist (`CLAU_OFFLINE=1` ohne
+vorhandene Installation, Python < 3.10) oder das Modell/der Modus nano nicht bedient.
+Umschalten: Hauptmenü → Einstellungen → CLI-Engine, oder `CLAU_BACKEND=claude clau`.
+
+Sessions: nano speichert in `~/.nano_claude/sessions/*.json` (in der Liste „Alle auf diesem System" mit `[nano]`).
+Claude-Code-Sessions (`~/.claude/projects/*/<uuid>.jsonl`) lassen sich in nano per `--resume <uuid>` fortsetzen;
+die Originaldatei wird nur gelesen, nie verändert. Fortsetzen geht für nano-Sessions, Komprimieren/Löschen nur für Claude-Code-Sessions.
+
+Lokale Änderungen an nano (Kontextfenster per `NANO_CONTEXT_WINDOW`, QuiteQue-Hinweis per
+`NANO_APPEND_SYSTEM_PROMPT_FILE`, CC-Import, Absturz bei fehlenden Cache-Tokens) stehen in `vendor/nano/PATCHES.md`.
+Relevante Variablen: `CLAU_BACKEND`, `CLAU_OFFLINE`, `CLAU_QQ_USER`, `CLAU_QQ_HINT`, `CLAU_CC_1M` (nur Claude Code).
 
 ## Qwen Token Plan (Engine `qwenplan`)
 

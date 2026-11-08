@@ -17,7 +17,7 @@ stdout gehört dem Protokoll.
 
 Env:
   QUITEQUE_URL       Basis-URL (Default http://11.0.0.13:7077)
-  OWL_PROXY_USER     Username für X-OwlTrail-User (Default opencode)
+  OWL_PROXY_USER     Username für X-OwlTrail-User (Default ccclau)
   WEBSEARCH_DEPTH    Default-Tiefe (speed|balanced|quality, Default speed)
   WEBSEARCH_TIMEOUT  Sekunden (Default 300)
 """
@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 
 QUITEQUE_URL = os.environ.get("QUITEQUE_URL", "http://11.0.0.13:7077").rstrip("/")
-USER = os.environ.get("OWL_PROXY_USER", "opencode")
+USER = os.environ.get("OWL_PROXY_USER", "ccclau")
 DEFAULT_DEPTH = os.environ.get("WEBSEARCH_DEPTH", "speed")
 TIMEOUT = int(os.environ.get("WEBSEARCH_TIMEOUT", "300"))
 

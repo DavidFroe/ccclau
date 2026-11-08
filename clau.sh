@@ -28,8 +28,9 @@ toggle_sudo() {
 }
 
 # owlAPI-Proxy: claude CLI spricht Anthropic-Format, Proxy übersetzt → QuiteQue
-# QuiteQue hier auf 11.0.0.13 (diese Stack) — User "opencode" für vLLM/Claude-Backends
-OWL_PROXY_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/owl_proxy.py"
+# QuiteQue hier auf 11.0.0.13 (diese Stack) — User "ccclau" für vLLM/Claude-Backends
+CLAU_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+OWL_PROXY_SCRIPT="$CLAU_DIR/owl_proxy.py"
 CC_COMPACT_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc_compact.py"
 WEBSEARCH_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/websearch_mcp.py"
 LLM_STATUS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/llm_status_mcp.py"
@@ -37,7 +38,7 @@ CLAU_TEAM_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/team"
 PI_TEAM_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pi_team_mcp.py"
 CLAU_API_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/clau_api.py"
 OWL_BASE_URL="http://11.0.0.13:7077"
-QQ_USER="opencode"
+QQ_USER="${CLAU_QQ_USER:-ccclau}"   # per Session überschreibbar, z.B. CLAU_QQ_USER=master (höchste Priorität)
 
 # Telegram-Integration (lokale Config außerhalb des Repos)
 CLAU_TG_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/clau/telegram.conf"
@@ -62,9 +63,12 @@ declare -gA OWL_CONTEXT_WINDOWS=(
   ["53"]="4000"     # SkinnyJoe W4: Whisper-large-v3 (ASR)
   ["54"]="0"        # SkinnyJoe B3: SD-Turbo (Image-Gen, CPU)
   ["90"]="1048000"  # GPT-5.1
-  ["120"]="97000"   # PropellerA: Qwen3.6 27B (Tools+Vision+Thinking)
-  ["121"]="97000"   # Qwen3.8-Flash-Next: 176B MoE, Tools+Vision+Reasoning (3 Slots à 99k)
-  ["126"]="262000"  # Qwen3.8-Flash-Next: 176B MoE, 262k, nur 1 Session
+  ["121"]="97000"   # Qwen3.8-Flash-Next: 176B MoE, Tools+Vision+Reasoning (GSQ, 2 Sessions à 97k, MTP)
+  ["122"]="99328"   # Qwen3.8 27B TURBO: schneller Chat, Vision+Tools+Reasoning (1 Session)
+  ["126"]="261000"  # Qwen3.8-Flash-Next: 176B MoE, Q3_K_XL, 261k, 1 Session, ohne MTP (~63 Tok/s)
+  ["139"]="97000"   # Qwen3.8-Flash-Next: 176B MoE, Q3_K_XL 97k + MTP, 1 Session
+  ["222"]="96000"   # Universal: irgendein geladenes Modell ab 96k, lädt nie um, Modell wechselt je nach Auslastung
+  ["137"]="97000"   # Kolibri: Qwopus3.8 27B Coder-Flash, Tools+Reasoning, keine Vision (1 Session)
   ["317"]="1048000" # OpenRouter Owl Alpha (1M ctx, Agentic, FREE)
   ["350"]="1048000" # DeepSeek V4 Pro (1M ctx, Reasoning)
   ["351"]="1048000" # MiniMax M3 (1M ctx)
@@ -198,8 +202,12 @@ declare -gA TIMEOUT_PRESET_DEFAULT=(
   ["50"]="600000"    # SkinnyJoe T79: Qwen3 4B (CPU) → 10 Min
   ["51"]="600000"    # SkinnyJoe T77: Dolphin3 3B (CPU) → 10 Min
   ["52"]="600000"    # SkinnyJoe T78: L3.1 Dark-Planet 8B (CPU) → 10 Min
-  ["120"]="1800000"  # PropellerA: Qwen3.6 27B → 30 Min
+  ["122"]="1800000"  # Qwen3.8 27B Turbo → 30 Min
+  ["137"]="1800000"  # Kolibri Coder-Flash → 30 Min
   ["121"]="1800000"  # Qwen3.8-Flash-Next (176B MoE, 97k) → 30 Min
+  ["126"]="1800000"  # Flash-Next 261k (Einlesen bis ~6,5 Min) → 30 Min
+  ["139"]="1800000"  # Flash-Next Q3_K_XL 97k MTP → 30 Min
+  ["222"]="1800000"  # Universal (Tor wartet bis 15 Min auf freien Slot) → 30 Min
   ["317"]="3600000"  # OpenRouter Owl Alpha (1M ctx) → 60 Min
   ["350"]="3600000"  # DeepSeek V4 Pro (1M ctx) → 60 Min
   ["351"]="3600000"  # MiniMax M3 (1M ctx) → 60 Min
@@ -221,8 +229,12 @@ declare -gA TIMEOUT_PRESET_MAX=(
   ["50"]="1800000"   # SkinnyJoe → 30 Min
   ["51"]="1800000"
   ["52"]="1800000"
-  ["120"]="3600000"  # PropellerA → 60 Min
+  ["122"]="3600000"  # Qwen3.8 27B Turbo → 60 Min
+  ["137"]="3600000"  # Kolibri Coder-Flash → 60 Min
   ["121"]="3600000"  # Qwen3.8-Flash-Next → 60 Min
+  ["126"]="3600000"
+  ["139"]="3600000"
+  ["222"]="3600000"
   ["317"]="10800000" # OpenRouter Owl Alpha → 180 Min
   ["350"]="10800000" # DeepSeek V4 Pro → 180 Min
   ["351"]="10800000" # MiniMax M3 → 180 Min
@@ -563,6 +575,7 @@ _start_owl_proxy() {
     slot_limits="$(team_exec_model)=$(_team_exec_slots)"
   fi
   OWL_PROXY_THREADED="$threaded" OWL_SLOT_LIMITS="$slot_limits" OWL_ROUTES="${CLAU_OWL_ROUTES:-}" \
+  OWL_USAGE_FILE="${CLAU_USAGE_FILE:-}" \
   OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
     OWL_PROXY_TIMEOUT="${CLAU_OWL_TIMEOUT:-1800}" OWL_CTX_LIMIT="$(owl_context_window "$owl_id")" \
     OWL_HDR_AGENT_TOOL="$OWL_HDR_AGENT_TOOL" OWL_HDR_REQUEST_CONTEXT="$OWL_HDR_REQUEST_CONTEXT" \
@@ -581,6 +594,65 @@ _kill_owl_proxy() {
   rm -f "${OWL_PROXY_LOG_DIR}/team_anweisung_$$.md" 2>/dev/null || true
   # Claude CLI aktiviert Mouse-Tracking — bei Exit sauber deaktivieren
   { printf '\e[?1000l\e[?1002l\e[?1003l\e[?1004l\e[?1006l\e[?1015l\e[?1016l' > /dev/tty; } 2>/dev/null || true
+}
+
+# ── Token-Protokoll je Session (der owl_proxy schreibt, hier wird gelesen) ──
+_usage_dir() { echo "${XDG_DATA_HOME:-$HOME/.local/share}/clau/usage"; }
+
+# Session-ID aus den Startargumenten (--session-id / --resume), sonst Lauf-ID.
+_usage_begin() {
+  local sid="" prev="" a
+  for a in "$@"; do
+    [[ "$prev" == "--session-id" || "$prev" == "--resume" ]] && { sid="${a%.json}"; break; }
+    prev="$a"
+  done
+  [[ "$sid" =~ ^[A-Za-z0-9_.-]+$ ]] || sid="run-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$(_usage_dir)" 2>/dev/null || true
+  CLAU_USAGE_SID="$sid"
+  CLAU_USAGE_FILE="$(_usage_dir)/${sid}.jsonl"
+}
+
+# Zusammenfassung: je Modell gesamt + aktuell, dazu die letzte Aktion.
+# $1 = Session-ID (leer = zuletzt benutzte)
+_usage_report() {
+  local sid="${1:-}" f
+  if [[ -n "$sid" ]]; then f="$(_usage_dir)/${sid%.json}.jsonl"
+  else f="$(ls -t "$(_usage_dir)"/*.jsonl 2>/dev/null | head -1)"; fi
+  [[ -n "$f" && -s "$f" ]] || { echo "Keine Token-Daten${sid:+ für $sid}."; return 0; }
+  python3 - "$f" <<'PYEOF'
+import json, os, sys
+f = sys.argv[1]
+ev = []
+for line in open(f, encoding="utf-8"):
+    try:
+        ev.append(json.loads(line))
+    except Exception:
+        pass
+if not ev:
+    sys.exit(0)
+def n(x):
+    return f"{int(x):,}".replace(",", ".")
+tot, last = {}, {}
+for e in ev:
+    m = e["model"]
+    t = tot.setdefault(m, [0, 0, 0, 0])
+    t[0] += 1; t[1] += e["in"]; t[2] += e["out"]
+    if not e.get("real", True):
+        t[3] += 1
+    last[m] = e
+start = max((i for i, e in enumerate(ev) if e.get("action")), default=0)
+act = {}
+for e in ev[start:]:
+    a = act.setdefault(e["model"], [0, 0, 0])
+    a[0] += 1; a[1] += e["in"]; a[2] += e["out"]
+print(f"Token-Verbrauch Session {os.path.basename(f)[:-6]}:")
+print(f"  {'Modell':<10}{'Anfragen':>9}{'Eingabe':>12}{'Ausgabe':>10}{'Summe':>12}   aktuell (letzte Anfrage)")
+for m, (c, i, o, est) in tot.items():
+    l = last[m]
+    print(f"  owl:{m:<6}{c:>9}{n(i):>12}{n(o):>10}{n(i+o):>12}   Kontext {n(l['in'])} / Ausgabe {n(l['out'])}{'  (~geschätzt)' if est else ''}")
+for m, (c, i, o) in act.items():
+    print(f"  Letzte Aktion owl:{m}: {c} Anfragen, {n(i)} ein / {n(o)} aus = {n(i+o)} Token")
+PYEOF
 }
 
 # ── Telegram-Integration ────────────────────────────────────────────────────
@@ -1442,7 +1514,7 @@ _owl_minimal_tool_args() {
 # (model: sonnet → CLAU_TEAM_EXEC_MODEL, 176B) über dasselbe owl_proxy. Der
 # Proxy routet nach dem angefragten Modellnamen "owl-<ID>".
 # Drei Team-Sets (CLAU_TEAM_SET):
-#   lokal  : Teamleiter owl:120 (Claude Code über owl_proxy), Subagenten owl:121 als pi
+#   lokal  : Teamleiter owl:122 (Claude Code über owl_proxy), Subagenten owl:121 als pi
 #   qwen   : Teamleiter qwen3.8-max (Claude Code, Token Plan), Subagenten qwen3.8-flash als pi
 #   claude : Teamleiter Opus, Subagenten Sonnet als Claude-Code-Agenten (Claude-Abo)
 # team_active = Team an UND Set lokal -- daran hängt der ganze owl-Pfad (Proxy-
@@ -1456,7 +1528,7 @@ team_lead_model() {
   case "$(team_set)" in
     qwen)   echo "${CLAU_TEAM_QWEN_LEAD:-qwen3.8-max}" ;;
     claude) echo "${CLAU_TEAM_CLAUDE_LEAD:-opus}" ;;
-    *)      echo "${CLAU_TEAM_LEAD_MODEL:-120}" ;;
+    *)      echo "${CLAU_TEAM_LEAD_MODEL:-122}" ;;
   esac
 }
 team_exec_model() {
@@ -1561,7 +1633,8 @@ _team_exec_slots() {
   local id; id="$(team_exec_model)"
   local var="CLAU_TEAM_SLOTS_${id//[^A-Za-z0-9_]/_}"
   local def=3
-  [[ "$id" == "126" ]] && def=1
+  [[ "$id" == "126" || "$id" == "139" ]] && def=1
+  [[ "$id" == "121" ]] && def=2
   echo "${!var:-$def}"
 }
 
@@ -1746,6 +1819,59 @@ api_daemon_stop() {
   fi
 }
 
+# nano-claude-code in eigener venv installieren (vendored unter vendor/nano/).
+# Füllt NANO_BIN mit dem Pfad zur nano-claude-code-Binärdatei. Bei CLAU_OFFLINE=1,
+# Python < 3.10 oder fehlgeschlagener Installation bleibt NANO_BIN leer → Rückfall
+# auf Claude Code (aufrufende Stelle prüft das).
+NANO_BIN=""
+_ensure_nano() {
+  NANO_BIN=""
+  local venv="${XDG_DATA_HOME:-$HOME/.local/share}/clau/nano-venv"
+  local bin="$venv/bin/nano-claude-code"
+  # Hash über pyproject + PATCHES.md + alle .py-Dateien: erkennt Patch-Änderungen,
+  # damit bei neuen Patches neu installiert wird (Datei-Datum reicht nicht).
+  local hash
+  hash="$( { sha1sum "$CLAU_DIR/vendor/nano/pyproject.toml" "$CLAU_DIR/vendor/nano/PATCHES.md" 2>/dev/null; \
+    find "$CLAU_DIR/vendor/nano/nano_claude_code" -name '*.py' -print0 2>/dev/null | sort -z | xargs -0 sha1sum; } | sha1sum | cut -c1-8 )"
+  local marker="$venv/.installed-$hash"
+  if [[ -x "$bin" && -f "$marker" ]]; then
+    NANO_BIN="$bin"; return 0
+  fi
+  if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+    echo "⚠️  nano braucht Python >= 3.10, gefunden: $(python3 --version 2>&1) — Rückfall auf Claude Code." >&2
+    return 1
+  fi
+  if [[ "${CLAU_OFFLINE:-0}" == "1" ]]; then
+    echo "⚠️  CLAU_OFFLINE=1 — nano wird nicht installiert, Rückfall auf Claude Code." >&2
+    return 1
+  fi
+  echo "Installiere nano-claude-code (eigene venv) ..." >&2
+  mkdir -p "$venv" 2>/dev/null || { echo "⚠️  venv-Ordner nicht anlegbar: $venv — Rückfall auf Claude Code." >&2; return 1; }
+  if [[ ! -x "$venv/bin/python" ]]; then
+    # --without-pip: ensurepip fehlt auf manchen Systemen (Debian ohne python3-venv).
+    # pip kommt dann über das System-pip3 mit --python.
+    python3 -m venv --without-pip "$venv" 2>/dev/null || \
+      python3 -m venv "$venv" 2>/dev/null || { echo "⚠️  venv-Anlage fehlgeschlagen — Rückfall auf Claude Code." >&2; return 1; }
+  fi
+  local pip_cmd
+  if command -v pip3 >/dev/null 2>&1; then
+    pip_cmd=(pip3 --python "$venv/bin/python")
+  elif "$venv/bin/python" -m pip --version >/dev/null 2>&1; then
+    pip_cmd=("$venv/bin/python" -m pip)
+  else
+    echo "⚠️  kein pip für die venv (pip3 fehlt, ensurepip fehlt) — Rückfall auf Claude Code." >&2
+    return 1
+  fi
+  if ! "${pip_cmd[@]}" install -q "$CLAU_DIR/vendor/nano" 2>/dev/null; then
+    echo "⚠️  nano-Installation fehlgeschlagen (pip) — Rückfall auf Claude Code." >&2
+    return 1
+  fi
+  [[ -x "$bin" ]] || { echo "⚠️  nano-Binary fehlt nach Installation — Rückfall auf Claude Code." >&2; return 1; }
+  touch "$marker"
+  NANO_BIN="$bin"
+  return 0
+}
+
 # claude über owlAPI-Proxy starten (interaktiv)
 run_owl_via_claude() {
   local owl_id="$1"
@@ -1801,6 +1927,7 @@ run_owl_via_claude() {
     echo "Team-Modus: Teamleiter owl-$(team_lead_model), Ausführer owl-$(team_exec_model) (max. $(_team_exec_slots) parallel, bis ${CLAU_TEAM_MAX_AGENTS:-5} Agenten, Subagenten: $(team_pi_active && echo "pi ($(_team_pi_bin))" || echo "Claude Code"))"
   fi
   local port
+  _usage_begin "$@"
   port="$(_start_owl_proxy "$owl_id")"
   trap '_kill_owl_proxy' EXIT INT TERM
   sleep 0.6
@@ -1837,7 +1964,144 @@ run_owl_via_claude() {
   claude --model "$(_owl_cc_model "$cw")" $extra "${tool_args[@]}" "${real_args[@]}" "${API_PROMPT_ARGS[@]}" || true
 
   _kill_owl_proxy
+  _usage_report "$CLAU_USAGE_SID"
   trap - EXIT INT TERM
+}
+
+# nano-claude-code über owlAPI-Proxy starten (interaktiv)
+# Gleiche Struktur wie run_owl_via_claude, aber nano statt claude:
+#  - ANTHROPIC_API_KEY=sk-owl (nicht sk-ant-), damit nano den Proxy nutzt
+#    (resolve_api_env Fall 3: generischer Proxy)
+#  - Modellname ohne [1m]-Suffix (Claude-Code-Ding, nano kennt es nicht);
+#    der Proxy routet sowieso auf OWL_MODEL
+#  - nur --dangerously-skip-permissions aus _interaction_args (nano kennt
+#    --effort / --append-system-prompt-file nicht)
+run_nano_session() {
+  local owl_id="$1"
+  shift
+  if [[ ! -f "$OWL_PROXY_SCRIPT" ]]; then
+    echo "Fehler: owl_proxy.py nicht gefunden: $OWL_PROXY_SCRIPT" >&2
+    exit 1
+  fi
+
+  # Pre-Flight: Session-Größe vs. Modell-Context-Window
+  local force_ctx=0
+  local pv=""
+  for arg in "$@"; do
+    [[ "$arg" == "--force-context" ]] && force_ctx=1
+    [[ "$pv" == "--resume" && "$arg" == *.json ]] && force_ctx=1
+    pv="$arg"
+  done
+  if [[ "$force_ctx" -eq 0 ]]; then
+    PRE_FLIGHT_RESUME_ID=""
+    local resume_id="" prev=""
+    for arg in "$@"; do
+      if [[ "$prev" == "--resume" ]]; then resume_id="$arg"; break; fi
+      prev="$arg"
+    done
+    _pre_flight_check "$owl_id" "$resume_id" || exit 1
+    if [[ -n "$PRE_FLIGHT_RESUME_ID" ]]; then
+      # Pre-Flight hat die zu große Session automatisch komprimiert —
+      # auf die neue Session umlenken statt auf der alten weiterzumachen.
+      local filtered=() skip_next=0 a
+      for a in "$@"; do
+        if [[ "$skip_next" -eq 1 ]]; then skip_next=0; continue; fi
+        if [[ "$a" == "--resume" ]]; then skip_next=1; continue; fi
+        filtered+=("$a")
+      done
+      set -- "${filtered[@]}" --resume "$PRE_FLIGHT_RESUME_ID"
+    fi
+  fi
+
+  # Kontext-Fenster: geht per NANO_CONTEXT_WINDOW an nano (vendor-Patch)
+  local cw; cw="$(session_context_window "$owl_id")"
+
+  echo "Starte owlAPI-Proxy für Modell $owl_id ..."
+  local port
+  _usage_begin "$@"
+  port="$(_start_owl_proxy "$owl_id")"
+  trap '_kill_owl_proxy' EXIT INT TERM
+  sleep 0.6
+
+  echo "nano → Proxy :${port} → QuiteQue (Modell $owl_id${cw:+, ctx=$cw})"
+  if [[ -n "$cw" && "$cw" -lt 200000 ]]; then
+    echo "Hinweis: Modell $owl_id hat nur $cw Token Kontext."
+    echo "         Bei langen Sessions regelmäßig /compact aufrufen,"
+    echo "         oder ein größeres Modell wählen (z.B. owl:351 oder owl:361)."
+  fi
+
+  # Timeout-Konfiguration: verhindert dass nano den Proxy nach 2 Min killt
+  export BASH_DEFAULT_TIMEOUT_MS="${CLAU_TIMEOUT_DEFAULT:-1800000}"
+  export BASH_MAX_TIMEOUT_MS="${CLAU_TIMEOUT_MAX:-7200000}"
+
+  # nano kennt nur --dangerously-skip-permissions aus _interaction_args
+  local nano_perm_args=() tok
+  for tok in $(_interaction_args); do
+    [[ "$tok" == "--dangerously-skip-permissions" ]] && nano_perm_args+=("$tok")
+  done
+
+  # --force-context ist internes Flag — nicht an nano weiterleiten
+  # --session-id kennt nano nicht (Claude-Code-Option) → samt Wert weglassen
+  local real_args=() skip=0
+  for arg in "$@"; do
+    if [[ "$skip" -eq 1 ]]; then skip=0; continue; fi
+    [[ "$arg" == "--session-id" ]] && { skip=1; continue; }
+    [[ "$arg" != "--force-context" ]] && real_args+=("$arg")
+  done
+
+  _api_prompt_args
+
+  # Modellname ohne [1m]-Suffix; der Proxy routet auf OWL_MODEL.
+  local nano_model; nano_model="$(owl_cli_model)"
+
+  local hint; hint="$CLAU_DIR/QUITEQUE_HINT.md"
+  [[ "${CLAU_QQ_HINT:-1}" == "1" && -f "$hint" ]] || hint=""
+  NANO_CONTEXT_WINDOW="${cw:-200000}" \
+  NANO_APPEND_SYSTEM_PROMPT_FILE="$hint" \
+  ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
+  ANTHROPIC_API_KEY="sk-owl" \
+  "$NANO_BIN" --model "$nano_model" "${nano_perm_args[@]}" "${real_args[@]}" "${API_PROMPT_ARGS[@]}" || true
+
+  _kill_owl_proxy
+  _usage_report "$CLAU_USAGE_SID"
+  trap - EXIT INT TERM
+}
+
+# Startet ein owl-Modell mit der gewählten CLI-Engine (nano oder Claude Code).
+_run_owl() {
+  if [[ "$(effective_backend)" == "nano" ]]; then
+    _nano_or_claude "$@"
+  else
+    run_owl_via_claude "$@"
+  fi
+}
+
+# Verteiler für owl-Modelle: nano, wenn installiert und kein Team-Modus,
+# sonst Claude Code (run_owl_via_claude). Team braucht Claude Code als
+# Teamleiter (nano hat keine Team-Agenten).
+_nano_or_claude() {
+  local owl_id="$1"
+  shift
+  if team_active; then
+    run_owl_via_claude "$owl_id" "$@"
+  elif _ensure_nano && [[ -n "$NANO_BIN" ]]; then
+    run_nano_session "$owl_id" "$@"
+  else
+    run_owl_via_claude "$owl_id" "$@"
+  fi
+}
+
+# Headless-Verteiler: nano für normale Kurzaufträge; Fernsteuerung (CLAU_API_*)
+# und Team-Modus brauchen Claude-Code-Optionen und bleiben dort.
+_run_owl_headless() {
+  local owl_id="$1" prompt="$2"
+  if [[ "$(effective_backend)" == "nano" ]] && ! team_active \
+     && [[ -z "${CLAU_API_SESSION_ID:-}" && -z "${CLAU_API_ROLE:-}" ]] \
+     && _ensure_nano && [[ -n "$NANO_BIN" ]]; then
+    run_nano_session "$owl_id" --force-context -p "$prompt"
+  else
+    run_owl_headless_via_claude "$owl_id" "$prompt"
+  fi
 }
 
 # claude headless über owlAPI-Proxy
@@ -1864,6 +2128,7 @@ run_owl_headless_via_claude() {
   apply_tool_blocking
 
   local port
+  _usage_begin "$@"
   port="$(_start_owl_proxy "$owl_id")"
   trap '_kill_owl_proxy' EXIT INT TERM
   sleep 0.6
@@ -1894,6 +2159,7 @@ run_owl_headless_via_claude() {
   claude -p "$prompt" --model "$(_owl_cc_model "$cw")" "${perm_args[@]}" "${tool_args[@]}" || true
 
   _kill_owl_proxy
+  _usage_report "$CLAU_USAGE_SID"
   trap - EXIT INT TERM
 }
 
@@ -1925,7 +2191,7 @@ _conf_fallback_file() {
 # Update-Check/Websuche).
 CLAU_ENV_OVERRIDES=(CLAU_TEAM CLAU_TEAM_LEAD_MODEL CLAU_TEAM_EXEC_MODEL CLAU_TEAM_MAX_AGENTS
   CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_TEAM_SUBAGENTS CLAU_TEAM_SET CLAU_API CLAU_API_BIND CLAU_API_TOKEN
-  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_OFFLINE CLAU_OWL_ROUTES)
+  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER)
 
 load_config() {
   local _ov _envsave=()
@@ -1953,7 +2219,9 @@ load_config() {
     CLAU_WEBSEARCH=0
     export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_AUTOUPDATER=1
   fi
-  : "${CLAU_MODEL:=sonnet}"
+  : "${CLAU_MODEL:=owl:222}"
+  : "${CLAU_QQ_USER:=ccclau}"
+  QQ_USER="$CLAU_QQ_USER"
   : "${CLAU_SESSION_ID:=}"
   : "${CLAU_INTERACTION_LEVEL:=0}"
   : "${CLAU_EFFORT:=}"
@@ -1967,10 +2235,10 @@ load_config() {
   : "${CLAU_WEBSEARCH:=1}"
   # Team-Modus (Teamleiter + Ausführer-Subagenten) und Fernsteuerung, Default aus
   : "${CLAU_TEAM:=0}"
-  : "${CLAU_TEAM_LEAD_MODEL:=120}"
+  : "${CLAU_TEAM_LEAD_MODEL:=122}"
   : "${CLAU_TEAM_EXEC_MODEL:=121}"
   : "${CLAU_TEAM_MAX_AGENTS:=5}"
-  : "${CLAU_TEAM_SLOTS_121:=3}"
+  : "${CLAU_TEAM_SLOTS_121:=2}"
   : "${CLAU_TEAM_STATUS_URL:=http://127.0.0.1:8293/slots}"
   # Subagenten: "pi" (schlanke pi-Prozesse, Default wenn pi installiert) oder "claude"
   : "${CLAU_TEAM_SUBAGENTS:=pi}"
@@ -1984,7 +2252,7 @@ load_config() {
   : "${CLAU_API:=0}"
   : "${CLAU_API_BIND:=127.0.0.1:7010}"
   : "${CLAU_API_TOKEN:=}"
-  # CLI-Engine: "claude" (Claude Code, Standard) oder "opencode".
+  # CLI-Engine: "claude" (Claude Code, Standard), "nano", "opencode" oder "qwenplan".
   : "${CLAU_BACKEND:=claude}"
   # Modelle fürs Backend "qwenplan" (Alibaba Token Plan)
   : "${CLAU_QWEN_MODEL:=qwen3.8-max}"
@@ -2080,10 +2348,10 @@ CLAU_DISABLE_ARTIFACT="${CLAU_DISABLE_ARTIFACT:-0}"
 CLAU_DISABLE_AGENT_VIEW="${CLAU_DISABLE_AGENT_VIEW:-0}"
 CLAU_WEBSEARCH="${CLAU_WEBSEARCH:-1}"
 CLAU_TEAM="${CLAU_TEAM:-0}"
-CLAU_TEAM_LEAD_MODEL="${CLAU_TEAM_LEAD_MODEL:-120}"
+CLAU_TEAM_LEAD_MODEL="${CLAU_TEAM_LEAD_MODEL:-122}"
 CLAU_TEAM_EXEC_MODEL="${CLAU_TEAM_EXEC_MODEL:-121}"
 CLAU_TEAM_MAX_AGENTS="${CLAU_TEAM_MAX_AGENTS:-5}"
-CLAU_TEAM_SLOTS_121="${CLAU_TEAM_SLOTS_121:-3}"
+CLAU_TEAM_SLOTS_121="${CLAU_TEAM_SLOTS_121:-2}"
 CLAU_TEAM_STATUS_URL="${CLAU_TEAM_STATUS_URL:-http://127.0.0.1:8293/slots}"
 CLAU_TEAM_SUBAGENTS="${CLAU_TEAM_SUBAGENTS:-pi}"
 CLAU_TEAM_SET="${CLAU_TEAM_SET:-lokal}"
@@ -2097,6 +2365,7 @@ CLAU_API_BIND="${CLAU_API_BIND:-127.0.0.1:7010}"
 CLAU_API_TOKEN="${CLAU_API_TOKEN:-}"
 CLAU_OFFLINE="${CLAU_OFFLINE:-0}"
 CLAU_OWL_ROUTES="${CLAU_OWL_ROUTES:-}"
+CLAU_QQ_USER="${CLAU_QQ_USER:-ccclau}"
 CLAU_BACKEND="${CLAU_BACKEND:-claude}"
 CLAU_QWEN_MODEL="${CLAU_QWEN_MODEL:-qwen3.8-max}"
 CLAU_QWEN_FAST_MODEL="${CLAU_QWEN_FAST_MODEL:-qwen3.8-flash}"
@@ -2300,6 +2569,7 @@ Verwendung (interaktiv):
   clau --resume [ID]              Setzt eine Session fort (ohne ID = Resume-Picker)
   clau --new                      Startet eine neue Session
   clau --compact                  Custom-Compact: aktuelle Session extern komprimieren (QuiteQue)
+  clau --usage [SESSION-ID]       Token-Verbrauch je Modell: gesamt, aktuell, letzte Aktion (owl-Modelle)
   clau --import-md datei.md       Startet eine neue Session mit dem Inhalt von datei.md als erster
                                   Nachricht (Session-Auswahl → Punkt 5 exportiert umgekehrt als .md)
   clau "AUFTRAG"                  Kurzauftrag im aktuellen Ordner (agentisch, Antwort im Terminal),
@@ -2374,7 +2644,7 @@ Git-Helfer (Repo aus GitHub via SSH):
 
 Model-Mappings:
   Claude Code (agentisch):  1=haiku(4.5)  2=sonnet(5)  3=opus(5.5)  4=fable(5)
-  owlAPI (für --model N):   5=owl:120 (Q27B)  6=owl:121 (Flash-Next)  7=owl:126 (Flash-Next 262k)  0=owl:free
+  owlAPI (für --model N):   5=owl:122 (Turbo 27B)  6=owl:121 (Flash GSQ 2×97k MTP)  7=owl:126 (Flash Q3 1×261k kein MTP)  a=owl:139 (Flash Q3 1×97k MTP)  8=owl:137 (Coder)  9=owl:222 (Universal ab 96k, Standard)  0=owl:free
   owlAPI direkt:            -m owl:350  oder  -m 350   (interaktiv: Live-Liste der owlAPI)
   Qwen Token Plan:          -m qwen:qwen3.8-max  (setzt Engine qwenplan für diesen Aufruf)
 
@@ -2385,7 +2655,7 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_ARTIFACT="1"          Artifacts deaktivieren (spart ~2-3K Tokens)
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
   CLAU_WEBSEARCH="1"                 Lokale QuiteQue-Websuche als MCP-Tool (Default an, ~300 Tokens)
-  CLAU_BACKEND="claude"               CLI-Engine: claude (Standard) | opencode | qwenplan
+  CLAU_BACKEND="claude"               CLI-Engine: claude (Standard) | nano | opencode | qwenplan
   CLAU_QWEN_MODEL="qwen3.8-max"       Modell für qwenplan (Key: ~/.config/clau/qwenplan.key, chmod 600)
   CLAU_QWEN_FAST_MODEL="qwen3.8-flash" schnelles Modell für qwenplan
   CLAU_QWEN_COMPACT_AT="200000"       qwenplan: Auto-Compact ab so vielen Tokens (Fenster 1M; höher = mehr Credits/Anfrage)
@@ -2397,11 +2667,11 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_OWL_TOOLS="Bash,Edit,..."     Eigene Tool-Allowlist statt des Defaults (s.o.)
   CLAU_UPDATE_CHECK="1"              Beim Start gegen GitHub auf Updates prüfen (0 = aus)
   CLAU_OFFLINE="0"                   1 = ohne Internet: kein Update-Check, keine Websuche, keine Netz-Installation
-  CLAU_TEAM="0"                      1 = Team-Modus (Teamleiter owl-120, Ausführer-Agenten owl-121)
-  CLAU_TEAM_LEAD_MODEL="120"         Teamleiter-Modell (QuiteQue-ID)
+  CLAU_TEAM="0"                      1 = Team-Modus (Teamleiter owl-122, Ausführer-Agenten owl-121)
+  CLAU_TEAM_LEAD_MODEL="122"         Teamleiter-Modell (QuiteQue-ID)
   CLAU_TEAM_EXEC_MODEL="121"         Ausführer-Modell (Agenten mit model: sonnet)
   CLAU_TEAM_MAX_AGENTS="5"           Max. parallele Ausführer bei freien Slots
-  CLAU_TEAM_SLOTS_121="3"            Max. gleichzeitige Anfragen an 121 (Rest wartet im Proxy)
+  CLAU_TEAM_SLOTS_121="2"            Max. gleichzeitige Anfragen an 121 (Rest wartet im Proxy)
   CLAU_TEAM_STATUS_URL="http://127.0.0.1:8293/slots"  Slot-Status für das Tool llm_status
   CLAU_API="0"                       1 = Fernsteuerung beim clau-Start im Hintergrund starten
   CLAU_API_BIND="127.0.0.1:7010"     Adresse der Fernsteuerung
@@ -2418,12 +2688,15 @@ model_from_number() {
     2) CLAU_MODEL="sonnet" ;;
     3) CLAU_MODEL="opus" ;;
     4) CLAU_MODEL="fable" ;;     # Claude Fable 5
-    5) CLAU_MODEL="owl:120" ;;   # PropellerA lokal
-    6) CLAU_MODEL="owl:121" ;;   # Qwen3.8-Flash-Next lokal (97k)
-    7) CLAU_MODEL="owl:126" ;;   # Qwen3.8-Flash-Next lokal (262k, 1 Session)
+    5) CLAU_MODEL="owl:122" ;;   # Qwen3.8 27B Turbo (schnell, Vision)
+    6) CLAU_MODEL="owl:121" ;;   # Flash-Next GSQ, 2 Sessions à 97k, MTP
+    7) CLAU_MODEL="owl:126" ;;   # Flash-Next Q3_K_XL, 261k, 1 Session, ohne MTP
+    a|A) CLAU_MODEL="owl:139" ;; # Flash-Next Q3_K_XL, 97k, 1 Session, MTP
+    9) CLAU_MODEL="owl:222" ;;   # Universal: beliebiges geladenes Modell ab 96k
+    8) CLAU_MODEL="owl:137" ;;   # Kolibri Coder-Flash (agentisches Coden)
     0) CLAU_MODEL="owl:free" ;;  # free Router gratis
     *)
-      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5/6/7/0=owlAPI, sonst -m owl:<ID>)" >&2
+      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5/6/7/a/8/9/0=owlAPI, sonst -m owl:<ID>)" >&2
       exit 1
       ;;
   esac
@@ -2487,11 +2760,13 @@ effective_backend() {
 #   haiku=Haiku 4.5, sonnet=Sonnet 5, opus=Opus 5.5, fable=Fable 5.
 # Bei neuer Generation hier einmalig aktualisieren.
 claude_cli_model() {
+  # CLAU_CC_1M=1 (Standard): Sonnet/Opus mit 1M-Kontext ("[1m]"); 0 = 200k-Fenster.
+  local sfx=""; [[ "${CLAU_CC_1M:-1}" == "1" ]] && sfx="[1m]"
   case "${1:-}" in
-    haiku)  echo "claude-haiku-4-5" ;;
-    sonnet) echo "claude-sonnet-5" ;;
-    opus)   echo "claude-opus-5-5" ;;
-    fable)  echo "claude-fable-5" ;;
+    haiku)  echo "claude-haiku-5-5" ;;
+    sonnet) echo "claude-sonnet-5-5${sfx}" ;;
+    opus)   echo "claude-opus-5-5${sfx}" ;;
+    fable)  echo "claude-fable-5-1" ;;
     *) echo "$1" ;;
   esac
 }
@@ -2576,7 +2851,7 @@ _print_cols() {
 }
 
 # Feste Presets (auch ohne owlAPI-Verbindung): Taste → owl-ID
-declare -gA OWL_PRESETS=( ["5"]="120" ["6"]="121" ["7"]="126" ["0"]="free" )
+declare -gA OWL_PRESETS=( ["5"]="122" ["6"]="121" ["7"]="126" ["a"]="139" ["8"]="137" ["9"]="222" ["0"]="free" )
 
 choose_model_interactive() {
   local nq=${#QWENPLAN_MODELS[@]}
@@ -2584,7 +2859,7 @@ choose_model_interactive() {
   local rows=() line id st own ctx price name
   while IFS= read -r line; do
     IFS=$'\t' read -r id st own ctx price name <<< "$line"
-    [[ "$id" == "120" || "$id" == "121" || "$id" == "126" || "$id" == "free" ]] && continue
+    [[ "$id" == "121" || "$id" == "122" || "$id" == "126" || "$id" == "139" || "$id" == "137" || "$id" == "222" || "$id" == "free" ]] && continue
     [[ "$ctx" -ge 64000 ]] || continue
     rows+=("$line")
   done < <(_owl_models_tsv 2>/dev/null)
@@ -2593,10 +2868,12 @@ choose_model_interactive() {
     echo
     echo "Modell wählen:"
     echo "  --- Claude Code mit Claude-Abo ---"
-    _print_cols 38 "1) haiku   Haiku 4.5" "2) sonnet  Sonnet 5  [Enter]" "3) opus    Opus 5.5" "4) fable   Fable 5"
+    _print_cols 38 "1) haiku   Haiku 5.5" "2) sonnet  Sonnet 5.5 1M [Enter]" "3) opus    Opus 5.5 1M" "4) fable   Fable 5.1"
     echo "  --- Presets: lokal (PropellerA) + QuiteQue Free-Plan, via owlAPI ---"
-    _print_cols 38 "5) Q27B         owl:120  94k" "6) Flash-Next   owl:121  97k" \
-                   "7) Flash-Next   owl:126  262k" "0) Free-Plan    owl:free (Router)"
+    _print_cols 46 "9) Universal   owl:222  ab 96k, wechselt [Enter]" "5) Turbo 27B    owl:122  97k, 1 Sess." \
+                   "6) Flash GSQ    owl:121  97k, 2 Sess., MTP" "7) Flash Q3     owl:126  261k, 1 Sess., kein MTP" \
+                   "a) Flash Q3     owl:139  97k, 1 Sess., MTP" "8) Coder 27B    owl:137  97k, 1 Sess." \
+                   "0) Free-Plan    owl:free (Router)"
     echo "  --- Qwen Token Plan (Alibaba-Abo, nur interaktiv) ---"
     local cells=() i=1 m
     for m in "${QWENPLAN_MODELS[@]}"; do cells+=("q${i}) ${m}"); ((i++)); done
@@ -2628,9 +2905,9 @@ choose_model_interactive() {
       echo "  (owlAPI nicht erreichbar — Liste fehlt, Presets und 'o' gehen trotzdem)"
     fi
     echo "  o) owlAPI-ID direkt eingeben"
-    printf "Auswahl [1-7, 0, q1-q%d, owl-ID, o, Enter=2]: " "$nq"
+    printf "Auswahl [1-9, a, 0, q1-q%d, owl-ID, o, Enter=9]: " "$nq"
     local choice; read -r choice
-    choice="${choice:-2}"
+    choice="${choice:-9}"
 
     if [[ "$choice" =~ ^[qQ]([0-9]+)$ ]]; then
       local qi="${BASH_REMATCH[1]}"
@@ -2650,7 +2927,7 @@ choose_model_interactive() {
       2) CLAU_MODEL="sonnet"; break ;;
       3) CLAU_MODEL="opus"; break ;;
       4) CLAU_MODEL="fable"; break ;;
-      5|6|7|0) CLAU_MODEL="owl:${OWL_PRESETS[$choice]}"; break ;;
+      5|6|7|a|A|8|9|0) CLAU_MODEL="owl:${OWL_PRESETS[${choice,,}]}"; break ;;
       o|O)
         printf "owlAPI-Modell-ID: "
         local tmp_id; read -r tmp_id
@@ -2680,17 +2957,37 @@ choose_model_interactive() {
   echo "Modell: $CLAU_MODEL"
 }
 
+# QuiteQue-Benutzer wählen: gilt für nano, Claude Code, Websuche und Zähler
+choose_user_interactive() {
+  echo
+  echo "QuiteQue-Benutzer wählen (aktuell: $QQ_USER):"
+  echo "  1) ccclau   normale Priorität"
+  echo "  2) master   höchste Priorität"
+  printf "Auswahl [1-2, Enter=Zurück]: "
+  local c; read -r c
+  case "$c" in
+    1) CLAU_QQ_USER="ccclau" ;;
+    2) CLAU_QQ_USER="master" ;;
+    *) return 0 ;;
+  esac
+  QQ_USER="$CLAU_QQ_USER"
+  save_config
+  echo "Benutzer: $QQ_USER"
+}
+
 choose_backend_interactive() {
   echo
   echo "CLI-Engine wählen:"
-  echo "  1) claude              Claude Code   Standard         [Enter]"
-  echo "  2) opencode            opencode.ai   alternative Engine"
-  echo "  3) qwenplan            Claude Code   mit Alibaba Qwen Token Plan (nur interaktiv)"
-  printf "Auswahl [1-3, Enter=1]: "
+  echo "  1) claude              Claude Code   Standard  (nötig für Claude-Abo-Modelle und Team-Modus)  [Enter]"
+  echo "  2) nano                nano-claude-code (Python), nur für owl-Modelle"
+  echo "  3) opencode            opencode.ai   alternative Engine"
+  echo "  4) qwenplan            Claude Code   mit Alibaba Qwen Token Plan (nur interaktiv)"
+  printf "Auswahl [1-4, Enter=1]: "
   read -r choice
   case "${choice:-1}" in
     1) CLAU_BACKEND="claude" ;;
-    2)
+    2) CLAU_BACKEND="nano" ;;
+    3)
       CLAU_BACKEND="opencode"
       if ! _have opencode; then
         echo "opencode ist noch nicht installiert."
@@ -2699,7 +2996,7 @@ choose_backend_interactive() {
         fi
       fi
       ;;
-    3)
+    4)
       CLAU_BACKEND="qwenplan"
       _qwenplan_key >/dev/null 2>&1 || qwenplan_set_key_interactive \
         || echo "Ohne Key startet 'qwenplan' nicht — später: Einstellungen (e → 2) oder clau --qwen-key." >&2
@@ -2909,7 +3206,7 @@ choose_team_settings() {
     echo "Team-Modus: ein Teamleiter (Claude Code) verteilt Teilaufträge an Subagenten."
     echo "  1) Team-Modus             : $(team_on && echo AN || echo aus)"
     echo "  2) Set                    : $(team_set_label)"
-    echo "       lokal  = owl:120 leitet, owl:121 führt aus (pi)"
+    echo "       lokal  = owl:122 leitet, owl:121 führt aus (pi)"
     echo "       qwen   = qwen3.8-max leitet, qwen3.8-flash führt aus (pi, Token Plan)"
     echo "       claude = Opus leitet, Sonnet führt aus (Claude-Code-Agenten, Claude-Abo)"
     echo "  3) Modelle dieses Sets    : Leitung $(team_lead_model), Ausführung $(team_exec_model)"
@@ -2935,7 +3232,7 @@ choose_team_settings() {
            case "$(team_set)" in qwen) CLAU_TEAM_QWEN_EXEC="$v" ;; claude) CLAU_TEAM_CLAUDE_EXEC="$v" ;; *) CLAU_TEAM_EXEC_MODEL="${v#owl:}" ;; esac
          fi
          if [[ "$(team_set)" == "lokal" && "$(team_exec_model)" == "121" ]]; then
-           printf "Slots für 121 [%s]: " "${CLAU_TEAM_SLOTS_121:-3}"; read -r v
+           printf "Slots für 121 [%s]: " "${CLAU_TEAM_SLOTS_121:-2}"; read -r v
            [[ "$v" =~ ^[0-9]+$ ]] && CLAU_TEAM_SLOTS_121="$v"
          fi ;;
       4) printf "Max. Agenten [%s]: " "${CLAU_TEAM_MAX_AGENTS:-5}"; read -r v; [[ "$v" =~ ^[0-9]+$ ]] && CLAU_TEAM_MAX_AGENTS="$v" ;;
@@ -3071,7 +3368,7 @@ _opencode_model_arg() {
   if is_owl_model "$mdl"; then
     echo "owl/$(owl_model_id "$mdl")"
   else
-    echo "anthropic/$(claude_cli_model "$mdl")"
+    echo "anthropic/$(CLAU_CC_1M=0 claude_cli_model "$mdl")"
   fi
 }
 
@@ -3625,6 +3922,12 @@ _interaction_args() {
   if [[ -n "$effort" && "$effort" != "medium" ]]; then
     parts+=(--effort "$effort")
   fi
+  # QuiteQue-Fähigkeiten als System-Prompt-Zusatz (nicht im Team-Modus: dort hängt
+  # schon die Team-Anweisung; Pfad ohne Leerzeichen, weil $extra gesplittet wird)
+  local hint; hint="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/QUITEQUE_HINT.md"
+  if [[ "${CLAU_QQ_HINT:-1}" == "1" && -f "$hint" && "$hint" != *" "* ]] && ! team_on 2>/dev/null; then
+    parts+=(--append-system-prompt-file "$hint")
+  fi
   echo "${parts[*]}"
 }
 
@@ -3880,6 +4183,7 @@ session_action_menu() {
   echo "Session: $name   (${sid:0:8}…, ${cwd/#$HOME/\~})"
   echo "  Zuletzt: $(_model_label "$model") · $(_rel_time "$epoch") · ~${tokens:-0} Tokens"
   [[ -n "$preview" && "$preview" != "$name" ]] && echo "  Start:   \"${preview:0:70}\""
+  [[ -s "$(_usage_dir)/${sid%.json}.jsonl" ]] && _usage_report "$sid"
   echo
   echo "  1) Fortsetzen                      [Enter]"
   echo "  2) Komprimieren (custom-compact über QuiteQue) und fortsetzen"
@@ -3890,6 +4194,10 @@ session_action_menu() {
   echo "  0) Zurück"
   printf "Auswahl [0-6, Enter=1]: "
   local action; read -r action
+  if [[ "$sid" == *.json && "${action:-1}" != "1" ]]; then
+    echo "Für nano-Sessions geht nur Fortsetzen (Dateien liegen in ~/.nano_claude/sessions)."
+    return 0
+  fi
   case "${action:-1}" in
     1)
       # Modell weicht von der Voreinstellung ab → fragen, womit fortgesetzt wird
@@ -3904,7 +4212,7 @@ session_action_menu() {
       run_resume_id "$sid"
       ;;
     2)
-      local sum_id="120"
+      local sum_id="121"
       is_owl_model "$(effective_model)" && sum_id="$(owl_model_id "$(effective_model)")"
       echo "Komprimiere ${sid:0:8}… (Zusammenfassung mit owl:$sum_id) ..."
       local sf; sf="$(_session_file_for_id "$sid" 2>/dev/null)"
@@ -4138,6 +4446,32 @@ for bdir in buckets:
         name = clean(titles.get(sid) or custom or ai or preview[:40] or "(leer)")
         sessions.append((mtime, cwd, sid, estimate_tokens(rows), name,
                          clean(m.get("model") or model), preview))
+
+# nano-Sessions (~/.nano_claude/sessions/*.json) nur in der Gesamtliste; sid = Dateiname
+ndir = os.path.expanduser("~/.nano_claude/sessions")
+if not only and os.path.isdir(ndir):
+    for fn in os.listdir(ndir):
+        if not fn.endswith(".json") or fn.startswith("_"):
+            continue
+        npath = os.path.join(ndir, fn)
+        data = load_json(npath)
+        msgs = data.get("messages") or []
+        if not msgs:
+            continue
+        preview = ""
+        for m in msgs:
+            if m.get("role") == "user":
+                t = clean(first_text(m))
+                if t and not t.startswith("<"):
+                    preview = t[:80]
+                    break
+        tokens = int(len(json.dumps(msgs, ensure_ascii=False)) / CHARS_PER_TOKEN) + OVERHEAD_TOKENS
+        name = "[nano] " + clean(data.get("title") or preview[:40] or fn)
+        try:
+            nm = os.path.getmtime(npath)
+        except Exception:
+            continue
+        sessions.append((nm, clean(data.get("cwd") or "(nano)"), fn, tokens, name, "", preview))
 
 sessions.sort(key=lambda s: s[0], reverse=True)
 for mtime, cwd, sid, tokens, name, model, preview in sessions:
@@ -4480,7 +4814,7 @@ run_resume_picker() {
     return
   fi
   if is_owl_model "$mdl"; then
-    run_owl_via_claude "$(owl_model_id "$mdl")" --resume
+    _run_owl "$(owl_model_id "$mdl")" --resume
     return
   fi
   echo "Öffne Session-Auswahl (Modell: $mdl, Autonomie: $(interaction_label)) ..."
@@ -4512,7 +4846,7 @@ run_saved_session() {
     return
   fi
   if is_owl_model "$mdl"; then
-    run_owl_via_claude "$(owl_model_id "$mdl")"
+    _run_owl "$(owl_model_id "$mdl")"
     return
   fi
   echo "Starte feste Session $CLAU_SESSION_ID (Modell: $mdl, Autonomie: $(interaction_label)) ..."
@@ -4542,7 +4876,7 @@ run_new_session() {
     return
   fi
   if is_owl_model "$mdl"; then
-    run_owl_via_claude "$(owl_model_id "$mdl")" --force-context "${NEW_SESSION_ARGS[@]}"
+    _run_owl "$(owl_model_id "$mdl")" --force-context "${NEW_SESSION_ARGS[@]}"
     return
   fi
   echo "Starte neue Session (Modell: $mdl, Autonomie: $(interaction_label)) ..."
@@ -4583,7 +4917,7 @@ run_resume_id() {
     return
   fi
   if is_owl_model "$mdl"; then
-    run_owl_via_claude "$(owl_model_id "$mdl")" --resume "$rid"
+    _run_owl "$(owl_model_id "$mdl")" --resume "$rid"
     return
   fi
   echo "Setze Session $rid fort (Modell: $mdl, Autonomie: $(interaction_label)) ..."
@@ -4609,7 +4943,7 @@ run_compact() {
     exit 1
   fi
   local mdl; mdl="$(effective_model)"
-  local sum_id="120"  # Default-Summary-Modell (PropellerA lokal)
+  local sum_id="121"  # Default-Summary-Modell (PropellerA lokal)
   if is_owl_model "$mdl"; then
     sum_id="$(owl_model_id "$mdl")"
   fi
@@ -4706,7 +5040,7 @@ run_headless_here() {
       echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
       exit 1
     fi
-    run_owl_headless_via_claude "$(owl_model_id "$mdl")" "$PROMPT_TEXT"
+    _run_owl_headless "$(owl_model_id "$mdl")" "$PROMPT_TEXT"
     return
   fi
   build_headless_cmd
@@ -4736,7 +5070,7 @@ run_headless_in_dir() {
       echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
       exit 1
     fi
-    (cd "$dir"; run_owl_headless_via_claude "$(owl_model_id "$mdl")" "$PROMPT_TEXT")
+    (cd "$dir"; _run_owl_headless "$(owl_model_id "$mdl")" "$PROMPT_TEXT")
     return
   fi
   echo "Projektverzeichnis bereit für headless: $dir"
@@ -4873,7 +5207,7 @@ interactive_start() {
   done < <(_here_sessions_scan)
 
   echo
-  echo "clau — $(basename "$(pwd)")  [$tag, Engine: $(effective_backend)]"
+  echo "clau — $(basename "$(pwd)")  [$tag, Engine: $(effective_backend), Benutzer: $QQ_USER]"
   if [[ "${#recent[@]}" -gt 0 ]]; then
     echo "  Letzte Sessions hier:"
     _session_table 0 1 "${recent[@]}"
@@ -4883,13 +5217,14 @@ interactive_start() {
   echo "   n) Neue Session                 [Enter]"
   echo "   s) Weitere Sessions …           (alle hier / alle auf dem System / laufende)"
   echo "   w) Modell wechseln"
+  echo "   u) Benutzer wechseln            ($QQ_USER; gilt für alle Engines)"
   echo "   i) Markdown importieren         (neue Session aus Datei)"
   local ntm=0; _have tmux && ntm="$(tmux ls 2>/dev/null | wc -l || true)"
   echo "   t) tmux-Sitzungen …             ($ntm laufen auf diesem Rechner)"
   echo "   f) Fernsteuerung …              (Telegram/Handy, API)"
   echo "   e) Einstellungen …              (Engine, Qwen-Key, Bot, Team, Update)"
   echo "   q) Beenden"
-  printf "Auswahl [%sn s w i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt 3 ]] && echo "m, ")"
+  printf "Auswahl [%sn s w u i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt 3 ]] && echo "m, ")"
   local c; read -r c
   case "${c:-n}" in
     [1-3])
@@ -4899,6 +5234,7 @@ interactive_start() {
     s|S) choose_sessions_menu; interactive_start ;;
     m|M) choose_session_list here; interactive_start ;;
     w|W) choose_model_interactive; interactive_start ;;
+    u|U) choose_user_interactive; interactive_start ;;
     i|I) choose_import_md_interactive || interactive_start ;;
     t|T) choose_tmux_menu; interactive_start ;;
     f|F) choose_remote_menu; interactive_start ;;
@@ -4941,10 +5277,13 @@ choose_settings_menu() {
     echo "  4) Team-Modus …              : $(team_on && echo "AN — $(team_set_label)" || echo aus)"
     echo "  5) Update von GitHub (self-update)"
     echo "  6) Neue Sessions in tmux     : $([[ "${CLAU_TMUX:-0}" == "1" ]] && echo an || echo aus)   (überleben Terminal-Abstürze)"
+    echo "  7) Benutzer (Quiteque)       : ${QQ_USER}   (ccclau = normal, master = höchste Priorität)"
     echo "  0) Zurück"
-    printf "Auswahl [0-6]: "
+    printf "Auswahl [0-7]: "
     local c; read -r c
     case "$c" in
+      7) if [[ "$QQ_USER" == "master" ]]; then CLAU_QQ_USER=ccclau; else CLAU_QQ_USER=master; fi
+         QQ_USER="$CLAU_QQ_USER"; save_config ;;
       1) choose_backend_interactive ;;
       2) qwenplan_set_key_interactive ;;
       3) choose_bot_settings ;;
@@ -5152,6 +5491,11 @@ parse_args() {
     case "$1" in
       --help|-h)
         print_help
+        exit 0
+        ;;
+      --usage)
+        # clau --usage [SESSION-ID]: Token je Modell (gesamt/aktuell/letzte Aktion)
+        _usage_report "${2:-}"
         exit 0
         ;;
       --install)
