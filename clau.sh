@@ -63,10 +63,10 @@ declare -gA OWL_CONTEXT_WINDOWS=(
   ["53"]="4000"     # SkinnyJoe W4: Whisper-large-v3 (ASR)
   ["54"]="0"        # SkinnyJoe B3: SD-Turbo (Image-Gen, CPU)
   ["90"]="1048000"  # GPT-5.1
-  ["121"]="97000"   # Qwen3.8-Flash-Next: 176B MoE, Tools+Vision+Reasoning (GSQ, 2 Sessions à 97k, MTP)
+  ["121"]="97000"   # Qwen3.8-Flash-Next: 76B MoE, Tools+Vision+Reasoning (GSQ, 2 Sessions à 97k, MTP)
   ["122"]="99328"   # Qwen3.8 27B TURBO: schneller Chat, Vision+Tools+Reasoning (1 Session)
-  ["126"]="261000"  # Qwen3.8-Flash-Next: 176B MoE, Q3_K_XL, 261k, 1 Session, ohne MTP (~63 Tok/s)
-  ["139"]="97000"   # Qwen3.8-Flash-Next: 176B MoE, Q3_K_XL 97k + MTP, 1 Session
+  ["126"]="261000"  # Qwen3.8-Flash-Next: 76B MoE, Q3_K_XL, 261k, 1 Session, ohne MTP (~63 Tok/s)
+  ["139"]="97000"   # Qwen3.8-Flash-Next: 76B MoE, Q3_K_XL 97k + MTP, 1 Session
   ["222"]="96000"   # Universal: irgendein geladenes Modell ab 96k, lädt nie um, Modell wechselt je nach Auslastung
   ["137"]="97000"   # Kolibri: Qwopus3.8 27B Coder-Flash, Tools+Reasoning, keine Vision (1 Session)
   ["317"]="1048000" # OpenRouter Owl Alpha (1M ctx, Agentic, FREE)
@@ -204,7 +204,7 @@ declare -gA TIMEOUT_PRESET_DEFAULT=(
   ["52"]="600000"    # SkinnyJoe T78: L3.1 Dark-Planet 8B (CPU) → 10 Min
   ["122"]="1800000"  # Qwen3.8 27B Turbo → 30 Min
   ["137"]="1800000"  # Kolibri Coder-Flash → 30 Min
-  ["121"]="1800000"  # Qwen3.8-Flash-Next (176B MoE, 97k) → 30 Min
+  ["121"]="1800000"  # Qwen3.8-Flash-Next (76B MoE, 97k) → 30 Min
   ["126"]="1800000"  # Flash-Next 261k (Einlesen bis ~6,5 Min) → 30 Min
   ["139"]="1800000"  # Flash-Next Q3_K_XL 97k MTP → 30 Min
   ["222"]="1800000"  # Universal (Tor wartet bis 15 Min auf freien Slot) → 30 Min
@@ -296,6 +296,8 @@ _claude_projects_dir() {
 
 _project_hash_for() {
   local dir="${1:-$PWD}"
+  # Claude Code legt Sessions unter dem echten Pfad ab (Symlinks aufgelöst)
+  dir="$(cd "$dir" 2>/dev/null && pwd -P || echo "$dir")"
   echo "${dir//\//-}"
 }
 
@@ -1511,7 +1513,7 @@ _owl_minimal_tool_args() {
 
 # ── Team-Modus ───────────────────────────────────────────────────────────────
 # Teamleiter (CLAU_TEAM_LEAD_MODEL, 27B) im Frontend, Ausführer-Subagenten
-# (model: sonnet → CLAU_TEAM_EXEC_MODEL, 176B) über dasselbe owl_proxy. Der
+# (model: sonnet → CLAU_TEAM_EXEC_MODEL, 76B) über dasselbe owl_proxy. Der
 # Proxy routet nach dem angefragten Modellnamen "owl-<ID>".
 # Drei Team-Sets (CLAU_TEAM_SET):
 #   lokal  : Teamleiter owl:122 (Claude Code über owl_proxy), Subagenten owl:121 als pi
@@ -2191,7 +2193,7 @@ _conf_fallback_file() {
 # Update-Check/Websuche).
 CLAU_ENV_OVERRIDES=(CLAU_TEAM CLAU_TEAM_LEAD_MODEL CLAU_TEAM_EXEC_MODEL CLAU_TEAM_MAX_AGENTS
   CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_TEAM_SUBAGENTS CLAU_TEAM_SET CLAU_API CLAU_API_BIND CLAU_API_TOKEN
-  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER)
+  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS)
 
 load_config() {
   local _ov _envsave=()
@@ -2221,6 +2223,7 @@ load_config() {
   fi
   : "${CLAU_MODEL:=owl:222}"
   : "${CLAU_QQ_USER:=ccclau}"
+  : "${CLAU_MODEL_FAVS:=120 350 351 41 42 46 382 399 45 513}"
   QQ_USER="$CLAU_QQ_USER"
   : "${CLAU_SESSION_ID:=}"
   : "${CLAU_INTERACTION_LEVEL:=0}"
@@ -2366,6 +2369,7 @@ CLAU_API_TOKEN="${CLAU_API_TOKEN:-}"
 CLAU_OFFLINE="${CLAU_OFFLINE:-0}"
 CLAU_OWL_ROUTES="${CLAU_OWL_ROUTES:-}"
 CLAU_QQ_USER="${CLAU_QQ_USER:-ccclau}"
+CLAU_MODEL_FAVS="${CLAU_MODEL_FAVS:-120 350 351 41 42 46 382 399 45 513}"
 CLAU_BACKEND="${CLAU_BACKEND:-claude}"
 CLAU_QWEN_MODEL="${CLAU_QWEN_MODEL:-qwen3.8-max}"
 CLAU_QWEN_FAST_MODEL="${CLAU_QWEN_FAST_MODEL:-qwen3.8-flash}"
@@ -2864,48 +2868,76 @@ choose_model_interactive() {
     rows+=("$line")
   done < <(_owl_models_tsv 2>/dev/null)
 
+  local show_more=0
   while true; do
     echo
     echo "Modell wählen:"
     echo "  --- Claude Code mit Claude-Abo ---"
-    _print_cols 38 "1) haiku   Haiku 5.5" "2) sonnet  Sonnet 5.5 1M [Enter]" "3) opus    Opus 5.5 1M" "4) fable   Fable 5.1"
-    echo "  --- Presets: lokal (PropellerA) + QuiteQue Free-Plan, via owlAPI ---"
-    _print_cols 46 "9) Universal   owl:222  ab 96k, wechselt [Enter]" "5) Turbo 27B    owl:122  97k, 1 Sess." \
-                   "6) Flash GSQ    owl:121  97k, 2 Sess., MTP" "7) Flash Q3     owl:126  261k, 1 Sess., kein MTP" \
-                   "a) Flash Q3     owl:139  97k, 1 Sess., MTP" "8) Coder 27B    owl:137  97k, 1 Sess." \
-                   "0) Free-Plan    owl:free (Router)"
-    echo "  --- Qwen Token Plan (Alibaba-Abo, nur interaktiv) ---"
-    local cells=() i=1 m
-    for m in "${QWENPLAN_MODELS[@]}"; do cells+=("q${i}) ${m}"); ((i++)); done
-    _print_cols 26 "${cells[@]}"
-    if [[ "${#rows[@]}" -gt 0 ]]; then
-      echo "  --- owlAPI live (${OWL_BASE_URL}) · Auswahl per ID · Preis \$/MTok ein/aus ---"
-      local grp prev="" ctxs short
-      cells=()
-      for line in "${rows[@]}"; do
-        IFS=$'\t' read -r id st own ctx price name <<< "$line"
-        case "$own" in
-          openrouter) grp="OpenRouter" ;; alibaba) grp="Alibaba" ;; xai) grp="xAI" ;;
-          deepseek) grp="DeepSeek" ;; claude|anthropic) grp="Claude" ;;
-          *) [[ "$price" == "GRATIS" ]] && grp="gratis" || grp="$own" ;;
-        esac
-        if [[ "$grp" != "$prev" ]]; then
-          [[ "${#cells[@]}" -gt 0 ]] && _print_cols 47 "${cells[@]}"
-          echo "  · $grp"
-          cells=(); prev="$grp"
-        fi
-        if [[ "$ctx" -ge 1000000 ]]; then ctxs="$((ctx / 1000000))M"; else ctxs="$((ctx / 1000))k"; fi
-        short="${name%% (*}"; short="${short#Anthropic }"; short="${short#Google }"; short="${short#OpenAI }"
-        price="${price//\$/}"; [[ "$price" == "GRATIS" ]] && price="gratis"
-        short="${short#Meta }"; short="${short#MoonshotAI }"
-        cells+=("$(printf '%4s %-23.23s %4s %s' "$id" "$short" "$ctxs" "$price")")
-      done
-      [[ "${#cells[@]}" -gt 0 ]] && _print_cols 47 "${cells[@]}"
+    _print_cols 38 "1) haiku   Haiku 5.5" "2) sonnet  Sonnet 5.5 1M" "3) opus    Opus 5.5 1M" "4) fable   Fable 5.1"
+    echo "  --- Lokal (PropellerA, gratis) + Free-Plan, via owlAPI ---"
+    printf '  %-2s %-12s %-9s %-5s %-8s %s\n' "" "Name" "ID" "Ctx" "Sessions" "Info"
+    printf '  %-2s %-12s %-9s %-5s %-8s %s\n' \
+      "9)" "Universal"  "owl:222"  "96k+" "-"       "beliebiges geladenes Modell ab 96k, lädt nie um, Modell wechselt je nach Auslastung  [Enter]" \
+      "5)" "Turbo 27B"  "owl:122"  "97k"  "1"       "schneller Chat · Vision, Tools, Denken" \
+      "6)" "Flash GSQ"  "owl:121"  "97k"  "2"       "76B MoE · MTP, Code ~96 Tok/s · Tools, Denken" \
+      "7)" "Flash Q3"   "owl:126"  "261k" "1"       "76B MoE · Q3_K_XL · ohne MTP, ~63 Tok/s · größter Kontext" \
+      "a)" "Flash Q3"   "owl:139"  "97k"  "1"       "76B MoE · Q3_K_XL · MTP · Tools, Denken" \
+      "8)" "Coder 27B"  "owl:137"  "97k"  "1"       "Kolibri (Qwopus3.8 Coder-Flash) · Tools, Denken, keine Vision" \
+      "0)" "Free-Plan"  "owl:free" "-"    "-"       "QuiteQue-Router, gratis"
+    echo "     Flash (6/7/a): Vision nur auf CPU (langsam), kein Failover. Alle belegen BEIDE Karten und verdrängen"
+    echo "     die 27B; Wechsel zwischen Flash-Modellen = Neuladen (25-70 s, erstes Laden bis ~2,5 min)."
+    local cells=() i=1 m grp prev="" ctxs short fid
+    if [[ "$show_more" -eq 0 ]]; then
+      if [[ "${#rows[@]}" -gt 0 ]]; then
+        echo "  --- Häufig genutzt (owlAPI) · Auswahl per ID · Preis \$/MTok ein/aus ---"
+        for fid in ${CLAU_MODEL_FAVS:-}; do
+          for line in "${rows[@]}"; do
+            IFS=$'\t' read -r id st own ctx price name <<< "$line"
+            [[ "$id" == "$fid" ]] || continue
+            if [[ "$ctx" -ge 1000000 ]]; then ctxs="$((ctx / 1000000))M"; else ctxs="$((ctx / 1000))k"; fi
+            short="${name%% (*}"; short="${short#Anthropic }"; short="${short#Google }"; short="${short#OpenAI }"
+            price="${price//\$/}"; [[ "$price" == "GRATIS" ]] && price="gratis"
+            printf '  %4s  %-32.32s %5s  %s\n' "$id" "$short" "$ctxs" "$price"
+            break
+          done
+        done
+      else
+        echo "  (owlAPI nicht erreichbar — Liste fehlt, Presets und 'o' gehen trotzdem)"
+      fi
+      echo "  m) mehr …  (Qwen Token Plan und alle weiteren owlAPI-Modelle)"
     else
-      echo "  (owlAPI nicht erreichbar — Liste fehlt, Presets und 'o' gehen trotzdem)"
+      echo "  --- Qwen Token Plan (Alibaba-Abo, nur interaktiv) ---"
+      for m in "${QWENPLAN_MODELS[@]}"; do cells+=("q${i}) ${m}"); ((i++)); done
+      _print_cols 26 "${cells[@]}"
+      if [[ "${#rows[@]}" -gt 0 ]]; then
+        echo "  --- owlAPI live (${OWL_BASE_URL}) · Auswahl per ID · Preis \$/MTok ein/aus ---"
+        cells=()
+        for line in "${rows[@]}"; do
+          IFS=$'\t' read -r id st own ctx price name <<< "$line"
+          case "$own" in
+            openrouter) grp="OpenRouter" ;; alibaba) grp="Alibaba" ;; xai) grp="xAI" ;;
+            deepseek) grp="DeepSeek" ;; claude|anthropic) grp="Claude" ;;
+            *) [[ "$price" == "GRATIS" ]] && grp="gratis" || grp="$own" ;;
+          esac
+          if [[ "$grp" != "$prev" ]]; then
+            [[ "${#cells[@]}" -gt 0 ]] && _print_cols 47 "${cells[@]}"
+            echo "  · $grp"
+            cells=(); prev="$grp"
+          fi
+          if [[ "$ctx" -ge 1000000 ]]; then ctxs="$((ctx / 1000000))M"; else ctxs="$((ctx / 1000))k"; fi
+          short="${name%% (*}"; short="${short#Anthropic }"; short="${short#Google }"; short="${short#OpenAI }"
+          price="${price//\$/}"; [[ "$price" == "GRATIS" ]] && price="gratis"
+          short="${short#Meta }"; short="${short#MoonshotAI }"
+          cells+=("$(printf '%4s %-23.23s %4s %s' "$id" "$short" "$ctxs" "$price")")
+        done
+        [[ "${#cells[@]}" -gt 0 ]] && _print_cols 47 "${cells[@]}"
+      else
+        echo "  (owlAPI nicht erreichbar — Liste fehlt, Presets und 'o' gehen trotzdem)"
+      fi
+      echo "  m) weniger  (zurück zu den häufig genutzten)"
     fi
     echo "  o) owlAPI-ID direkt eingeben"
-    printf "Auswahl [1-9, a, 0, q1-q%d, owl-ID, o, Enter=9]: " "$nq"
+    printf "Auswahl [1-9, a, 0, owl-ID, m, o, Enter=9]: "
     local choice; read -r choice
     choice="${choice:-9}"
 
@@ -2928,6 +2960,7 @@ choose_model_interactive() {
       3) CLAU_MODEL="opus"; break ;;
       4) CLAU_MODEL="fable"; break ;;
       5|6|7|a|A|8|9|0) CLAU_MODEL="owl:${OWL_PRESETS[${choice,,}]}"; break ;;
+      m|M) show_more=$((1 - show_more)); continue ;;
       o|O)
         printf "owlAPI-Modell-ID: "
         local tmp_id; read -r tmp_id
