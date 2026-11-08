@@ -37,7 +37,8 @@ LLM_STATUS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/llm_statu
 CLAU_TEAM_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/team"
 PI_TEAM_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pi_team_mcp.py"
 CLAU_API_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/clau_api.py"
-OWL_BASE_URL="http://11.0.0.13:7077"
+CLAU_GUI_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/clau_gui.py"
+OWL_BASE_URL="${OWL_BASE_URL:-http://11.0.0.13:7077}"
 QQ_USER="${CLAU_QQ_USER:-ccclau}"   # per Session überschreibbar, z.B. CLAU_QQ_USER=master (höchste Priorität)
 
 # Telegram-Integration (lokale Config außerhalb des Repos)
@@ -63,12 +64,14 @@ declare -gA OWL_CONTEXT_WINDOWS=(
   ["53"]="4000"     # SkinnyJoe W4: Whisper-large-v3 (ASR)
   ["54"]="0"        # SkinnyJoe B3: SD-Turbo (Image-Gen, CPU)
   ["90"]="1048000"  # GPT-5.1
+  ["120"]="97000"   # PropellerA: Qwen3.8-27B Heretic (Tools+Vision+Thinking, 97k)
   ["121"]="97000"   # Qwen3.8-Flash-Next: 76B MoE, Tools+Vision+Reasoning (GSQ, 2 Sessions à 97k, MTP)
   ["122"]="99328"   # Qwen3.8 27B TURBO: schneller Chat, Vision+Tools+Reasoning (1 Session)
   ["126"]="261000"  # Qwen3.8-Flash-Next: 76B MoE, Q3_K_XL, 261k, 1 Session, ohne MTP (~63 Tok/s)
   ["139"]="97000"   # Qwen3.8-Flash-Next: 76B MoE, Q3_K_XL 97k + MTP, 1 Session
   ["222"]="96000"   # Universal: irgendein geladenes Modell ab 96k, lädt nie um, Modell wechselt je nach Auslastung
   ["137"]="97000"   # Kolibri: Qwopus3.8 27B Coder-Flash, Tools+Reasoning, keine Vision (1 Session)
+  ["129"]="32000"   # Qwen3.8-35B-A3B lokal (Such-Set, 3 Slots a 32k, Tools+Vision, ~110 tok/s)
   ["317"]="1048000" # OpenRouter Owl Alpha (1M ctx, Agentic, FREE)
   ["350"]="1048000" # DeepSeek V4 Pro (1M ctx, Reasoning)
   ["351"]="1048000" # MiniMax M3 (1M ctx)
@@ -176,7 +179,7 @@ effective_context_window() {
     echo "200000"
     return
   elif [[ "$model" == "sonnet" || "$model" == "claude-sonnet"* ]]; then
-    echo "1000000"   # Sonnet 5: 1M Kontext
+    echo "1000000"   # Sonnet 5.5: 1M Kontext
     return
   elif [[ "$model" == "opus" || "$model" == "claude-opus"* ]]; then
     echo "1000000"   # Opus 5.5: 1M Kontext
@@ -202,12 +205,14 @@ declare -gA TIMEOUT_PRESET_DEFAULT=(
   ["50"]="600000"    # SkinnyJoe T79: Qwen3 4B (CPU) → 10 Min
   ["51"]="600000"    # SkinnyJoe T77: Dolphin3 3B (CPU) → 10 Min
   ["52"]="600000"    # SkinnyJoe T78: L3.1 Dark-Planet 8B (CPU) → 10 Min
+  ["120"]="1800000"  # PropellerA: Qwen3.8-27B → 30 Min
   ["122"]="1800000"  # Qwen3.8 27B Turbo → 30 Min
   ["137"]="1800000"  # Kolibri Coder-Flash → 30 Min
   ["121"]="1800000"  # Qwen3.8-Flash-Next (76B MoE, 97k) → 30 Min
   ["126"]="1800000"  # Flash-Next 261k (Einlesen bis ~6,5 Min) → 30 Min
   ["139"]="1800000"  # Flash-Next Q3_K_XL 97k MTP → 30 Min
   ["222"]="1800000"  # Universal (Tor wartet bis 15 Min auf freien Slot) → 30 Min
+  ["129"]="1800000"  # Qwen3.8-35B-A3B lokal (32k) → 30 Min
   ["317"]="3600000"  # OpenRouter Owl Alpha (1M ctx) → 60 Min
   ["350"]="3600000"  # DeepSeek V4 Pro (1M ctx) → 60 Min
   ["351"]="3600000"  # MiniMax M3 (1M ctx) → 60 Min
@@ -235,6 +240,7 @@ declare -gA TIMEOUT_PRESET_MAX=(
   ["126"]="3600000"
   ["139"]="3600000"
   ["222"]="3600000"
+  ["129"]="3600000"  # Qwen3.8-35B-A3B → 60 Min
   ["317"]="10800000" # OpenRouter Owl Alpha → 180 Min
   ["350"]="10800000" # DeepSeek V4 Pro → 180 Min
   ["351"]="10800000" # MiniMax M3 → 180 Min
@@ -795,9 +801,16 @@ print("MSG=" + msg)
 
   local proj; proj="$(basename "${CWD:-$PWD}")"
   local topic_name="📁 ${proj} · ${SID:0:6}"
-  local thread; thread="$(_tg_topic_for "$SID" "$topic_name")"
-  _tg_send "$thread" "$text"
-  [[ "$key" == "sessionend" ]] && _tg_close_topic "$SID" "$thread"
+  # Netzwerk abgekoppelt im Hintergrund: Claude Code bricht Hooks (v. a.
+  # SessionEnd) nach kurzer Frist ab ("Hook cancelled"); bei langsamer
+  # Leitung schaffen die Telegram-Aufrufe das nicht.
+  (
+    trap '' HUP
+    local thread; thread="$(_tg_topic_for "$SID" "$topic_name")"
+    _tg_send "$thread" "$text"
+    [[ "$key" == "sessionend" ]] && _tg_close_topic "$SID" "$thread"
+  ) </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
   exit 0
 }
 
@@ -2584,12 +2597,23 @@ Verwendung (interaktiv):
   clau --take ID                  Merkt sich eine feste Session-ID für dieses Verzeichnis
   clau --forget                   Entfernt die gemerkte Session-ID
   clau --current                  Zeigt aktuelle Session/Model-Config
+  clau --gui                      Grafische Oberfläche (tkinter): Config, Modell, Sessions, tmux
   clau --api                      Fernsteuerung (HTTP, CLAU_API_BIND) im Vordergrund starten
   clau --api-stop                 Im Hintergrund laufende Fernsteuerung beenden
   clau --clear-model              Entfernt das gespeicherte Modell
   clau --install                  Installiert "clau" + claude-code + opencode nach ~/.local/bin
   clau --uninstall                Entfernt "clau" aus ~/.local/bin
   clau --self-update              Aktualisiert clau auf die neueste Version aus dem Git-Repo
+  clau --doctor                   Claude Code prüfen (claude doctor)
+  clau --claude-update            Claude Code aktualisieren (claude update)
+
+Nicht-interaktiv (auch von der GUI genutzt):
+  clau --sessions-json [here|all] Eine JSON-Zeile pro Session (Name, Modell, Tokens, Ordner)
+  clau --set-model <spec>         Modell dauerhaft setzen: haiku|sonnet|opus|fable|owl:<ID>|qwen:<modell>
+  clau --rename <SID> <Name>      Session umbenennen
+  clau --export-md <SID>          Session als Markdown exportieren
+  clau --delete-session <SID>     Session löschen (unwiderruflich)
+  clau --tmux-pin <SID> <on|off>  Session in tmux fixieren / lösen
 
 Telegram / Handy:
   clau --tg-token                 Bot-Token reinpasten (wird geprüft & gespeichert)
@@ -2648,7 +2672,7 @@ Git-Helfer (Repo aus GitHub via SSH):
 
 Model-Mappings:
   Claude Code (agentisch):  1=haiku(4.5)  2=sonnet(5)  3=opus(5.5)  4=fable(5)
-  owlAPI (für --model N):   5=owl:122 (Turbo 27B)  6=owl:121 (Flash GSQ 2×97k MTP)  7=owl:126 (Flash Q3 1×261k kein MTP)  a=owl:139 (Flash Q3 1×97k MTP)  8=owl:137 (Coder)  9=owl:222 (Universal ab 96k, Standard)  0=owl:free
+  owlAPI (für --model N):   b=owl:129 (35B schnell)  5=owl:122 (Turbo 27B)  6=owl:121 (Flash GSQ 2×97k MTP)  7=owl:126 (Flash Q3 1×261k kein MTP)  a=owl:139 (Flash Q3 1×97k MTP)  8=owl:137 (Coder)  9=owl:222 (Universal ab 96k, Standard)  0=owl:free
   owlAPI direkt:            -m owl:350  oder  -m 350   (interaktiv: Live-Liste der owlAPI)
   Qwen Token Plan:          -m qwen:qwen3.8-max  (setzt Engine qwenplan für diesen Aufruf)
 
@@ -2696,11 +2720,12 @@ model_from_number() {
     6) CLAU_MODEL="owl:121" ;;   # Flash-Next GSQ, 2 Sessions à 97k, MTP
     7) CLAU_MODEL="owl:126" ;;   # Flash-Next Q3_K_XL, 261k, 1 Session, ohne MTP
     a|A) CLAU_MODEL="owl:139" ;; # Flash-Next Q3_K_XL, 97k, 1 Session, MTP
+    b|B) CLAU_MODEL="owl:129" ;; # Qwen3.8-35B-A3B lokal (32k, schnell, Bilder)
     9) CLAU_MODEL="owl:222" ;;   # Universal: beliebiges geladenes Modell ab 96k
     8) CLAU_MODEL="owl:137" ;;   # Kolibri Coder-Flash (agentisches Coden)
     0) CLAU_MODEL="owl:free" ;;  # free Router gratis
     *)
-      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5/6/7/a/8/9/0=owlAPI, sonst -m owl:<ID>)" >&2
+      echo "Unbekanntes Modell-Kürzel: $1 (erlaubt: 1-4=Claude CLI, 5/6/7/a/b/8/9/0=owlAPI, sonst -m owl:<ID>)" >&2
       exit 1
       ;;
   esac
@@ -2761,7 +2786,7 @@ effective_backend() {
 
 # Übersetzt den internen Claude-Modell-Kurznamen in die volle Modell-ID, die die
 # claude-CLI erwartet. Explizit gepinnt auf die aktuelle Generation (Stand 2026-09):
-#   haiku=Haiku 4.5, sonnet=Sonnet 5, opus=Opus 5.5, fable=Fable 5.
+#   haiku=Haiku 4.5, sonnet=Sonnet 5.5, opus=Opus 5.5, fable=Fable 5.
 # Bei neuer Generation hier einmalig aktualisieren.
 claude_cli_model() {
   # CLAU_CC_1M=1 (Standard): Sonnet/Opus mit 1M-Kontext ("[1m]"); 0 = 200k-Fenster.
@@ -2855,7 +2880,7 @@ _print_cols() {
 }
 
 # Feste Presets (auch ohne owlAPI-Verbindung): Taste → owl-ID
-declare -gA OWL_PRESETS=( ["5"]="122" ["6"]="121" ["7"]="126" ["a"]="139" ["8"]="137" ["9"]="222" ["0"]="free" )
+declare -gA OWL_PRESETS=( ["5"]="122" ["6"]="121" ["7"]="126" ["a"]="139" ["b"]="129" ["8"]="137" ["9"]="222" ["0"]="free" )
 
 choose_model_interactive() {
   local nq=${#QWENPLAN_MODELS[@]}
@@ -2863,7 +2888,7 @@ choose_model_interactive() {
   local rows=() line id st own ctx price name
   while IFS= read -r line; do
     IFS=$'\t' read -r id st own ctx price name <<< "$line"
-    [[ "$id" == "121" || "$id" == "122" || "$id" == "126" || "$id" == "139" || "$id" == "137" || "$id" == "222" || "$id" == "free" ]] && continue
+    [[ "$id" == "121" || "$id" == "122" || "$id" == "126" || "$id" == "139" || "$id" == "129" || "$id" == "137" || "$id" == "222" || "$id" == "free" ]] && continue
     [[ "$ctx" -ge 64000 ]] || continue
     rows+=("$line")
   done < <(_owl_models_tsv 2>/dev/null)
@@ -2883,6 +2908,7 @@ choose_model_interactive() {
       "7)" "Flash Q3"   "owl:126"  "261k" "1"       "76B MoE · Q3_K_XL · ohne MTP, ~63 Tok/s · größter Kontext" \
       "a)" "Flash Q3"   "owl:139"  "97k"  "1"       "76B MoE · Q3_K_XL · MTP · Tools, Denken" \
       "8)" "Coder 27B"  "owl:137"  "97k"  "1"       "Kolibri (Qwopus3.8 Coder-Flash) · Tools, Denken, keine Vision" \
+      "b)" "35B schnell" "owl:129"  "32k"  "3"       "Qwen3.8-35B-A3B · Such-Set, Tools, Vision, ~110 Tok/s" \
       "0)" "Free-Plan"  "owl:free" "-"    "-"       "QuiteQue-Router, gratis"
     echo "     Flash (6/7/a): Vision nur auf CPU (langsam), kein Failover. Alle belegen BEIDE Karten und verdrängen"
     echo "     die 27B; Wechsel zwischen Flash-Modellen = Neuladen (25-70 s, erstes Laden bis ~2,5 min)."
@@ -2937,7 +2963,7 @@ choose_model_interactive() {
       echo "  m) weniger  (zurück zu den häufig genutzten)"
     fi
     echo "  o) owlAPI-ID direkt eingeben"
-    printf "Auswahl [1-9, a, 0, owl-ID, m, o, Enter=9]: "
+    printf "Auswahl [1-9, a, b, 0, owl-ID, m, o, Enter=9]: "
     local choice; read -r choice
     choice="${choice:-9}"
 
@@ -2959,7 +2985,7 @@ choose_model_interactive() {
       2) CLAU_MODEL="sonnet"; break ;;
       3) CLAU_MODEL="opus"; break ;;
       4) CLAU_MODEL="fable"; break ;;
-      5|6|7|a|A|8|9|0) CLAU_MODEL="owl:${OWL_PRESETS[${choice,,}]}"; break ;;
+      5|6|7|a|A|b|B|8|9|0) CLAU_MODEL="owl:${OWL_PRESETS[${choice,,}]}"; break ;;
       m|M) show_more=$((1 - show_more)); continue ;;
       o|O)
         printf "owlAPI-Modell-ID: "
@@ -3364,6 +3390,20 @@ _ensure_tmux() {
   elif _have pacman; then sudo pacman -S --noconfirm tmux >/dev/null 2>&1 || return 1
   else echo "  → bitte tmux manuell installieren" >&2; return 1; fi
   _have tmux && echo "tmux installiert."
+}
+
+# python3 + requests (für owl_proxy.py / local_chat.py)
+_ensure_python_requests() {
+  if _have python3 && python3 -c 'import requests' 2>/dev/null; then
+    echo "  python3-requests: bereits vorhanden"
+    return 0
+  fi
+  echo "  python3-requests: fehlt — installiere ..."
+  if _have apt-get; then sudo apt-get install -y python3 python3-requests >/dev/null 2>&1 || return 1
+  elif _have dnf; then sudo dnf install -y python3 python3-requests >/dev/null 2>&1 || return 1
+  elif _have pacman; then sudo pacman -S --noconfirm python python-requests >/dev/null 2>&1 || return 1
+  else echo "  → bitte python3 + requests manuell installieren" >&2; return 1; fi
+  python3 -c 'import requests' 2>/dev/null && echo "  python3-requests installiert."
 }
 
 _ensure_opencode() {
@@ -3787,6 +3827,7 @@ install_self() {
   _ensure_claude_code || true
   _ensure_opencode || true
   _ensure_tmux || true
+  _ensure_python_requests || true
 
   case ":$PATH:" in
     *":${INSTALL_DIR}:"*)
@@ -3822,6 +3863,33 @@ uninstall_self() {
 # lokal etwas geändert ist (git pull --rebase brach dann früher ab). Nichts
 # geht verloren: lokale Commits landen in einem Branch backup/self-update-*,
 # geänderte Dateien im git stash, die eigene .clau.conf bleibt erhalten.
+# ── Claude Code selbst: Diagnose und Update ─────────────────────────────────
+# "Auto-update failed · Run claude doctor" kommt von Claude Code, nicht von
+# clau -- meist ist beim Auto-Update das Netz weggebrochen. Beides hier
+# erreichbar, damit man nicht erst eine Shell braucht.
+claude_doctor() {
+  _have claude || { echo "claude nicht gefunden." >&2; return 1; }
+  echo "Claude Code $(claude --version 2>/dev/null) — $(command -v claude)"
+  echo "Starte 'claude doctor' (Beenden mit Enter/Esc) ..."
+  echo
+  claude doctor || true
+}
+
+claude_update() {
+  _have claude || { echo "claude nicht gefunden." >&2; return 1; }
+  if [[ "${CLAU_OFFLINE:-0}" == "1" ]]; then
+    echo "CLAU_OFFLINE=1 → kein Update aus dem Netz." >&2; return 1
+  fi
+  local before; before="$(claude --version 2>/dev/null)"
+  echo "Claude Code: $before — suche Update ..."
+  if claude update; then
+    echo "Jetzt: $(claude --version 2>/dev/null)"
+  else
+    echo "Update fehlgeschlagen. Diagnose:  clau --doctor" >&2
+    return 1
+  fi
+}
+
 self_update() {
   local script_path repo_dir
   script_path="$(readlink -f "$0")"
@@ -4507,9 +4575,15 @@ if not only and os.path.isdir(ndir):
         sessions.append((nm, clean(data.get("cwd") or "(nano)"), fn, tokens, name, "", preview))
 
 sessions.sort(key=lambda s: s[0], reverse=True)
+scan_json = os.environ.get("CLAU_SCAN_JSON") == "1"
 for mtime, cwd, sid, tokens, name, model, preview in sessions:
     mstr = time.strftime("%d.%m.%Y %H:%M", time.localtime(mtime))
-    print(SEP.join([mstr, cwd, sid, str(tokens), name, model, preview, str(int(mtime))]))
+    if scan_json:
+        print(json.dumps({"mtime": mstr, "epoch": int(mtime), "cwd": cwd, "sid": sid,
+                          "tokens": tokens, "name": name, "model": model, "preview": preview},
+                         ensure_ascii=False))
+    else:
+        print(SEP.join([mstr, cwd, sid, str(tokens), name, model, preview, str(int(mtime))]))
 PYEOF
 }
 
@@ -4747,7 +4821,7 @@ _session_table() {
     printf "  %3s  %-28s %-14s %-11s %6s\n" "" "Name" "Modell" "Zuletzt" "Tokens"
   fi
   local tm=""
-  _have tmux && tm=" $(tmux ls -F '#S' 2>/dev/null | tr '\n' ' ' || true)"
+  _have tmux && tm=" $( { tmux ls -F '#S' 2>/dev/null || true; } | tr '\n' ' ')"
   for l in "$@"; do
     IFS=$'\x1f' read -r mstr cwd sid tokens name model preview epoch <<< "$l"
     if [[ "${tokens:-0}" -ge 1000 ]]; then tok="$(( tokens / 1000 ))k"; else tok="${tokens:-0}"; fi
@@ -5132,7 +5206,7 @@ run_new_project_interactive() {
         echo
         echo "Bitte Modell wählen:"
         echo "  1) haiku   Haiku 4.5   schnell, günstig"
-        echo "  2) sonnet  Sonnet 5    Standard"
+        echo "  2) sonnet  Sonnet 5.5   Standard"
         echo "  3) opus    Opus 5.5    stärker, teurer"
         echo "  4) fable   Fable 5     stärkstes Modell"
         printf "Auswahl [1-4, Enter=2]: "
@@ -5252,7 +5326,7 @@ interactive_start() {
   echo "   w) Modell wechseln"
   echo "   u) Benutzer wechseln            ($QQ_USER; gilt für alle Engines)"
   echo "   i) Markdown importieren         (neue Session aus Datei)"
-  local ntm=0; _have tmux && ntm="$(tmux ls 2>/dev/null | wc -l || true)"
+  local ntm=0; _have tmux && ntm="$( { tmux ls 2>/dev/null || true; } | wc -l)"
   echo "   t) tmux-Sitzungen …             ($ntm laufen auf diesem Rechner)"
   echo "   f) Fernsteuerung …              (Telegram/Handy, API)"
   echo "   e) Einstellungen …              (Engine, Qwen-Key, Bot, Team, Update)"
@@ -5310,12 +5384,14 @@ choose_settings_menu() {
     echo "  4) Team-Modus …              : $(team_on && echo "AN — $(team_set_label)" || echo aus)"
     echo "  5) Update von GitHub (self-update)"
     echo "  6) Neue Sessions in tmux     : $([[ "${CLAU_TMUX:-0}" == "1" ]] && echo an || echo aus)   (überleben Terminal-Abstürze)"
-    echo "  7) Benutzer (Quiteque)       : ${QQ_USER}   (ccclau = normal, master = höchste Priorität)"
+    echo "  7) Claude Code prüfen        (claude doctor, $(claude --version 2>/dev/null | cut -d' ' -f1))"
+    echo "  8) Claude Code aktualisieren (claude update)"
+    echo "  9) Benutzer (Quiteque)       : ${QQ_USER}   (ccclau = normal, master = höchste Priorität)"
     echo "  0) Zurück"
-    printf "Auswahl [0-7]: "
+    printf "Auswahl [0-9]: "
     local c; read -r c
     case "$c" in
-      7) if [[ "$QQ_USER" == "master" ]]; then CLAU_QQ_USER=ccclau; else CLAU_QQ_USER=master; fi
+      9) if [[ "$QQ_USER" == "master" ]]; then CLAU_QQ_USER=ccclau; else CLAU_QQ_USER=master; fi
          QQ_USER="$CLAU_QQ_USER"; save_config ;;
       1) choose_backend_interactive ;;
       2) qwenplan_set_key_interactive ;;
@@ -5324,6 +5400,8 @@ choose_settings_menu() {
       5) self_update; echo; echo "Bitte 'clau' erneut starten, um die neue Version zu nutzen."; exit 0 ;;
       6) if [[ "${CLAU_TMUX:-0}" == "1" ]]; then CLAU_TMUX=0; else CLAU_TMUX=1; _ensure_tmux || CLAU_TMUX=0; fi
          save_config ;;
+      7) claude_doctor ;;
+      8) claude_update || true ;;
       *) return 0 ;;
     esac
   done
@@ -5543,6 +5621,14 @@ parse_args() {
         self_update
         exit 0
         ;;
+      --doctor)
+        claude_doctor
+        exit 0
+        ;;
+      --claude-update)
+        claude_update
+        exit $?
+        ;;
       --model)
         if [[ -z "${2:-}" ]]; then
           echo "--model erwartet eine Zahl (1=haiku, 2=sonnet, 3=opus, 4=fable)" >&2
@@ -5597,6 +5683,77 @@ parse_args() {
         CLAU_SESSION_ID=""
         save_config
         echo "Feste Session-ID entfernt."
+        exit 0
+        ;;
+      --gui)
+        ACTION="gui"
+        shift
+        ;;
+      --sessions-json)
+        # JSON-Zeile pro Session (für die GUI): --sessions-json [here|all]
+        ACTION="sessions-json"
+        SESSIONS_JSON_SCOPE="${2:-here}"
+        [[ "$SESSIONS_JSON_SCOPE" == "here" || "$SESSIONS_JSON_SCOPE" == "all" ]] || SESSIONS_JSON_SCOPE="here"
+        shift
+        [[ $# -gt 0 && "${1:0:1}" != "-" ]] && shift
+        ;;
+      --set-model)
+        # Dauerhaftes Modell setzen (GUI): haiku|sonnet|opus|fable|owl:<ID>|qwen:<modell>
+        if [[ -z "${2:-}" ]]; then
+          echo "--set-model erwartet: haiku|sonnet|opus|fable|owl:<ID>|qwen:<modell>" >&2
+          exit 1
+        fi
+        case "$2" in
+          haiku|sonnet|opus|fable) CLAU_MODEL="$2"; CLAU_BACKEND="claude" ;;
+          owl:*) CLAU_MODEL="$2"; CLAU_BACKEND="claude" ;;
+          qwen:*) CLAU_BACKEND="qwenplan"; CLAU_QWEN_MODEL="${2#qwen:}"; CLAU_MODEL="" ;;
+          *) echo "--set-model: ungültiges Modell: $2" >&2; exit 1 ;;
+        esac
+        save_config
+        if [[ "$(effective_backend)" == "qwenplan" ]]; then
+          echo "Qwen-Modell gesetzt auf: $CLAU_QWEN_MODEL (Engine: qwenplan)"
+        else
+          echo "Standardmodell gesetzt auf: $CLAU_MODEL"
+        fi
+        exit 0
+        ;;
+      --rename)
+        if [[ -z "${2:-}" || -z "${3:-}" ]]; then
+          echo "--rename erwartet: <Session-ID> <Name>" >&2; exit 1
+        fi
+        _set_session_title "$(_claude_projects_dir)/$(_project_hash_for)" "$2" "$3"
+        echo "✓ Session umbenannt."
+        exit 0
+        ;;
+      --export-md)
+        if [[ -z "${2:-}" ]]; then
+          echo "--export-md erwartet: <Session-ID>" >&2; exit 1
+        fi
+        local _esf; _esf="$(_session_file_for_id "$2")" || { echo "Session nicht gefunden: $2" >&2; exit 1; }
+        local _eout; _eout="$(_session_export_md "$_esf")"
+        [[ -n "$_eout" ]] && echo "✓ Exportiert: $_eout" || { echo "✗ Export fehlgeschlagen." >&2; exit 1; }
+        exit 0
+        ;;
+      --delete-session)
+        if [[ -z "${2:-}" ]]; then
+          echo "--delete-session erwartet: <Session-ID>" >&2; exit 1
+        fi
+        local _dsf; _dsf="$(_session_file_for_id "$2")" || { echo "Session nicht gefunden: $2" >&2; exit 1; }
+        rm -f "$_dsf"
+        _delete_session_title "$(_claude_projects_dir)/$(_project_hash_for)" "$2"
+        if [[ "${CLAU_SESSION_ID:-}" == "$2" ]]; then CLAU_SESSION_ID=""; save_config; fi
+        echo "✓ Session gelöscht."
+        exit 0
+        ;;
+      --tmux-pin)
+        if [[ -z "${2:-}" || -z "${3:-}" ]]; then
+          echo "--tmux-pin erwartet: <Session-ID> <on|off>" >&2; exit 1
+        fi
+        case "${3:-}" in
+          on|1|true) _session_tmux_set "$2" 1; echo "✓ In tmux fixiert." ;;
+          off|0|false) _session_tmux_set "$2" 0; echo "✓ Nicht mehr in tmux fixiert." ;;
+          *) echo "--tmux-pin: <on|off> erwartet" >&2; exit 1 ;;
+        esac
         exit 0
         ;;
       --clear-model)
@@ -5808,13 +5965,13 @@ fi
 
 # Update-Check nur für interaktive Läufe (nicht headless/CI/tg)
 case "${ACTION}" in
-  tg-token|tg-setup|tg-test|tg-whoami|tg-bot|tg-hooks-off|mirror|tg-pump|api|api-stop) : ;;
+  tg-token|tg-setup|tg-test|tg-whoami|tg-bot|tg-hooks-off|mirror|tg-pump|api|api-stop|gui|sessions-json) : ;;
   *) [[ "${HEADLESS:-0}" -eq 1 ]] || check_for_updates ;;
 esac
 
 # Fernsteuerung im Hintergrund (nur mit CLAU_API=1, nicht für Hilfsaufrufe)
 case "${ACTION}" in
-  tg-*|mirror|api|api-stop) : ;;
+  tg-*|mirror|api|api-stop|gui|sessions-json) : ;;
   *) [[ "${HEADLESS:-0}" -eq 1 ]] || api_daemon_ensure ;;
 esac
 
@@ -5867,6 +6024,20 @@ case "${ACTION}" in
     ;;
   api-stop)
     api_daemon_stop
+    ;;
+  gui)
+    if [[ ! -f "$CLAU_GUI_SCRIPT" ]]; then
+      echo "Fehler: GUI-Skript nicht gefunden: $CLAU_GUI_SCRIPT" >&2
+      exit 1
+    fi
+    exec python3 "$CLAU_GUI_SCRIPT"
+    ;;
+  sessions-json)
+    export CLAU_SCAN_JSON=1
+    case "${SESSIONS_JSON_SCOPE:-here}" in
+      all) _all_sessions_scan ;;
+      *)   _here_sessions_scan ;;
+    esac
     ;;
   tg-whoami)
     tg_whoami

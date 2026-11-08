@@ -7,9 +7,9 @@ Wrapper für Claude Code, nano und eigene Modelle via QuiteQue (opencode wird mi
 - **Modell pro Projektordner** in `.clau.conf` speichern
 - **Session-Auswahl** beim Start (Resume-Picker, neue Session, feste Session-ID)
 - **Zwei Backends**:
-  - **Claude Code** (agentisch) — `haiku` (4.5), `sonnet` (5), `opus` (5), `fable` (5)
+  - **Claude Code** (agentisch) — `haiku` (4.5), `sonnet` (5.5), `opus` (5.5), `fable` (5)
   - **QuiteQue** (lokale/cloud-Modelle) — `owl:<ID>` (z.B. `owl:120` = PropellerA)
-- **Standard**: Modell `sonnet` (Sonnet 5), Autonomie-Level `0` (vollautomatisch/durchlaufen)
+- **Standard**: Modell `sonnet` (Sonnet 5.5), Autonomie-Level `0` (vollautomatisch/durchlaufen)
 - **opencode** wird beim `--install` automatisch mitinstalliert (eigenständiges Tool, spricht QuiteQue direkt im OpenAI-Format)
 - **Pre-Flight-Check**: Session-Größe vs. Modell-Context-Window vor Start
 - **Auto-Compact**: Konfigurierbarer Threshold (Prozent oder festes Token-Limit)
@@ -21,6 +21,7 @@ Wrapper für Claude Code, nano und eigene Modelle via QuiteQue (opencode wird mi
 - **Bot-Einstellungen**: Autonomie-Level (0-2), sudo NOPASSWD, Effort-Level
 - **Team-Modus** (`CLAU_TEAM=1`): 27B-Teamleiter verteilt an bis zu 5 Ausführer-Agenten auf dem 176B, je nach freien Slots
 - **Fernsteuerung** (`clau --api`, Default aus): HTTP-Schnittstelle für Rollen-Sessions (teamleiter/planer/tester)
+- **Python-GUI** (`clau --gui`, tkinter): Config, Modellwechsel, Session-Liste (fortsetzen/umbenennen/exportieren/löschen) und tmux-Panel
 - **Offline-Betrieb** (`CLAU_OFFLINE=1`): kein Update-Check, keine Websuche, keine Netz-Installation
 
 ## Installation
@@ -68,6 +69,8 @@ clau -m owl:120               # Mit eigenem Modell (QuiteQue) starten
 clau --headless -p "Prompt"   # Headless-Modus
 clau --current                # Aktuelle Config anzeigen
 clau --git-up                 # Commit & Push
+clau --doctor                 # Claude Code prüfen (claude doctor), auch Einstellungen → 7 und GUI
+clau --claude-update          # Claude Code aktualisieren (claude update), Einstellungen → 8
 clau --git-down               # Pull von origin
 ```
 
@@ -116,12 +119,13 @@ clau — mario  [owl:120, Engine: claude]
 
 | Taste | Engine | Modell |
 |-------|--------|--------|
-| 1-4 | Claude Code + Claude-Abo | haiku (4.5) / sonnet (5) / opus (5.5) / fable (5) |
+| 1-4 | Claude Code + Claude-Abo | haiku (4.5) / sonnet (5.5) / opus (5.5) / fable (5) |
 | 9 (Standard, Enter) | gewählte Engine + owlAPI | Universal `owl:222` (ab 96k, lädt nie um) |
 | 5 | Engine + owlAPI | Turbo 27B `owl:122` (97k) |
 | 6 | Engine + owlAPI | Flash-Next `owl:121`, 2 Sessions à 97k, MTP |
 | 7 | Engine + owlAPI | Flash-Next `owl:126`, 261k, 1 Session, ohne MTP |
 | a | Engine + owlAPI | Flash-Next `owl:139`, 97k, 1 Session, MTP |
+| b | Engine + owlAPI | Qwen3.8-35B-A3B `owl:129` (32k, 3 Slots, Tools+Vision, ~110 Tok/s) |
 | 8 | Engine + owlAPI | Coder `owl:137` (97k) |
 | 0 | Engine + owlAPI | QuiteQue Free-Plan `owl:free` (Router) |
 | q1-q10 | Claude Code + Qwen Token Plan | qwen3.8-max (Standard), qwen3.8-flash, … glm-5.2, auto |
@@ -376,6 +380,34 @@ curl -s -XPOST localhost:7010/sessions/planer/start -d '{"modell":"owl:120","auf
 curl -s -XPOST localhost:7010/sessions/planer/nachricht -d '{"text":"Fasse PLAN.md in 3 Sätzen zusammen"}'
 curl -s -H "Authorization: Bearer $TOKEN" http://vm:7010/status     # mit Token
 ```
+
+## Python-GUI (`clau --gui`)
+
+Grafisches Steuerpanel (tkinter, nur Standardbibliothek) als Alternative zum Terminal-Menü.
+Start:
+
+```bash
+clau --gui                       # GUI im aktuellen Ordner
+python3 clau_gui.py --dir <pfad> # direkt, optional anderer Projektordner
+python3 clau_gui.py --no-launch  # Terminal-Start nur simulieren (Testen)
+```
+
+Die GUI ist eine dünne Schicht über `clau.sh` — sie liest `.clau.conf` und die Session-Liste
+und führt Aktionen über die nicht-interaktiven Flags aus (Kernlogik bleibt in `clau.sh`):
+
+| Bereich | Funktion |
+|---|---|
+| **Konfiguration** | Ordner + Zusammenfassung (Modell, Engine, Autonomie, Team, Websuche, tmux) aus `.clau.conf` |
+| **Modell** | Presets (haiku/sonnet/opus/fable, `owl:120/121/126/129/free`) + Qwen-Optionen + freies Feld → `clau --set-model` |
+| **Sessions** | Tabelle (Hier/Alle) mit Name, Ordner, Modell, Zuletzt, Tokens; Aktionen: Neue, Fortsetzen, Umbenennen, Export `.md`, tmux fixieren, Löschen |
+| **tmux** | `tmux ls` + Anbinden / Beenden |
+
+**Start** öffnet `clau` (neue Session bzw. `clau --resume <sid>`) in einem neuen
+Terminal-Fenster (gnome-terminal/konsole/xfce4-terminal/xterm, Fallback: tmux). Doppelklick auf
+eine Session = Fortsetzen. Ohne `DISPLAY` zeigt die GUI einen klaren Fehler statt abzustürzen.
+
+Nicht-interaktive Flags (auch von der GUI genutzt): `--sessions-json [here|all]`, `--set-model <spec>`,
+`--rename <sid> <name>`, `--export-md <sid>`, `--delete-session <sid>`, `--tmux-pin <sid> <on|off>`.
 
 ## Offline-Betrieb
 
