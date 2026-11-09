@@ -4,6 +4,6 @@
   "136": {"url": "http://127.0.0.1:8275/v1", "model": "qwen3.8-27b-brilliance", "ctx": 99328, "name": "Qwen3.8 27B Brilliance (Planer)"},
   "137": {"url": "http://127.0.0.1:8275/v1", "model": "qwen3.8-27b-qwopus-coder", "ctx": 99328, "name": "Qwopus 27B Coder-Flash Kolibri"},
   "126": {"url": "http://127.0.0.1:8275/v1", "model": "qwen3.8-flash-next-q3xl-1x261k", "ctx": 261120, "name": "Flash-Next 176B 1x261K"},
-  "178": {"url": "http://127.0.0.1:8275/v1", "model": "qwen3.8-flash-next-gsq-2x97k-mtp", "ctx": 97024, "name": "Flash-Next 176B 2x96K MTP"},
-  "139": {"url": "http://127.0.0.1:8275/v1", "model": "qwen3.8-flash-next-q3xl-1x97k-mtp", "ctx": 97024, "name": "Flash-Next 176B 1x96K MTP"}
+  "121": {"url": "http://127.0.0.1:8275/v1", "model": "qwen3.8-flash-next-gsq-2x97k-mtp", "ctx": 97024, "name": "Flash-Next 176B 2x97K MTP"},
+  "139": {"url": "http://127.0.0.1:8275/v1", "model": "qwen3.8-flash-next-q3xl-1x97k-mtp", "ctx": 97024, "name": "Flash-Next 176B 1x97K MTP"}
 }
