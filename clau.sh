@@ -124,6 +124,12 @@ _owl_models_refresh() {
 # Sortiert: lokal → gratis → nach Anbieter, darin nach Eingabepreis. Ohne Bild/Audio/Suche.
 _owl_models_tsv() {
   local direct; direct="$(python3 "$CLAU_DIR/backends.py" tsv 2>/dev/null)"
+  # QuiteQue gerade nicht erreichbar: keine veralteten Cache-Zeilen anbieten, nur Direkt-Modelle
+  if ! curl -sf -m 2 -o /dev/null "${OWL_BASE_URL}/v1/models" -H "X-User: ${CLAU_USER_TAG:-$(whoami)}" \
+       -H "X-Agent-Tool: ${CLAU_AGENT_TOOL:-ccclau-$(whoami)}" 2>/dev/null; then
+    [[ -n "$direct" ]] || return 1
+    printf '%s\n' "$direct"; return 0
+  fi
   if ! _owl_models_refresh "${1:-}"; then
     # QuiteQue nicht erreichbar: direkt angebundene Modelle trotzdem anbieten
     [[ -n "$direct" ]] || return 1

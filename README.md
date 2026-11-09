@@ -417,6 +417,12 @@ direkt an einen OpenAI-kompatiblen Server an, z.B. das Karten-Tor `127.0.0.1:827
 `owl_proxy.py`), taucht im Modellmenü als `[direkt]` auf und funktioniert auch bei unerreichbarem QuiteQue.
 `CLAU_OWL_ROUTES` hat Vorrang. Prüfen: `python3 backends.py check`.
 
+**Quellen (`"_quellen"`):** `{"name":"Tor","url":"http://127.0.0.1:8275/v1"}` fragt `/v1/models` ab und bietet alle Chat-Modelle
+(Kontext aus `meta.n_ctx_slot`) automatisch als `owl:d-<modellname>` an; Bild-/Audio-Modelle fallen raus, Dubletten zu
+Einzeleinträgen ebenfalls. Ist die Quelle nicht erreichbar, erscheint nichts (kurzer Cache, 20 s). Ist QuiteQue nicht erreichbar,
+zeigt das Menü keine veralteten QuiteQue-Zeilen, nur die Direkt-Modelle (und die Claude-Modelle); kommt QuiteQue zurück, sind
+seine Modelle wieder da, die Direkt-Modelle bleiben daneben getrennt wählbar.
+
 ## Delegieren (`clau --delegate`, MCP `clau_delegate_mcp.py`)
 
 Schwere Aufgabe an einen eigenen Claude-Code-Lauf geben, ohne Rückfragen; alles pro Aufruf konfigurierbar

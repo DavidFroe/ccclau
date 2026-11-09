@@ -6,6 +6,7 @@ Konfiguration: ~/.config/clau/backends.json (Pfad per CLAU_BACKENDS_FILE).
 Ohne Datei ist alles aus und clau verhält sich wie bisher. Beispiel: backends.example.json
 
   {
+    "_quellen": [{"name": "Tor", "url": "http://127.0.0.1:8275/v1"}],   # alle Chat-Modelle der Quelle automatisch
     "136": {"url": "http://127.0.0.1:8275/v1", "model": "qwen3.8-27b-brilliance",
             "ctx": 99328, "name": "Brilliance 27B", "api_key": ""}
   }
@@ -19,6 +20,7 @@ Schlüssel = owl-Modell-ID (wie bei owl:136). Aufrufe:
 import json
 import os
 import sys
+import time
 import urllib.request
 
 PATH = os.environ.get("CLAU_BACKENDS_FILE") or os.path.join(
@@ -45,6 +47,54 @@ def load(path=None):
             "name": v.get("name") or v.get("model") or str(k),
             "api_key": v.get("api_key") or "",
         }
+    for q in (raw or {}).get("_quellen") or []:
+        for key, ent in _entdecke(q).items():
+            if not any(e["url"] == ent["url"] and e["model"] == ent["model"] for e in out.values()):
+                out.setdefault(key, ent)
+    return out
+
+
+# Nur Chat-Modelle: das Tor nennt für sie den Kontext je Slot (meta.n_ctx_slot); Bild-/Audio-/Ohren-Modelle nicht.
+_CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "clau", "backends_quellen.json")
+_CACHE_TTL = 20
+
+
+def _entdecke(q):
+    """Modelle einer Quelle {name?, url, api_key?, prefix?} über /v1/models. Nicht erreichbar = leer."""
+    url = (q.get("url") or "").rstrip("/")
+    if not url:
+        return {}
+    try:
+        with open(_CACHE, encoding="utf-8") as f:
+            c = json.load(f)
+        if c.get("url") == url and time.time() - c.get("ts", 0) < _CACHE_TTL:
+            return c["eintraege"]
+    except (OSError, ValueError, KeyError):
+        pass
+    out = {}
+    req = urllib.request.Request(url + "/models")
+    if q.get("api_key"):
+        req.add_header("Authorization", "Bearer " + q["api_key"])
+    try:
+        with urllib.request.urlopen(req, timeout=1.5) as r:
+            data = json.load(r).get("data") or []
+    except Exception:
+        return {}
+    pre = q.get("prefix") or "d"
+    for m in data:
+        mid = m.get("id")
+        ctx = (m.get("meta") or {}).get("n_ctx_slot") or m.get("context_length") or m.get("max_model_len")
+        if not mid or not ctx:
+            continue
+        hint = (m.get("meta") or {}).get("hinweis") or ""
+        out[f"{pre}-{mid}"] = {"url": url, "model": mid, "ctx": int(ctx), "api_key": q.get("api_key") or "",
+                               "name": f"{mid}" + (f" ({q['name']})" if q.get("name") else "")}
+    try:
+        os.makedirs(os.path.dirname(_CACHE), exist_ok=True)
+        with open(_CACHE, "w", encoding="utf-8") as f:
+            json.dump({"url": url, "ts": time.time(), "eintraege": out}, f)
+    except OSError:
+        pass
     return out
 
 
