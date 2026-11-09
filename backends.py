@@ -36,7 +36,9 @@ def load(path=None):
     for k, v in (raw or {}).items():
         if k.startswith("_") or not isinstance(v, dict) or not v.get("url"):
             continue
-        out[str(k)] = {
+        # Direkt-Modelle bekommen eine eigene ID ("d137"), damit sie neben dem
+        # QuiteQue-Eintrag derselben Nummer getrennt wählbar sind (owl:d137).
+        out[("d" + str(k)) if str(k)[:1].isdigit() else str(k)] = {
             "url": v["url"].rstrip("/"),
             "model": v.get("model") or str(k),
             "ctx": int(v.get("ctx") or 0),

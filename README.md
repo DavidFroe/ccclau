@@ -413,7 +413,7 @@ Nicht-interaktive Flags (auch von der GUI genutzt): `--sessions-json [here|all]`
 
 `~/.config/clau/backends.json` (Vorlage: `backends.example.json`, Pfad per `CLAU_BACKENDS_FILE`) bindet Modelle
 direkt an einen OpenAI-kompatiblen Server an, z.B. das Karten-Tor `127.0.0.1:8275` auf dem Mainframe. Schlüssel
-= owl-ID, Felder `url`, `model`, `ctx`, `name`, optional `api_key`. Gilt für Claude Code und nano (beide laufen über
+= owl-ID der QuiteQue-Entsprechung, gewählt wird das Direkt-Modell als **`owl:d<ID>`** (z.B. `owl:d137`) – getrennt vom QuiteQue-Eintrag derselben Nummer. Felder `url`, `model`, `ctx`, `name`, optional `api_key`. Gilt für Claude Code und nano (beide laufen über
 `owl_proxy.py`), taucht im Modellmenü als `[direkt]` auf und funktioniert auch bei unerreichbarem QuiteQue.
 `CLAU_OWL_ROUTES` hat Vorrang. Prüfen: `python3 backends.py check`.
 
