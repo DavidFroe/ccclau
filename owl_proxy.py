@@ -235,6 +235,17 @@ def _parse_routes(spec):
 
 
 ROUTES = _parse_routes(os.environ.get("OWL_ROUTES", ""))
+# Direkt-Backends aus ~/.config/clau/backends.json (backends.py); OWL_ROUTES gewinnt.
+ROUTE_KEYS = {}
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import backends as _backends
+    for _k, _v in _backends.load().items():
+        ROUTES.setdefault(_k, (_v["url"], _v["model"]))
+        if _v["api_key"]:
+            ROUTE_KEYS[_v["url"]] = _v["api_key"]
+except Exception as _e:  # fehlende/kaputte Datei darf den Proxy nie stoppen
+    log(f"backends.json nicht geladen: {_e!r}")
 
 
 def backend_for(target):
@@ -743,6 +754,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         # etwas unter unserem eigenen Timeout.
                         "X-Owl-Max-Wait": str(max(60, REQUEST_TIMEOUT - 60)),
                         **ACTIVITY_HEADERS,
+                        **({"Authorization": "Bearer " + ROUTE_KEYS[base]} if base in ROUTE_KEYS else {}),
                     },
                     stream=stream,
                     timeout=REQUEST_TIMEOUT

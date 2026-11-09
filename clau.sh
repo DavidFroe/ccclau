@@ -121,10 +121,18 @@ _owl_models_refresh() {
 # Chat-taugliche Modelle als TSV: id status anbieter ctx preis name
 # Sortiert: lokal → gratis → nach Anbieter, darin nach Eingabepreis. Ohne Bild/Audio/Suche.
 _owl_models_tsv() {
-  _owl_models_refresh "${1:-}" || return 1
-  python3 - "$OWL_MODELS_CACHE" <<'PY'
+  local direct; direct="$(python3 "$CLAU_DIR/backends.py" tsv 2>/dev/null)"
+  if ! _owl_models_refresh "${1:-}"; then
+    # QuiteQue nicht erreichbar: direkt angebundene Modelle trotzdem anbieten
+    [[ -n "$direct" ]] || return 1
+    printf '%s\n' "$direct"; return 0
+  fi
+  [[ -n "$direct" ]] && printf '%s\n' "$direct"
+  python3 - "$OWL_MODELS_CACHE" "$direct" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))["data"]
+_direct_ids = {l.split("\t")[0] for l in sys.argv[2].splitlines() if l}
+data = [m for m in data if str(m.get("numerical_id")) not in _direct_ids]
 skip_owner = {"searchllm", "ohrwurm"}
 rows = []
 for m in data:
@@ -149,6 +157,9 @@ PY
 owl_context_window() {
   local owl_id="${1:-}"
   local cw=""
+  cw="$(python3 "$CLAU_DIR/backends.py" ctx "$owl_id" 2>/dev/null)"
+  if [[ -n "$cw" && "$cw" -gt 0 ]] 2>/dev/null; then echo "$cw"; return; fi
+  cw=""
   if _owl_models_refresh 2>/dev/null; then
     cw="$(python3 -c '
 import json, sys
@@ -2160,6 +2171,11 @@ run_owl_headless_via_claude() {
   local tool_args=()
   while IFS= read -r line; do tool_args+=("$line"); done < <(_owl_minimal_tool_args; _team_claude_args)
   while IFS= read -r line; do tool_args+=("$line"); done < <(_api_claude_args headless)
+  # Zusatzargumente je Aufruf (clau_delegate.py): NUL-getrennte Datei
+  if [[ -n "${CLAU_HEADLESS_ARGS_FILE:-}" && -r "$CLAU_HEADLESS_ARGS_FILE" ]]; then
+    local _xa
+    while IFS= read -r -d '' _xa; do tool_args+=("$_xa"); done < "$CLAU_HEADLESS_ARGS_FILE"
+  fi
   local perm_args=()
   [[ -n "${CLAU_API_SESSION_ID:-}" && "${DANGEROUS_SKIP:-0}" -eq 1 ]] && perm_args=(--dangerously-skip-permissions)
   if team_active; then
@@ -2380,7 +2396,7 @@ CLAU_API="${CLAU_API:-0}"
 CLAU_API_BIND="${CLAU_API_BIND:-127.0.0.1:7010}"
 CLAU_API_TOKEN="${CLAU_API_TOKEN:-}"
 CLAU_OFFLINE="${CLAU_OFFLINE:-0}"
-CLAU_OWL_ROUTES="${CLAU_OWL_ROUTES:-}"
+CLAU_OWL_ROUTES="${CLAU_OWL_ROUTES:-}"   # leer: owl_proxy liest ~/.config/clau/backends.json selbst
 CLAU_QQ_USER="${CLAU_QQ_USER:-ccclau}"
 CLAU_MODEL_FAVS="${CLAU_MODEL_FAVS:-120 350 351 41 42 46 382 399 45 513}"
 CLAU_BACKEND="${CLAU_BACKEND:-claude}"
@@ -5130,6 +5146,12 @@ build_headless_cmd() {
     CLAUDE_CMD+=(--max-budget-usd "$MAX_BUDGET_USD")
   fi
 
+  # Zusatzargumente je Aufruf (clau_delegate.py): NUL-getrennte Datei, vor dem Prompt
+  if [[ -n "${CLAU_HEADLESS_ARGS_FILE:-}" && -r "$CLAU_HEADLESS_ARGS_FILE" ]]; then
+    local _xa
+    while IFS= read -r -d '' _xa; do CLAUDE_CMD+=("$_xa"); done < "$CLAU_HEADLESS_ARGS_FILE"
+  fi
+
   CLAUDE_CMD+=("$PROMPT_TEXT")
 }
 
@@ -5858,6 +5880,11 @@ parse_args() {
       --new)
         ACTION="new"
         shift
+        ;;
+      --delegate)
+        # clau --delegate <start|status|result|wait|more|stop|list> ... → clau_delegate.py
+        shift
+        exec python3 "$CLAU_DIR/clau_delegate.py" "$@"
         ;;
       --headless)
         HEADLESS=1

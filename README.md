@@ -409,6 +409,30 @@ eine Session = Fortsetzen. Ohne `DISPLAY` zeigt die GUI einen klaren Fehler stat
 Nicht-interaktive Flags (auch von der GUI genutzt): `--sessions-json [here|all]`, `--set-model <spec>`,
 `--rename <sid> <name>`, `--export-md <sid>`, `--delete-session <sid>`, `--tmux-pin <sid> <on|off>`.
 
+## Direktanbindung ohne QuiteQue (`backends.json`)
+
+`~/.config/clau/backends.json` (Vorlage: `backends.example.json`, Pfad per `CLAU_BACKENDS_FILE`) bindet Modelle
+direkt an einen OpenAI-kompatiblen Server an, z.B. das Karten-Tor `127.0.0.1:8275` auf dem Mainframe. Schlüssel
+= owl-ID, Felder `url`, `model`, `ctx`, `name`, optional `api_key`. Gilt für Claude Code und nano (beide laufen über
+`owl_proxy.py`), taucht im Modellmenü als `[direkt]` auf und funktioniert auch bei unerreichbarem QuiteQue.
+`CLAU_OWL_ROUTES` hat Vorrang. Prüfen: `python3 backends.py check`.
+
+## Delegieren (`clau --delegate`, MCP `clau_delegate_mcp.py`)
+
+Schwere Aufgabe an einen eigenen Claude-Code-Lauf geben, ohne Rückfragen; alles pro Aufruf konfigurierbar
+(Modell, Tools, MCP-Server, Skills, Systemprompt, Kontext, Limits, Preset aus `~/.config/clau/delegate/presets/`).
+Standardmäßig in einem eigenen Git-Worktree, zurück kommen Ergebnis und Diff.
+
+```bash
+clau --delegate start spec.json     # → job_id   (spec: aufgabe, modell, ordner, tools, mcp_server, skills, limits, …)
+clau --delegate status <id>         # Zwischenstand
+clau --delegate wait <id> 600       # Ergebnis + Diff
+clau --delegate more|stop|list
+claude mcp add clau-delegate -- python3 /pfad/zu/clau_delegate_mcp.py   # als Unteragent für andere KIs
+```
+
+Pro Modell läuft ein Job gleichzeitig, weitere warten (`wartet_auf_slot`). Details: Kopf von `clau_delegate.py`.
+
 ## Offline-Betrieb
 
 Für Umgebungen ohne Internet (devport-VMs: nur Gitea, apt-Cache, lokale LLMs):
