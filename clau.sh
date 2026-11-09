@@ -33,6 +33,8 @@ CLAU_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 OWL_PROXY_SCRIPT="$CLAU_DIR/owl_proxy.py"
 CC_COMPACT_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc_compact.py"
 WEBSEARCH_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/websearch_mcp.py"
+MATLAB_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/matlab_mcp.py"
+SOLIDCRAFT_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/solidcraft_mcp.py"
 LLM_STATUS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/llm_status_mcp.py"
 CLAU_TEAM_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/team"
 PI_TEAM_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pi_team_mcp.py"
@@ -1478,7 +1480,24 @@ CLAU_OWL_TOOLS_DEFAULT="Bash,Edit,Write,Read,AskUserQuestion,TaskCreate,TaskGet,
 # CLAU_WEBSEARCH=1 kommt die lokale QuiteQue-Websuche als einziges MCP-Tool
 # dazu — das serverseitige WebSearch der Anthropic-API gibt es über owlAPI
 # nicht, ein lokales Modell hätte sonst gar keinen Weg ins Netz.
+# Optionale MCP-Server (Default aus): CLAU_MATLAB=1 → matlab_mcp.py, CLAU_SOLIDCRAFT=1 → solidcraft_mcp.py
 _owl_mcp_config() {
+  if [[ "${CLAU_MATLAB:-0}" != "1" && "${CLAU_SOLIDCRAFT:-0}" != "1" ]]; then
+    _owl_mcp_config_base
+    return
+  fi
+  _owl_mcp_config_base | python3 -c '
+import json, os, sys
+c = json.load(sys.stdin)
+srv = c.setdefault("mcpServers", {})
+if os.environ.get("CLAU_MATLAB") == "1" and os.path.exists(sys.argv[1]):
+    srv["matlab"] = {"type": "stdio", "command": "python3", "args": [sys.argv[1]]}
+if os.environ.get("CLAU_SOLIDCRAFT") == "1" and os.path.exists(sys.argv[2]):
+    srv["solidcraft"] = {"type": "stdio", "command": "python3", "args": [sys.argv[2]]}
+print(json.dumps(c))' "$MATLAB_MCP_SCRIPT" "$SOLIDCRAFT_MCP_SCRIPT"
+}
+
+_owl_mcp_config_base() {
   if team_active && [[ -f "$LLM_STATUS_MCP_SCRIPT" ]]; then
     # Team-Modus: llm_status (Slot-Auslastung des Ausführer-Modells) immer,
     # Websuche wie gehabt nur mit CLAU_WEBSEARCH=1.
@@ -2222,7 +2241,7 @@ _conf_fallback_file() {
 # Update-Check/Websuche).
 CLAU_ENV_OVERRIDES=(CLAU_TEAM CLAU_TEAM_LEAD_MODEL CLAU_TEAM_EXEC_MODEL CLAU_TEAM_MAX_AGENTS
   CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_TEAM_SUBAGENTS CLAU_TEAM_SET CLAU_API CLAU_API_BIND CLAU_API_TOKEN
-  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS)
+  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_MATLAB CLAU_SOLIDCRAFT CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS)
 
 load_config() {
   local _ov _envsave=()
@@ -2379,6 +2398,8 @@ CLAU_DISABLE_TOOLS="${CLAU_DISABLE_TOOLS:-}"
 CLAU_DISABLE_ARTIFACT="${CLAU_DISABLE_ARTIFACT:-0}"
 CLAU_DISABLE_AGENT_VIEW="${CLAU_DISABLE_AGENT_VIEW:-0}"
 CLAU_WEBSEARCH="${CLAU_WEBSEARCH:-1}"
+CLAU_MATLAB="${CLAU_MATLAB:-0}"
+CLAU_SOLIDCRAFT="${CLAU_SOLIDCRAFT:-0}"
 CLAU_TEAM="${CLAU_TEAM:-0}"
 CLAU_TEAM_LEAD_MODEL="${CLAU_TEAM_LEAD_MODEL:-122}"
 CLAU_TEAM_EXEC_MODEL="${CLAU_TEAM_EXEC_MODEL:-121}"
@@ -2698,6 +2719,8 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_TOOLS="WebFetch,Agent"  Tools aus System-Prompt entfernen (kommagetrennt)
   CLAU_DISABLE_ARTIFACT="1"          Artifacts deaktivieren (spart ~2-3K Tokens)
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
+  CLAU_SOLIDCRAFT="0"                1 = SolidCraft-CAD-MCP (Brücke :8311, nur owl-Modelle) einschalten, siehe solidcraft_mcp.py
+  CLAU_MATLAB="0"                    1 = MATLAB-MCP (Windows-VM, nur owl-Modelle) einschalten, siehe matlab_mcp.py
   CLAU_WEBSEARCH="1"                 Lokale QuiteQue-Websuche als MCP-Tool (Default an, ~300 Tokens)
   CLAU_BACKEND="claude"               CLI-Engine: claude (Standard) | nano | opencode | qwenplan
   CLAU_QWEN_MODEL="qwen3.8-max"       Modell für qwenplan (Key: ~/.config/clau/qwenplan.key, chmod 600)

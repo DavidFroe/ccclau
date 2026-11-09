@@ -15,7 +15,7 @@ Spec (alles optional außer aufgabe), Presets: ~/.config/clau/delegate/presets/<
   aufgabe, preset, modell ("owl:137"), ordner, isolation ("worktree"|"direkt"),
   tools [..], tools_verboten [..], mcp_server [{name,command,args,env}],
   skills [Name oder Pfad], systemprompt_zusatz, kontext (Text) / kontext_dateien [..],
-  rechte ("bypass"|"normal"), limits {zeit_s, max_turns, budget_usd}
+  rechte ("bypass"|"normal"), limits {zeit_s, max_turns, budget_usd}, matlab / solidcraft (true = MCP dazu)
 """
 import fcntl
 import json
@@ -105,9 +105,16 @@ def build_args(spec, jid, work):
         a += ["--max-turns", str(lim["max_turns"])]
     if lim.get("budget_usd"):
         a += ["--max-budget-usd", str(lim["budget_usd"])]
-    if spec.get("mcp_server"):
+    mcp = list(spec.get("mcp_server") or [])
+    if spec.get("matlab"):  # optional: MATLAB-MCP (matlab_mcp.py); Kennung = Job-ID
+        mcp.append({"name": "matlab", "command": sys.executable,
+                    "args": [os.path.join(HERE, "matlab_mcp.py")], "env": {"CLAU_CHAT_ID": jid}})
+    if spec.get("solidcraft"):  # optional: SolidCraft-Brücke (solidcraft_mcp.py)
+        mcp.append({"name": "solidcraft", "command": sys.executable,
+                    "args": [os.path.join(HERE, "solidcraft_mcp.py")], "env": {"CLAU_CHAT_ID": jid}})
+    if mcp:
         servers = {}
-        for s in spec["mcp_server"]:
+        for s in mcp:
             servers[s["name"]] = {"type": "stdio", "command": s["command"],
                                   "args": s.get("args", []), "env": s.get("env", {})}
         mp = os.path.join(d, "mcp.json")

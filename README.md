@@ -433,6 +433,22 @@ claude mcp add clau-delegate -- python3 /pfad/zu/clau_delegate_mcp.py   # als Un
 
 Pro Modell läuft ein Job gleichzeitig, weitere warten (`wartet_auf_slot`). Details: Kopf von `clau_delegate.py`.
 
+## Optionale Werkzeuge: MATLAB und SolidCraft (Default aus)
+
+Beides sind MCP-Server, die nur existieren, wenn man sie einschaltet: `CLAU_MATLAB=1` / `CLAU_SOLIDCRAFT=1`
+(Umgebung oder `.clau.conf`, gilt für owl-Modelle) bzw. `"matlab": true` / `"solidcraft": true` im
+`clau --delegate`-Spec. Arbeitsverzeichnis = cwd, Kennung aus `CLAU_CHAT_ID` (sonst Ordnername).
+
+- **`matlab_mcp.py`**: MATLAB R2020a in der Windows-VM (SSH, startet bei Bedarf über `win10-matlab.service`).
+  Werkzeuge `matlab_status`, `matlab_run`, `matlab_files_sync`, `matlab_latex`, `matlab_spickzettel`. Neue Ergebnisdateien
+  (PNG, MP4, CSV, MAT, PDF …) landen im cwd, Zeitlimit beendet auch das matlab.exe in der VM, Läufe stehen in
+  `matlab-tuning/fehlerlog/zugriffe.jsonl`. Die Regeln (Stapelbetrieb, Figurgröße, `exportgraphics(gcf,…)`) stehen in den
+  Werkzeugbeschreibungen. Eigene Kopie der Grundfunktionen aus `matlab_kvm.py` (dort unverändert): SSH/SCP, VM-Start,
+  Datei-Spiegelung, `_matlab_beenden`, Fehlerdeutung, Protokoll.
+- **`solidcraft_mcp.py`**: stdio-Schicht vor der SolidCraft-Brücke (`mcp_bruecke.py`, Port 8311, ein CLI-Prozess je Kennung).
+  Spiegelt Dateien zwischen cwd und Brücken-Ordner (modell.stl, STEP, PNG, .sc …); 3D-Ansicht-Link und `netz_abziehen`
+  bleiben erhalten.
+
 ## Offline-Betrieb
 
 Für Umgebungen ohne Internet (devport-VMs: nur Gitea, apt-Cache, lokale LLMs):
