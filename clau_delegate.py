@@ -15,7 +15,7 @@ Spec (alles optional außer aufgabe), Presets: ~/.config/clau/delegate/presets/<
   aufgabe, preset, modell ("owl:137"), ordner, isolation ("worktree"|"direkt"),
   tools [..], tools_verboten [..], mcp_server [{name,command,args,env}],
   skills [Name oder Pfad], systemprompt_zusatz, kontext (Text) / kontext_dateien [..],
-  rechte ("bypass"|"normal"), limits {zeit_s, max_turns, budget_usd}, matlab / solidcraft (true = MCP dazu), eskalation {ziel, compact_max, fehler_max, …}
+  rechte ("bypass"|"normal"), limits {zeit_s, max_turns, budget_usd}, matlab / solidcraft / picogk (true = MCP dazu), eskalation {ziel, compact_max, fehler_max, …}
 """
 import fcntl
 import json
@@ -112,6 +112,9 @@ def build_args(spec, jid, work):
     if spec.get("solidcraft"):  # optional: SolidCraft-Brücke (solidcraft_mcp.py)
         mcp.append({"name": "solidcraft", "command": sys.executable,
                     "args": [os.path.join(HERE, "solidcraft_mcp.py")], "env": {"CLAU_CHAT_ID": jid}})
+    if spec.get("picogk"):  # optional: PicoGK-Voxel-CAD (picogk_mcp.py)
+        mcp.append({"name": "picogk", "command": sys.executable,
+                    "args": [os.path.join(HERE, "picogk_mcp.py")], "env": {"CLAU_CHAT_ID": jid}})
     if mcp:
         servers = {}
         for s in mcp:

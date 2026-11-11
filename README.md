@@ -439,10 +439,10 @@ claude mcp add clau-delegate -- python3 /pfad/zu/clau_delegate_mcp.py   # als Un
 
 Pro Modell läuft ein Job gleichzeitig, weitere warten (`wartet_auf_slot`). Details: Kopf von `clau_delegate.py`.
 
-## Optionale Werkzeuge: MATLAB und SolidCraft (Default aus)
+## Optionale Werkzeuge: MATLAB, SolidCraft und PicoGK (Default aus)
 
-Beides sind MCP-Server, die nur existieren, wenn man sie einschaltet: `CLAU_MATLAB=1` / `CLAU_SOLIDCRAFT=1`
-(Umgebung oder `.clau.conf`, gilt für owl-Modelle) bzw. `"matlab": true` / `"solidcraft": true` im
+Beides sind MCP-Server, die nur existieren, wenn man sie einschaltet: `CLAU_MATLAB=1` / `CLAU_SOLIDCRAFT=1` / `CLAU_PICOGK=1`
+(Umgebung oder `.clau.conf`, gilt für owl-Modelle) bzw. `"matlab": true` / `"solidcraft": true` / `"picogk": true` im
 `clau --delegate`-Spec. Arbeitsverzeichnis = cwd, Kennung aus `CLAU_CHAT_ID` (sonst Ordnername).
 
 - **`matlab_mcp.py`**: MATLAB R2020a in der Windows-VM (SSH, startet bei Bedarf über `win10-matlab.service`).
@@ -451,6 +451,11 @@ Beides sind MCP-Server, die nur existieren, wenn man sie einschaltet: `CLAU_MATL
   `matlab-tuning/fehlerlog/zugriffe.jsonl`. Die Regeln (Stapelbetrieb, Figurgröße, `exportgraphics(gcf,…)`) stehen in den
   Werkzeugbeschreibungen. Eigene Kopie der Grundfunktionen aus `matlab_kvm.py` (dort unverändert): SSH/SCP, VM-Start,
   Datei-Spiegelung, `_matlab_beenden`, Fehlerdeutung, Protokoll.
+- **`picogk_mcp.py`** (`CLAU_PICOGK=1` / `"picogk": true`): PicoGK-Voxel-CAD (C#) über das vorhandene Docker-Setup `3ddruck/picogk`
+  (unverändert). Werkzeuge `picogk_hilfe` (geprüfte Referenz + Vorlagen, zur Laufzeit aus dem WebUI-Werkzeug gelesen),
+  `picogk_modelle_auflisten`, `picogk_code_zeigen`, `picogk_code_speichern`, `picogk_bauen`, `picogk_shape`. Eigene Projekte
+  `cc_<kennung>_<name>`, fremde (WebUI/Wilfrieds Chat) nur lesbar. Ergebnis im cwd: `<name>.stl`, `<name>.cs`, `<name>_vorschau.png`.
+  Zeitlimit beendet auch den Container. Feine Voxel (< 0,2 mm) sind sehr speicherhungrig, für Gravuren nur kleine Bauräume.
 - **`solidcraft_mcp.py`**: stdio-Schicht vor der SolidCraft-Brücke (`mcp_bruecke.py`, Port 8311, ein CLI-Prozess je Kennung).
   Spiegelt Dateien zwischen cwd und Brücken-Ordner (modell.stl, STEP, PNG, .sc …); 3D-Ansicht-Link und `netz_abziehen`
   bleiben erhalten.
