@@ -63,6 +63,7 @@ class Eskalation:
         self.gesehen = set()
         self.gemeldet_schleife = {}
         self.skala = 1.0
+        self.hook = None                # optional: Callback(ereignis-dict), z.B. fürs Denkprotokoll
 
     @staticmethod
     def _norm(m):
@@ -72,6 +73,11 @@ class Eskalation:
     def _ereignis(self, typ, detail="", **extra):
         e = {"ts": round(time.time(), 1), "req": self.n_req, "typ": typ, "detail": str(detail)[:200]}
         e.update(extra)
+        if self.hook:
+            try:
+                self.hook(e)
+            except Exception:
+                pass
         if self.logfile:
             try:
                 with open(self.logfile, "a", encoding="utf-8") as f:
@@ -270,23 +276,37 @@ def proxies():
     return out
 
 
-def steuern(daten=None, port=None):
-    """GET (daten=None) oder POST an die Steuerung eines Proxys. port = Proxy-Port (None: der einzige laufende)."""
-    import urllib.request
+def proxy_waehlen(port=None, cwd=None):
     ps = proxies()
     if port is not None:
         ps = [p for p in ps if p["port"] == int(port)]
+    if cwd is not None:
+        ps = [p for p in ps if os.path.realpath(p.get("cwd", "")) == os.path.realpath(cwd)]
     if not ps:
-        raise RuntimeError("Kein laufender owl_proxy" + (f" auf Port {port}" if port else ""))
+        raise RuntimeError("Kein laufender owl_proxy" + (f" auf Port {port}" if port else "") + (f" in {cwd}" if cwd else ""))
     if len(ps) > 1:
         raise RuntimeError("Mehrere Proxys laufen, bitte Port angeben: " + ", ".join(
             f"{p['port']} ({p['modell']}, {p['cwd']})" for p in ps))
-    p = ps[0]
-    req = urllib.request.Request(f"http://127.0.0.1:{p['steuerung']}/", method="POST" if daten is not None else "GET",
+    return ps[0]
+
+
+def anfrage_proxy(pfad="/", daten=None, port=None, cwd=None, timeout=40, stream=False):
+    """HTTP-Aufruf an den Steuer-Port eines Proxys (mit Token). daten None = GET, sonst POST (JSON)."""
+    import urllib.request
+    p = proxy_waehlen(port, cwd)
+    req = urllib.request.Request(f"http://127.0.0.1:{p['steuerung']}{pfad}", method="POST" if daten is not None else "GET",
                                  data=json.dumps(daten).encode() if daten is not None else None,
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=10) as r:
+                                 headers={"Content-Type": "application/json", "X-Clau-Token": p.get("token", "")})
+    r = urllib.request.urlopen(req, timeout=timeout)
+    if stream:
+        return r, p
+    with r:
         return dict(json.load(r), proxy={"port": p["port"], "cwd": p["cwd"], "modell": p["modell"]})
+
+
+def steuern(daten=None, port=None):
+    """Eskalation: GET (daten=None) oder POST an die Steuerung eines Proxys."""
+    return anfrage_proxy("/", daten, port)
 
 
 def _ctl(argv):

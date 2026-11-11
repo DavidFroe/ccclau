@@ -15,7 +15,7 @@ Spec (alles optional außer aufgabe), Presets: ~/.config/clau/delegate/presets/<
   aufgabe, preset, modell ("owl:137"), ordner, isolation ("worktree"|"direkt"),
   tools [..], tools_verboten [..], mcp_server [{name,command,args,env}],
   skills [Name oder Pfad], systemprompt_zusatz, kontext (Text) / kontext_dateien [..],
-  rechte ("bypass"|"normal"), limits {zeit_s, max_turns, budget_usd}, matlab / solidcraft / picogk (true = MCP dazu), eskalation {ziel, compact_max, fehler_max, …}
+  rechte ("bypass"|"normal"), limits {zeit_s, max_turns, budget_usd}, matlab / solidcraft / picogk (true = MCP dazu), eskalation {ziel, compact_max, fehler_max, …}, verfolgen (true = Denkprotokoll live abrufbar)
 """
 import fcntl
 import json
@@ -185,6 +185,8 @@ def cmd_run(jid, resume_text=None):
         cmd += ["-m", j["modell"]]
     cmd += ["--headless", "-p", resume_text or prompt]
     env = dict(os.environ, CLAU_HEADLESS_ARGS_FILE=os.path.join(d, "args.bin"))
+    if spec.get("verfolgen"):  # Denkprotokoll/Fortschritt im Proxy mitschneiden (MCP fortschritt/aktivitaet_lesen mit job_id)
+        env["CLAU_TRACE"] = "1"
     esc = spec.get("eskalation")  # {"ziel": "d-...", "compact_max": 3, "fehler_max": 5, ...} schaltet die Laufzeit-Eskalation ein
     if esc:
         env["CLAU_ESC"] = "1"

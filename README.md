@@ -460,6 +460,25 @@ Beides sind MCP-Server, die nur existieren, wenn man sie einschaltet: `CLAU_MATL
   Spiegelt Dateien zwischen cwd und Brücken-Ordner (modell.stl, STEP, PNG, .sc …); 3D-Ansicht-Link und `netz_abziehen`
   bleiben erhalten.
 
+## Denkprotokoll und Fortschritt in Echtzeit (Default aus)
+
+Der `owl_proxy` sieht den ganzen Stream und kann ihn mitschneiden: **Denken** (reasoning), **Zwischentext**, **Tool-Aufrufe**
+und **Tool-Ergebnisse**, gegliedert in **Schritte** (eine Modellantwort = eine größere Etappe zwischen den Werkzeugläufen).
+Einschalten: `CLAU_TRACE=1` (Datei `~/.local/share/clau/usage/<sid>.trace.jsonl`), oder zur Laufzeit ohne Neustart.
+Ereignisse sind nummeriert; Ring-Puffer im Speicher (1500), Textstücke werden alle ~0,7 s gebündelt.
+
+```bash
+clau --verfolgen [--port P] an|aus|status|lesen [seit]|live     # live = Strom, z.B. 💭 Denken / 💬 Text / 🔧 Tool / ✓✗ Ergebnis / ── Schritt
+```
+Per MCP (`clau_delegate_mcp.py`): `fortschritt` (Kurzstand: was passiert gerade, letzte Schritte, Zähler), `aktivitaet_lesen`
+(Polling mit `seit`/`naechste`, optional `warte_s` zum Warten auf Neues), `trace_setzen`; jeweils mit `job_id` für einen
+Delegate-Job (Spec `"verfolgen": true`) oder `port`. Der Strom (SSE) hängt am Steuer-Port des Proxys, den jeder Proxy in
+`~/.cache/clau/proxies/<port>.json` meldet.
+
+**Sicherheit:** Denkprotokolle sind sensibel. Der Steuer-Port lauscht nur auf 127.0.0.1 und verlangt ein Token (`X-Clau-Token`),
+das nur in der Registry-Datei (Rechte 0600, Ordner 0700) steht; andere Benutzer auf dem Rechner kommen nicht heran. Aus: es wird
+nichts aufgezeichnet.
+
 ## Laufzeit-Eskalation auf ein größeres Modell (Default aus)
 
 Der `owl_proxy` sieht jede Anfrage von Claude Code. Zählt er in den letzten `FENSTER` Anfragen zu viele **Kompaktierungen**
@@ -477,7 +496,7 @@ clau --eskalation [--port P] status|an|aus|jetzt|zurueck|ziel <id>|set fehler_ma
 
 Von außen steuerbar auch über den MCP (`eskalation_status`, `eskalation_setzen` in `clau_delegate_mcp.py`) und im
 Delegate-Spec (`"eskalation": {"ziel": "...", "fehler_max": 3}`). Jeder Proxy trägt sich in `~/.cache/clau/proxies/` ein
-(eigener Steuer-Port, blockiert nie hinter einem langen Stream). Am Sessionende erscheint die **Statistik** (Ereignisse nach Art,
+(eigener Steuer-Port mit Token, blockiert nie hinter einem langen Stream). Am Sessionende erscheint die **Statistik** (Ereignisse nach Art,
 Zeitpunkt/Grund/Modellwechsel mit Kontextgrößen, Anfragen und Token je Modell). Die Erkennung der Kompaktierung beruht auf dem
 Zusammenfassungs-Prompt von Claude Code (Version 2.1.322 geprüft); ändert er sich, zählt sie nicht mehr.
 

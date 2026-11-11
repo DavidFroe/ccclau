@@ -275,6 +275,17 @@ except Exception as _e:
     log(f"Eskalation nicht geladen: {_e!r}")
     ESC = None
 
+# ── Denkprotokoll / Fortschritt (aktivitaet.py), Default aus ──
+try:
+    from aktivitaet import Aktivitaet
+    AKT = Aktivitaet(OWL_MODEL, os.environ.get("OWL_TRACE_FILE", ""), os.environ.get("OWL_TRACE", "0") == "1")
+    if ESC is not None:
+        ESC.hook = lambda e: (AKT.ereignis("eskalation", art=e["typ"], detail=e.get("detail", ""), req=e.get("req"))
+                              if e["typ"] not in ("tool_fehler", "konfig") else None)
+except Exception as _e:
+    log(f"Aktivitaet nicht geladen: {_e!r}")
+    AKT = None
+
 SLOT_LIMITS_SPEC = os.environ.get("OWL_SLOT_LIMITS", "")
 SLOT_SEMS = _parse_slot_limits(SLOT_LIMITS_SPEC)
 SLOT_WAIT_MAX = float(os.environ.get("OWL_SLOT_WAIT_MAX", str(REQUEST_TIMEOUT)))
@@ -433,6 +444,8 @@ class StreamTranslator:
         # Schätzung bis das Backend echte prompt_tokens liefert (kommt erst
         # im letzten Chunk, message_start braucht den Wert aber sofort).
         self.input_tokens = input_tokens
+        self.akt = None   # Denkprotokoll (aktivitaet.Aktivitaet) und Schritt-Handle
+        self.h = None
         self.skala = 1.0  # nach Eskalation: gemeldete Token auf das alte Fenster umrechnen
         self.msg_id = "msg_" + uuid.uuid4().hex[:24]
         self.next_index = 0
@@ -449,6 +462,13 @@ class StreamTranslator:
         self.tools_closed = False
         self.stop_reason = None
         self.ended = False
+
+    def _akt_tools(self):
+        """Tool-Aufrufe einmal ins Denkprotokoll (Argumente sind erst am Ende vollständig)."""
+        if self.akt is not None and not getattr(self, "_akt_t", False):
+            self._akt_t = True
+            for buf in self.tool_buffers.values():
+                self.akt.tool(self.h, buf["name"], buf["args"])
 
     def _evt(self, name, data):
         return f"event: {name}\ndata: {json.dumps(data)}\n\n"
@@ -504,6 +524,8 @@ class StreamTranslator:
                 "type": "content_block_delta", "index": self.thinking_index,
                 "delta": {"type": "thinking_delta", "thinking": reasoning}
             }))
+            if self.akt is not None:
+                self.akt.delta(self.h, "denken", reasoning)
 
         text = delta.get("content") or ""
         if text:
@@ -524,6 +546,8 @@ class StreamTranslator:
                 "type": "content_block_delta", "index": self.text_index,
                 "delta": {"type": "text_delta", "text": text}
             }))
+            if self.akt is not None:
+                self.akt.delta(self.h, "text", text)
 
         # Tool calls
         for tc in delta.get("tool_calls", []):
@@ -601,6 +625,7 @@ class StreamTranslator:
                         "type": "content_block_stop", "index": buf["bidx"]
                     }))
             self.stop_reason = "tool_use" if (finish_reason == "tool_calls" or self.tool_buffers) else "end_turn"
+            self._akt_tools()
             # message_delta/message_stop bewusst NICHT hier: den usage-Chunk mit
             # prompt_tokens/completion_tokens schickt das Backend erst NACH dem
             # Chunk mit finish_reason. Wer hier abschließt, verliert beide Werte —
@@ -632,6 +657,9 @@ class StreamTranslator:
                 out.append(self._evt("content_block_stop", {
                     "type": "content_block_stop", "index": buf["bidx"]
                 }))
+        self._akt_tools()
+        if self.akt is not None:
+            self.akt.ende(self.h, self.stop_reason or "end_turn", self.input_tokens, self.output_tokens)
         out.append(self._evt("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": self.stop_reason or "end_turn",
@@ -659,9 +687,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self._base_path().endswith("/_clau/eskalation"):
-            self._json(200, ESC.status() if ESC is not None else {"fehler": "Eskalation nicht geladen"})
-        elif "/health" in self.path:
+        if "/health" in self.path:
             self._json(200, {"status": "ok", "proxy": "owl_proxy", "model": OWL_MODEL,
                              "slot_limits": SLOT_LIMITS_SPEC, "threaded": THREADED})
         else:
@@ -681,12 +707,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # Suspend geht. Kein Fehler unsererseits, sauber loggen statt
             # Traceback.
             log(f"✗ Client trennte Verbindung beim Lesen des Requests: {e!r}")
-            return
-        if self._base_path().endswith("/_clau/eskalation"):
-            try:
-                self._json(200, ESC.setze(req) if ESC is not None else {"fehler": "Eskalation nicht geladen"})
-            except Exception as e:
-                self._json(400, {"fehler": str(e)})
             return
         # Pfad ohne Query-String prüfen (claude sendet ?beta=true etc.)
         if not self._base_path().endswith("/messages"):
@@ -723,6 +743,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._action = _is_new_action(req.get("messages", []))
         n_msgs = len(oai_payload["messages"])
         est_input_tokens = _estimate_input_tokens(oai_payload)
+        self._akt_h = AKT.anfrage(req.get("messages"), req.get("system"), target, est_input_tokens, self._action) if AKT is not None else None
         _dump_debug_payload(oai_payload)
         roles_summary = ", ".join(
             f"{m.get('role','?')}({len(str(m.get('content') or ''))}c)"
@@ -876,6 +897,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
                          real=bool((owl_resp.json().get("usage") or {}).get("prompt_tokens")),
                          action=self._action)
             body = json.dumps(ant).encode()
+            _h = getattr(self, "_akt_h", None)
+            if AKT is not None and _h is not None:
+                _m = ((owl_resp.json().get("choices") or [{}])[0]).get("message") or {}
+                AKT.delta(_h, "denken", _m.get("reasoning_content") or "")
+                AKT.delta(_h, "text", _m.get("content") or "")
+                for _tc in _m.get("tool_calls") or []:
+                    AKT.tool(_h, (_tc.get("function") or {}).get("name", ""), (_tc.get("function") or {}).get("arguments", ""))
+                AKT.ende(_h, "single", _u.get("prompt_tokens") or est_input_tokens, ant["usage"]["output_tokens"])
         except Exception:
             self.send_error(502, "Bad owlAPI response")
             return
@@ -890,6 +919,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         _tr = StreamTranslator(model_name, est_input_tokens, target)
         _tr.skala = getattr(self, "_skala", 1.0)
+        _tr.akt, _tr.h = AKT, getattr(self, "_akt_h", None)
         sse = {
             "tr": _tr,
             "lock": threading.Lock(),
@@ -1021,6 +1051,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                           "output_tokens": tr.output_tokens}
             }))
             evts.append(tr._evt("message_stop", {"type": "message_stop"}))
+            if tr.akt is not None:
+                tr.akt.ende(tr.h, "fehler/abbruch", tr.input_tokens, tr.output_tokens)
             tr.ended = True  # finish() soll nicht nochmal abschließen
             with write_lock:
                 self.wfile.write("".join(evts).encode())
@@ -1046,8 +1078,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+CTL_TOKEN = __import__("secrets").token_hex(16)
+
+
 class ControlHandler(BaseHTTPRequestHandler):
-    """Eigener Listener für die Steuerung von außen (blockiert nie hinter einem langen Stream)."""
+    """Eigener Listener für die Steuerung von außen (blockiert nie hinter einem langen Stream).
+    Jeder Aufruf braucht das Token aus der Registry-Datei (Header X-Clau-Token, Rechte 0600)."""
     def log_message(self, fmt, *args):
         pass
 
@@ -1059,13 +1095,53 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _auth(self):
+        import hmac
+        if not hmac.compare_digest(self.headers.get("X-Clau-Token", ""), CTL_TOKEN):
+            self._send(403, {"fehler": "Token fehlt oder falsch (steht in ~/.cache/clau/proxies/<port>.json)"})
+            return False
+        return True
+
     def do_GET(self):
-        self._send(200, ESC.status() if ESC is not None else {"fehler": "Eskalation nicht geladen"})
+        if not self._auth():
+            return
+        from urllib.parse import urlparse, parse_qs
+        u = urlparse(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if u.path == "/aktivitaet" and AKT is not None:
+            arten = [a for a in q.get("arten", "").split(",") if a]
+            self._send(200, AKT.lesen(int(q.get("seit", 0)), arten, int(q.get("max", 200)), min(30.0, float(q.get("warte", 0)))))
+        elif u.path == "/fortschritt" and AKT is not None:
+            self._send(200, AKT.fortschritt(int(q.get("n", 8))))
+        elif u.path == "/stream" and AKT is not None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            seit = int(q.get("seit", AKT.seq))
+            try:
+                while True:
+                    r = AKT.lesen(seit, None, 0, 15.0)
+                    if not r["ereignisse"]:
+                        self.wfile.write(b": ping\n\n")
+                    for e in r["ereignisse"]:
+                        self.wfile.write(("data: " + json.dumps(e, ensure_ascii=False) + "\n\n").encode())
+                    seit = r["naechste"]
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        else:
+            self._send(200, ESC.status() if ESC is not None else {"fehler": "Eskalation nicht geladen"})
 
     def do_POST(self):
+        if not self._auth():
+            return
         try:
             d = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-            self._send(200, ESC.setze(d))
+            if self.path.startswith("/trace"):
+                self._send(200, {"aktiv": AKT.setze(d.get("aktiv", True))} if AKT is not None else {"fehler": "nicht geladen"})
+            else:
+                self._send(200, ESC.setze(d))
         except Exception as e:
             self._send(400, {"fehler": str(e)})
 
@@ -1076,11 +1152,12 @@ PROXY_REG_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expandu
 def _registrieren(port, ctl_port):
     path = os.path.join(PROXY_REG_DIR, f"{port}.json")
     try:
-        os.makedirs(PROXY_REG_DIR, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"port": port, "steuerung": ctl_port, "pid": os.getpid(), "modell": OWL_MODEL,
+        os.makedirs(PROXY_REG_DIR, mode=0o700, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # Token nur für den eigenen Benutzer lesbar
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"port": port, "steuerung": ctl_port, "token": CTL_TOKEN, "pid": os.getpid(), "modell": OWL_MODEL,
                        "cwd": os.environ.get("OWL_REG_CWD") or os.getcwd(), "gestartet": time.time(),
-                       "esc_datei": os.environ.get("OWL_ESC_FILE", "")}, f)
+                       "esc_datei": os.environ.get("OWL_ESC_FILE", ""), "trace_datei": os.environ.get("OWL_TRACE_FILE", "")}, f)
     except OSError:
         return
     import atexit
@@ -1096,11 +1173,11 @@ def main():
         extra += " routes=" + ",".join(f"{k}→{u}" for k, (u, _) in ROUTES.items())
     if THREADED or SLOT_LIMITS_SPEC:
         extra += f" routing=owl-<ID> threaded={THREADED} slots={SLOT_LIMITS_SPEC or '-'}"
-    if ESC is not None:
+    if ESC is not None or AKT is not None:
         ctl = ThreadingHTTPServer(("127.0.0.1", 0), ControlHandler)
         threading.Thread(target=ctl.serve_forever, daemon=True).start()
         _registrieren(port, ctl.server_address[1])
-        extra += f" eskalation={'an' if ESC.cfg['aktiv'] else 'aus'} steuerung=:{ctl.server_address[1]}"
+        extra += f" eskalation={'an' if ESC and ESC.cfg['aktiv'] else 'aus'} trace={'an' if AKT and AKT.aktiv else 'aus'} steuerung=:{ctl.server_address[1]}"
     print(f"owl_proxy :{port} → {OWL_BASE} model={OWL_MODEL}{extra}", flush=True)
     import signal
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # damit atexit (Registry) läuft

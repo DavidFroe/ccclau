@@ -608,6 +608,7 @@ _start_owl_proxy() {
   OWL_ESC_ABBRUECHE_MAX="${CLAU_ESC_ABBRUECHE:-3}" OWL_ESC_SCHLEIFE_MAX="${CLAU_ESC_SCHLEIFE:-4}" \
   OWL_ESC_FENSTER="${CLAU_ESC_FENSTER:-60}" OWL_ESC_ZURUECK_NACH="${CLAU_ESC_ZURUECK:-0}" \
   OWL_ESC_FILE="$(_usage_dir)/${CLAU_USAGE_SID:-run-$$}.esc.jsonl" OWL_REG_CWD="$PWD" \
+  OWL_TRACE="${CLAU_TRACE:-0}" OWL_TRACE_FILE="$(_usage_dir)/${CLAU_USAGE_SID:-run-$$}.trace.jsonl" \
   OWL_PROXY_THREADED="$threaded" OWL_SLOT_LIMITS="$slot_limits" OWL_ROUTES="${CLAU_OWL_ROUTES:-}" \
   OWL_USAGE_FILE="${CLAU_USAGE_FILE:-}" \
   OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
@@ -2258,7 +2259,7 @@ _conf_fallback_file() {
 # Update-Check/Websuche).
 CLAU_ENV_OVERRIDES=(CLAU_TEAM CLAU_TEAM_LEAD_MODEL CLAU_TEAM_EXEC_MODEL CLAU_TEAM_MAX_AGENTS
   CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_TEAM_SUBAGENTS CLAU_TEAM_SET CLAU_API CLAU_API_BIND CLAU_API_TOKEN
-  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_MATLAB CLAU_SOLIDCRAFT CLAU_PICOGK CLAU_ESC CLAU_ESC_TARGET CLAU_ESC_COMPACT CLAU_ESC_FEHLER CLAU_ESC_ABBRUECHE CLAU_ESC_SCHLEIFE CLAU_ESC_FENSTER CLAU_ESC_ZURUECK CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS)
+  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_MATLAB CLAU_SOLIDCRAFT CLAU_PICOGK CLAU_TRACE CLAU_ESC CLAU_ESC_TARGET CLAU_ESC_COMPACT CLAU_ESC_FEHLER CLAU_ESC_ABBRUECHE CLAU_ESC_SCHLEIFE CLAU_ESC_FENSTER CLAU_ESC_ZURUECK CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS)
 
 load_config() {
   local _ov _envsave=()
@@ -2418,6 +2419,7 @@ CLAU_WEBSEARCH="${CLAU_WEBSEARCH:-1}"
 CLAU_MATLAB="${CLAU_MATLAB:-0}"
 CLAU_SOLIDCRAFT="${CLAU_SOLIDCRAFT:-0}"
 CLAU_PICOGK="${CLAU_PICOGK:-0}"
+CLAU_TRACE="${CLAU_TRACE:-0}"
 CLAU_ESC="${CLAU_ESC:-0}"; CLAU_ESC_TARGET="${CLAU_ESC_TARGET:-}"   # Laufzeit-Eskalation auf größeres Modell, Default aus
 CLAU_TEAM="${CLAU_TEAM:-0}"
 CLAU_TEAM_LEAD_MODEL="${CLAU_TEAM_LEAD_MODEL:-122}"
@@ -2738,6 +2740,8 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_TOOLS="WebFetch,Agent"  Tools aus System-Prompt entfernen (kommagetrennt)
   CLAU_DISABLE_ARTIFACT="1"          Artifacts deaktivieren (spart ~2-3K Tokens)
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
+  CLAU_TRACE="0"                     1 = Denkprotokoll/Fortschritt der Session mitschneiden (Proxy; Datei <sid>.trace.jsonl); Abruf live:
+                                     clau --verfolgen [--port P] status|lesen [seit]|live|an|aus, per MCP aktivitaet_lesen/fortschritt
   CLAU_ESC="0"                       1 = Laufzeit-Eskalation: bei zu vielen Kompaktierungen/Fehlern/Abbrüchen/Schleifen auf CLAU_ESC_TARGET
                                      (z.B. d-qwen3.8-flash-next-q3xl-1x261k) umschalten; Schwellen CLAU_ESC_COMPACT=3 _FEHLER=5
                                      _ABBRUECHE=3 _SCHLEIFE=4 _FENSTER=60 (Anfragen) _ZURUECK=0 (0 = bleibt); von außen steuerbar:
@@ -5927,6 +5931,11 @@ parse_args() {
       --new)
         ACTION="new"
         shift
+        ;;
+      --verfolgen)
+        # clau --verfolgen [--port P] status|lesen [seit]|live|an|aus → Denkprotokoll/Fortschritt des laufenden owl_proxy
+        shift
+        exec python3 "$CLAU_DIR/aktivitaet.py" ctl "$@"
         ;;
       --eskalation)
         # clau --eskalation [--port P] status|an|aus|jetzt|zurueck|ziel <id>|set k=v → laufender owl_proxy

@@ -21,6 +21,15 @@ TOOLS = [
     ("job_weiter", "Zusatzinfo an einen beendeten Job (setzt die Session fort).", {"job_id": STR, "text": STR}, ["job_id", "text"]),
     ("job_stop", "Job abbrechen.", {"job_id": STR}, ["job_id"]),
     ("job_liste", "Alle Jobs.", {}, []),
+    ("fortschritt", "Kurzstand einer laufenden clau-Session (was passiert gerade, letzte größere Schritte, Zähler) – braucht das Denkprotokoll "
+     "(CLAU_TRACE=1 oder trace_setzen). Mit job_id für einen Delegate-Job, sonst port oder der einzige laufende Proxy.",
+     {"job_id": STR, "port": {"type": "integer"}}, []),
+    ("aktivitaet_lesen", "Denkprotokoll in Echtzeit abfragen: Ereignisse (denken, text, tool, tool_ergebnis, schritt_ende, auftrag, eskalation) "
+     "seit Nummer 'seit' (0 = alles im Puffer); 'naechste' aus der Antwort als neues 'seit' nehmen. warte_s (max 30) wartet auf Neues.",
+     {"job_id": STR, "port": {"type": "integer"}, "seit": {"type": "integer"}, "arten": LST, "max": {"type": "integer"},
+      "warte_s": {"type": "integer"}}, []),
+    ("trace_setzen", "Denkprotokoll an-/ausschalten (ab dann wird mitgeschnitten; Ring-Puffer im Speicher, Datei <sid>.trace.jsonl).",
+     {"job_id": STR, "port": {"type": "integer"}, "aktiv": {"type": "boolean"}}, ["aktiv"]),
     ("eskalation_status", "Status der Laufzeit-Eskalation (auf größeres Modell) der laufenden clau-Proxys: Konfig, Zähler, ob eskaliert.",
      {"port": {"type": "integer"}}, []),
     ("eskalation_setzen", "Laufzeit-Eskalation steuern. aktiv (bool), ziel (Modell-ID, z.B. d-qwen3.8-flash-next-q3xl-1x261k), Schwellen "
@@ -34,6 +43,25 @@ TOOLS = [
 
 
 def run(name, a):
+    if name in ("fortschritt", "aktivitaet_lesen", "trace_setzen"):
+        sys.path.insert(0, os.path.dirname(DEL))
+        import eskalation
+        try:
+            cwd = None
+            if a.get("job_id"):
+                cwd = json.load(open(os.path.expanduser(f"~/.local/share/clau/delegate/jobs/{a['job_id']}/job.json")))["work"]
+            kw = {"port": a.get("port"), "cwd": cwd}
+            if name == "fortschritt":
+                r = eskalation.anfrage_proxy("/fortschritt", **kw)
+            elif name == "trace_setzen":
+                r = eskalation.anfrage_proxy("/trace", {"aktiv": bool(a.get("aktiv"))}, **kw)
+            else:
+                arten = ",".join(a.get("arten") or [])
+                r = eskalation.anfrage_proxy(f"/aktivitaet?seit={int(a.get('seit') or 0)}&max={int(a.get('max') or 100)}"
+                                             f"&arten={arten}&warte={int(a.get('warte_s') or 0)}", timeout=60, **kw)
+            return json.dumps(r, ensure_ascii=False, indent=1), False
+        except Exception as e:
+            return f"Fehler: {e}", True
     if name.startswith("eskalation_"):
         sys.path.insert(0, os.path.dirname(DEL))
         import eskalation
