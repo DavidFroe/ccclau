@@ -500,6 +500,23 @@ Delegate-Spec (`"eskalation": {"ziel": "...", "fehler_max": 3}`). Jeder Proxy tr
 Zeitpunkt/Grund/Modellwechsel mit Kontextgrößen, Anfragen und Token je Modell). Die Erkennung der Kompaktierung beruht auf dem
 Zusammenfassungs-Prompt von Claude Code (Version 2.1.322 geprüft); ändert er sich, zählt sie nicht mehr.
 
+## Engine „atomic“ (optional, Quelle: GitHub)
+
+[bastani-inc/atomic](https://github.com/bastani-inc/atomic) (MIT) ist eine eigene Agent-Laufzeit (TypeScript, pi-Abkömmling) mit
+Workflows, Prüfstufen und Freigabe-Schritten. ccclau bindet sie nur als weitere Engine ein, **kein Fork, nichts vendored**: die Quelle
+wird bei Bedarf von GitHub geholt (Release-Archiv ~105 MB, entpackt ~360 MB; der Installer prüft `SHA256SUMS`).
+
+```bash
+CLAU_ATOMIC_INSTALL=1 clau --install        # holt atomic bei der Installation mit (sonst nur ein Hinweis am Ende)
+clau --backend atomic -m owl:d137           # oder Engine-Menü Punkt 5; fehlt atomic, wird es nach Rückfrage von GitHub geholt
+CLAU_ATOMIC_HOME=/pfad/mit/platz            # Installation + eigene Konfig (≥ 1,5 GB frei nötig, Standard ~/.local/share/clau/atomic)
+CLAU_ATOMIC_VERSION=0.9.78                  # Version festnageln (Standard: neuestes Release)
+```
+atomic spricht OpenAI-Format direkt (kein `owl_proxy`) und liest eine eigene `models.json` (`atomic_setup.py`): die Direkt-Modelle
+(`owl:d…`, siehe `backends.json`) und QuiteQue (`owl:<ID>`, nur wenn erreichbar). Claude-Abo-Modelle gehen damit nicht. Eigener
+Konfig-/Sitzungsordner (`$CLAU_ATOMIC_HOME/agent`), deine `~/.atomic` bleibt unberührt; Telemetrie und Versionsprüfung sind aus,
+mit `CLAU_OFFLINE=1` auch alles Netz. Hinweis: Im Druckmodus liest atomic piped Eingaben mit – bei Skripten `</dev/null` setzen.
+
 ## Offline-Betrieb
 
 Für Umgebungen ohne Internet (devport-VMs: nur Gitea, apt-Cache, lokale LLMs):
