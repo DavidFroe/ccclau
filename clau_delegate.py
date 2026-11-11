@@ -15,7 +15,7 @@ Spec (alles optional außer aufgabe), Presets: ~/.config/clau/delegate/presets/<
   aufgabe, preset, modell ("owl:137"), ordner, isolation ("worktree"|"direkt"),
   tools [..], tools_verboten [..], mcp_server [{name,command,args,env}],
   skills [Name oder Pfad], systemprompt_zusatz, kontext (Text) / kontext_dateien [..],
-  rechte ("bypass"|"normal"), limits {zeit_s, max_turns, budget_usd}, matlab / solidcraft (true = MCP dazu)
+  rechte ("bypass"|"normal"), limits {zeit_s, max_turns, budget_usd}, matlab / solidcraft (true = MCP dazu), eskalation {ziel, compact_max, fehler_max, …}
 """
 import fcntl
 import json
@@ -182,6 +182,14 @@ def cmd_run(jid, resume_text=None):
         cmd += ["-m", j["modell"]]
     cmd += ["--headless", "-p", resume_text or prompt]
     env = dict(os.environ, CLAU_HEADLESS_ARGS_FILE=os.path.join(d, "args.bin"))
+    esc = spec.get("eskalation")  # {"ziel": "d-...", "compact_max": 3, "fehler_max": 5, ...} schaltet die Laufzeit-Eskalation ein
+    if esc:
+        env["CLAU_ESC"] = "1"
+        zuordnung = {"ziel": "TARGET", "compact_max": "COMPACT", "fehler_max": "FEHLER", "abbrueche_max": "ABBRUECHE",
+                     "schleife_max": "SCHLEIFE", "fenster": "FENSTER", "zurueck_nach": "ZURUECK"}
+        for k, v in esc.items():
+            if k in zuordnung:
+                env["CLAU_ESC_" + zuordnung[k]] = str(v)
     logf = open(os.path.join(d, "log.jsonl"), "ab")
     zeit = int((spec.get("limits") or {}).get("zeit_s") or 3600)
     p = subprocess.Popen(cmd, cwd=j["work"], env=env, stdout=logf, stderr=subprocess.STDOUT,

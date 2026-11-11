@@ -21,10 +21,27 @@ TOOLS = [
     ("job_weiter", "Zusatzinfo an einen beendeten Job (setzt die Session fort).", {"job_id": STR, "text": STR}, ["job_id", "text"]),
     ("job_stop", "Job abbrechen.", {"job_id": STR}, ["job_id"]),
     ("job_liste", "Alle Jobs.", {}, []),
+    ("eskalation_status", "Status der Laufzeit-Eskalation (auf größeres Modell) der laufenden clau-Proxys: Konfig, Zähler, ob eskaliert.",
+     {"port": {"type": "integer"}}, []),
+    ("eskalation_setzen", "Laufzeit-Eskalation steuern. aktiv (bool), ziel (Modell-ID, z.B. d-qwen3.8-flash-next-q3xl-1x261k), Schwellen "
+     "compact_max, fehler_max, abbrueche_max, schleife_max, ueberlauf_max, fenster (Anfragen), zurueck_nach (0 = bleibt), skalieren (bool); "
+     "jetzt=true eskaliert sofort, zurueck=true geht zurück. Gilt ab der nächsten Anfrage, ohne Neustart.",
+     {"port": {"type": "integer"}, "aktiv": {"type": "boolean"}, "ziel": STR, "compact_max": {"type": "integer"},
+      "fehler_max": {"type": "integer"}, "abbrueche_max": {"type": "integer"}, "schleife_max": {"type": "integer"},
+      "ueberlauf_max": {"type": "integer"}, "fenster": {"type": "integer"}, "zurueck_nach": {"type": "integer"},
+      "skalieren": {"type": "boolean"}, "jetzt": {"type": "boolean"}, "zurueck": {"type": "boolean"}}, []),
 ]
 
 
 def run(name, a):
+    if name.startswith("eskalation_"):
+        sys.path.insert(0, os.path.dirname(DEL))
+        import eskalation
+        try:
+            d = None if name == "eskalation_status" else {k: v for k, v in a.items() if k != "port"}
+            return json.dumps(eskalation.steuern(d, a.get("port")), ensure_ascii=False, indent=1), False
+        except Exception as e:
+            return f"Fehler: {e}", True
     if name == "delegate":
         p = subprocess.run([sys.executable, DEL, "start", "-"], input=json.dumps(a), capture_output=True, text=True)
     elif name == "job_zwischenstand":

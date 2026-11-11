@@ -455,6 +455,27 @@ Beides sind MCP-Server, die nur existieren, wenn man sie einschaltet: `CLAU_MATL
   Spiegelt Dateien zwischen cwd und Brücken-Ordner (modell.stl, STEP, PNG, .sc …); 3D-Ansicht-Link und `netz_abziehen`
   bleiben erhalten.
 
+## Laufzeit-Eskalation auf ein größeres Modell (Default aus)
+
+Der `owl_proxy` sieht jede Anfrage von Claude Code. Zählt er in den letzten `FENSTER` Anfragen zu viele **Kompaktierungen**
+(Claudes Zusammenfassungs-Anfrage), **Tool-/Backend-Fehler**, **Kontext-Überläufe**, **Abbrüche** (Client trennt mitten im Stream)
+oder **Schleifen** (derselbe Tool-Aufruf ≥ N-mal), lenkt er das Hauptmodell ab der nächsten Anfrage auf `CLAU_ESC_TARGET` um.
+Der Verlauf reist mit (die API ist zustandslos), ein Neustart ist nicht nötig. Damit Claude Code dabei auch wirklich das größere
+Fenster nutzt, meldet der Proxy danach die Token umgerechnet auf das alte Fenster (alt/neu, z.B. 99K → 261K = 0,38); sein
+Auto-Compact greift entsprechend später. Echte Zahlen stehen weiter im Token-Protokoll.
+
+```bash
+CLAU_ESC="1"  CLAU_ESC_TARGET="d-qwen3.8-flash-next-q3xl-1x261k"      # in .clau.conf oder Umgebung
+CLAU_ESC_COMPACT=3 CLAU_ESC_FEHLER=5 CLAU_ESC_ABBRUECHE=3 CLAU_ESC_SCHLEIFE=4 CLAU_ESC_FENSTER=60 CLAU_ESC_ZURUECK=0
+clau --eskalation [--port P] status|an|aus|jetzt|zurueck|ziel <id>|set fehler_max=2 ...   # laufende Session, ohne Neustart
+```
+
+Von außen steuerbar auch über den MCP (`eskalation_status`, `eskalation_setzen` in `clau_delegate_mcp.py`) und im
+Delegate-Spec (`"eskalation": {"ziel": "...", "fehler_max": 3}`). Jeder Proxy trägt sich in `~/.cache/clau/proxies/` ein
+(eigener Steuer-Port, blockiert nie hinter einem langen Stream). Am Sessionende erscheint die **Statistik** (Ereignisse nach Art,
+Zeitpunkt/Grund/Modellwechsel mit Kontextgrößen, Anfragen und Token je Modell). Die Erkennung der Kompaktierung beruht auf dem
+Zusammenfassungs-Prompt von Claude Code (Version 2.1.322 geprüft); ändert er sich, zählt sie nicht mehr.
+
 ## Offline-Betrieb
 
 Für Umgebungen ohne Internet (devport-VMs: nur Gitea, apt-Cache, lokale LLMs):

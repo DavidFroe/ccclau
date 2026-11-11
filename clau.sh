@@ -601,6 +601,12 @@ _start_owl_proxy() {
     threaded=1
     slot_limits="$(team_exec_model)=$(_team_exec_slots)"
   fi
+  local esc_t="${CLAU_ESC_TARGET:-}"; esc_t="${esc_t#owl:}"
+  OWL_ESC="${CLAU_ESC:-0}" OWL_ESC_TARGET="$esc_t" OWL_ESC_TARGET_CTX="$([[ -n "$esc_t" ]] && owl_context_window "$esc_t")" \
+  OWL_ESC_COMPACT_MAX="${CLAU_ESC_COMPACT:-3}" OWL_ESC_FEHLER_MAX="${CLAU_ESC_FEHLER:-5}" \
+  OWL_ESC_ABBRUECHE_MAX="${CLAU_ESC_ABBRUECHE:-3}" OWL_ESC_SCHLEIFE_MAX="${CLAU_ESC_SCHLEIFE:-4}" \
+  OWL_ESC_FENSTER="${CLAU_ESC_FENSTER:-60}" OWL_ESC_ZURUECK_NACH="${CLAU_ESC_ZURUECK:-0}" \
+  OWL_ESC_FILE="$(_usage_dir)/${CLAU_USAGE_SID:-run-$$}.esc.jsonl" OWL_REG_CWD="$PWD" \
   OWL_PROXY_THREADED="$threaded" OWL_SLOT_LIMITS="$slot_limits" OWL_ROUTES="${CLAU_OWL_ROUTES:-}" \
   OWL_USAGE_FILE="${CLAU_USAGE_FILE:-}" \
   OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
@@ -646,6 +652,8 @@ _usage_report() {
   if [[ -n "$sid" ]]; then f="$(_usage_dir)/${sid%.json}.jsonl"
   else f="$(ls -t "$(_usage_dir)"/*.jsonl 2>/dev/null | head -1)"; fi
   [[ -n "$f" && -s "$f" ]] || { echo "Keine Token-Daten${sid:+ für $sid}."; return 0; }
+  local escf="${f%.jsonl}.esc.jsonl"
+  [[ -s "$escf" ]] && python3 "$CLAU_DIR/eskalation.py" report "$escf" "$f"
   python3 - "$f" <<'PYEOF'
 import json, os, sys
 f = sys.argv[1]
@@ -2247,7 +2255,7 @@ _conf_fallback_file() {
 # Update-Check/Websuche).
 CLAU_ENV_OVERRIDES=(CLAU_TEAM CLAU_TEAM_LEAD_MODEL CLAU_TEAM_EXEC_MODEL CLAU_TEAM_MAX_AGENTS
   CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_TEAM_SUBAGENTS CLAU_TEAM_SET CLAU_API CLAU_API_BIND CLAU_API_TOKEN
-  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_MATLAB CLAU_SOLIDCRAFT CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS)
+  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_MATLAB CLAU_SOLIDCRAFT CLAU_ESC CLAU_ESC_TARGET CLAU_ESC_COMPACT CLAU_ESC_FEHLER CLAU_ESC_ABBRUECHE CLAU_ESC_SCHLEIFE CLAU_ESC_FENSTER CLAU_ESC_ZURUECK CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS)
 
 load_config() {
   local _ov _envsave=()
@@ -2406,6 +2414,7 @@ CLAU_DISABLE_AGENT_VIEW="${CLAU_DISABLE_AGENT_VIEW:-0}"
 CLAU_WEBSEARCH="${CLAU_WEBSEARCH:-1}"
 CLAU_MATLAB="${CLAU_MATLAB:-0}"
 CLAU_SOLIDCRAFT="${CLAU_SOLIDCRAFT:-0}"
+CLAU_ESC="${CLAU_ESC:-0}"; CLAU_ESC_TARGET="${CLAU_ESC_TARGET:-}"   # Laufzeit-Eskalation auf größeres Modell, Default aus
 CLAU_TEAM="${CLAU_TEAM:-0}"
 CLAU_TEAM_LEAD_MODEL="${CLAU_TEAM_LEAD_MODEL:-122}"
 CLAU_TEAM_EXEC_MODEL="${CLAU_TEAM_EXEC_MODEL:-121}"
@@ -2725,6 +2734,10 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_TOOLS="WebFetch,Agent"  Tools aus System-Prompt entfernen (kommagetrennt)
   CLAU_DISABLE_ARTIFACT="1"          Artifacts deaktivieren (spart ~2-3K Tokens)
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
+  CLAU_ESC="0"                       1 = Laufzeit-Eskalation: bei zu vielen Kompaktierungen/Fehlern/Abbrüchen/Schleifen auf CLAU_ESC_TARGET
+                                     (z.B. d-qwen3.8-flash-next-q3xl-1x261k) umschalten; Schwellen CLAU_ESC_COMPACT=3 _FEHLER=5
+                                     _ABBRUECHE=3 _SCHLEIFE=4 _FENSTER=60 (Anfragen) _ZURUECK=0 (0 = bleibt); von außen steuerbar:
+                                     clau --eskalation status|an|aus|jetzt|zurueck|set k=v   (Statistik am Sessionende)
   CLAU_SOLIDCRAFT="0"                1 = SolidCraft-CAD-MCP (Brücke :8311, nur owl-Modelle) einschalten, siehe solidcraft_mcp.py
   CLAU_MATLAB="0"                    1 = MATLAB-MCP (Windows-VM, nur owl-Modelle) einschalten, siehe matlab_mcp.py
   CLAU_WEBSEARCH="1"                 Lokale QuiteQue-Websuche als MCP-Tool (Default an, ~300 Tokens)
@@ -5909,6 +5922,11 @@ parse_args() {
       --new)
         ACTION="new"
         shift
+        ;;
+      --eskalation)
+        # clau --eskalation [--port P] status|an|aus|jetzt|zurueck|ziel <id>|set k=v → laufender owl_proxy
+        shift
+        exec python3 "$CLAU_DIR/eskalation.py" ctl "$@"
         ;;
       --delegate)
         # clau --delegate <start|status|result|wait|more|stop|list> ... → clau_delegate.py
