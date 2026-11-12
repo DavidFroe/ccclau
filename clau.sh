@@ -2251,8 +2251,11 @@ choose_mcp_menu() {
     echo "Jeder aktive Server fügt seine Tool-Schemas zu jeder Anfrage hinzu."
     echo "   1) [$([[ "${CLAU_WEBSEARCH:-1}" == "1" ]] && echo x || echo " ")] Websuche (QuiteQue, lokal)"
     echo "   2) [$([[ "${CLAU_PAPERLESS:-0}" == "1" ]] && echo x || echo " ")] Paperless (Dokumente suchen/lesen: ${CLAU_PAPERLESS_URL:-http://11.0.0.12:8010}, Token $tok)"
+    echo "   3) [$([[ "${CLAU_MATLAB:-0}" == "1" ]] && echo x || echo " ")] MATLAB (Windows-VM, nur owl-Modelle)"
+    echo "   4) [$([[ "${CLAU_SOLIDCRAFT:-0}" == "1" ]] && echo x || echo " ")] SolidCraft-CAD (Brücke :8311, nur owl-Modelle)"
+    echo "   5) [$([[ "${CLAU_PICOGK:-0}" == "1" ]] && echo x || echo " ")] PicoGK Voxel-CAD (Docker, nur owl-Modelle)"
     echo "   t) Paperless-Token / URL setzen"
-    printf "Umschalten [1-2, t, 0=Zurück]: "
+    printf "Umschalten [1-5, t, 0=Zurück]: "
     local c; read -r c
     case "$c" in
       1) if [[ "${CLAU_WEBSEARCH:-1}" == "1" ]]; then CLAU_WEBSEARCH=0; else CLAU_WEBSEARCH=1; fi; save_config ;;
@@ -2260,6 +2263,9 @@ choose_mcp_menu() {
            CLAU_PAPERLESS=1
            [[ -s "$(_paperless_token_file)" ]] || echo "Hinweis: noch kein Token — mit t setzen, sonst melden die Tools einen Fehler."
          fi; save_config ;;
+      3) if [[ "${CLAU_MATLAB:-0}" == "1" ]]; then CLAU_MATLAB=0; else CLAU_MATLAB=1; fi; save_config ;;
+      4) if [[ "${CLAU_SOLIDCRAFT:-0}" == "1" ]]; then CLAU_SOLIDCRAFT=0; else CLAU_SOLIDCRAFT=1; fi; save_config ;;
+      5) if [[ "${CLAU_PICOGK:-0}" == "1" ]]; then CLAU_PICOGK=0; else CLAU_PICOGK=1; fi; save_config ;;
       t|T) local u t
            printf "Paperless-URL [%s]: " "${CLAU_PAPERLESS_URL:-http://11.0.0.12:8010}"; read -r u
            [[ -n "$u" ]] && CLAU_PAPERLESS_URL="$u"
