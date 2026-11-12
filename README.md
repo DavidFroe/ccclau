@@ -162,6 +162,19 @@ Lokale Änderungen an nano (Kontextfenster per `NANO_CONTEXT_WINDOW`, QuiteQue-H
 `NANO_APPEND_SYSTEM_PROMPT_FILE`, CC-Import, Absturz bei fehlenden Cache-Tokens) stehen in `vendor/nano/PATCHES.md`.
 Relevante Variablen: `CLAU_BACKEND`, `CLAU_OFFLINE`, `CLAU_QQ_USER`, `CLAU_QQ_HINT`, `CLAU_CC_1M` (nur Claude Code).
 
+## Tools, MCP-Server und Skills (Hauptmenü `x`)
+
+Drei getrennte Dinge, pro Verzeichnis einstellbar (gespeichert in `.clau.conf`), gültig für owl-Modelle mit nano und Claude Code:
+
+| Bereich | Was es ist | Einstellung |
+|---------|------------|-------------|
+| **Tools** | eingebaute Werkzeuge (Read, Write, Edit, Bash, Glob, Grep, WebFetch, Aufgabenliste, …) | `CLAU_OWL_TOOLS`, Standard `Read,Write,Edit,Bash` |
+| **MCP-Server** | externe Programme mit eigenen Tools: Websuche (QuiteQue), **Paperless** (`paperless_mcp.py`: suchen, lesen, Tags) | `CLAU_WEBSEARCH`, `CLAU_PAPERLESS`, `CLAU_PAPERLESS_URL`; Token in `~/.config/clau/paperless.token` (chmod 600, Menü `x → 2 → t`) |
+| **Skills** | Anleitungen aus `~/.claude/skills/` und `./.claude/skills/`, die das Modell bei Bedarf lädt | Schalter für das Skill-Tool |
+
+Je weniger Tools und MCP-Server aktiv sind, desto kürzer der Prompt und desto schneller das Modell.
+nano enthält dafür einen eigenen MCP-Client (stdio); die Konfiguration übergibt clau per `NANO_MCP_CONFIG`.
+
 ## Qwen Token Plan (Engine `qwenplan`)
 
 Claude Code direkt gegen Alibabas Anthropic-kompatiblen Token-Plan-Endpunkt, ohne Proxy.
@@ -218,6 +231,7 @@ CLAU_DISABLE_AGENT_VIEW="1"
 | `CLAU_AUTO_COMPACT_WINDOW` | Festes Token-Limit (z.B. `90000` für PropellerA 97K) |
 | `CLAU_AUTO_COMPACT_PCT` | Prozent-basiert (z.B. `90` = 90% des Context-Window) |
 | `CLAU_DISABLE_TOOLS` | Tools aus System-Prompt entfernen (~25K Token sparen) |
+| `CLAU_OWL_TOOLS` | Tool-Allowlist für owl-Modelle (Standard `Read,Write,Edit,Bash`); pro Verzeichnis im Hauptmenü unter `x` umschaltbar, gilt für nano und Claude Code |
 | `CLAU_DISABLE_ARTIFACT` | Artifacts deaktivieren (`1` = an) |
 | `CLAU_DISABLE_AGENT_VIEW` | Background Agent Views deaktivieren (`1` = an) |
 | `CLAU_WEBSEARCH` | Lokale Websuche als MCP-Tool (`1` = an, Default; kostet ~300 Token) |

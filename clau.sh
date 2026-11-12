@@ -37,6 +37,7 @@ LLM_STATUS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/llm_statu
 CLAU_TEAM_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/team"
 PI_TEAM_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pi_team_mcp.py"
 CLAU_API_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/clau_api.py"
+PAPERLESS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/paperless_mcp.py"
 CLAU_GUI_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/clau_gui.py"
 OWL_BASE_URL="${OWL_BASE_URL:-http://11.0.0.13:7077}"
 QQ_USER="${CLAU_QQ_USER:-ccclau}"   # per Session überschreibbar, z.B. CLAU_QQ_USER=master (höchste Priorität)
@@ -1460,13 +1461,24 @@ for u in d.get("result", []):
 # ein Verdächtiger: lokale Tool-Calling-Backends (vLLM u.ä.) sind bei so viel
 # Schema-Komplexität empfindlich. --tools/--strict-mcp-config wirken dagegen
 # auf das tatsächlich gesendete Schema, nicht nur auf Ausführungsrechte.
-CLAU_OWL_TOOLS_DEFAULT="Bash,Edit,Write,Read,AskUserQuestion,TaskCreate,TaskGet,TaskList,TaskUpdate,EnterPlanMode,ExitPlanMode"
+# Standard: so wenige Tools wie möglich (schnell, kurzer Prompt). Pro Verzeichnis änderbar: Hauptmenü x.
+CLAU_OWL_TOOLS_DEFAULT="Read,Write,Edit,Bash"
 
 # MCP-Config für den owlAPI-Pfad. Normalerweise leer (--strict-mcp-config
 # blendet damit alle sonstigen MCP-Server aus, spart Tokens). Mit
 # CLAU_WEBSEARCH=1 kommt die lokale QuiteQue-Websuche als einziges MCP-Tool
 # dazu — das serverseitige WebSearch der Anthropic-API gibt es über owlAPI
 # nicht, ein lokales Modell hätte sonst gar keinen Weg ins Netz.
+_paperless_server_json() {
+  [[ "${CLAU_PAPERLESS:-0}" == "1" && -f "$PAPERLESS_MCP_SCRIPT" ]] || return 0
+  python3 - "$PAPERLESS_MCP_SCRIPT" "${CLAU_PAPERLESS_URL:-http://11.0.0.12:8010}" <<'PY_PL'
+import json, sys
+print(json.dumps({"type": "stdio", "command": "python3", "args": [sys.argv[1]], "env": {"PAPERLESS_URL": sys.argv[2]}}))
+PY_PL
+}
+
+_paperless_token_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/clau/paperless.token"; }
+
 _owl_mcp_config() {
   if team_active && [[ -f "$LLM_STATUS_MCP_SCRIPT" ]]; then
     # Team-Modus: llm_status (Slot-Auslastung des Ausführer-Modells) immer,
@@ -1486,6 +1498,9 @@ servers = {"llm_status": {"type": "stdio", "command": "python3", "args": [llm], 
     "CLAU_TEAM_MAX_AGENTS": "${CLAU_TEAM_MAX_AGENTS:-5}"}}}
 if pi_json:
     servers["pi_team"] = pi_json
+pl = '''$(_paperless_server_json)'''
+if pl.strip():
+    servers["paperless"] = json.loads(pl)
 if ws:
     servers["websearch"] = {"type": "stdio", "command": "python3", "args": [web], "env": {
         "QUITEQUE_URL": "$OWL_BASE_URL", "OWL_PROXY_USER": "$QQ_USER",
@@ -1495,18 +1510,26 @@ print(json.dumps({"mcpServers": servers}))
 PY_MCP
     return
   fi
+  local ws=0 pl=""
   if [[ "${CLAU_WEBSEARCH:-1}" == "1" && -f "$WEBSEARCH_MCP_SCRIPT" ]]; then
-    _owl_activity_env "websearch"
-    # Zeilenumbruch ist Pflicht: der Aufrufer liest die Argumente mit
-    # "while read", und read verwirft die letzte Zeile ohne \n — dann stünde
-    # --mcp-config ohne Wert da und würde die folgenden Argumente
-    # (--resume <id>) als Config-Dateien schlucken.
-    printf '{"mcpServers":{"websearch":{"type":"stdio","command":"python3","args":["%s"],"env":{"QUITEQUE_URL":"%s","OWL_PROXY_USER":"%s","OWL_HDR_AGENT_TOOL":"%s","OWL_HDR_REQUEST_CONTEXT":"%s","OWL_HDR_PROJECT":"%s","OWL_HDR_USER":"%s"}}}}\n' \
-      "$WEBSEARCH_MCP_SCRIPT" "$OWL_BASE_URL" "$QQ_USER" \
-      "$OWL_HDR_AGENT_TOOL" "$OWL_HDR_REQUEST_CONTEXT" "$OWL_HDR_PROJECT" "$OWL_HDR_USER"
-  else
-    printf '{"mcpServers":{}}\n'
+    ws=1; _owl_activity_env "websearch"
   fi
+  pl="$(_paperless_server_json)"
+  # print liefert den Zeilenumbruch am Ende: der Aufrufer liest die Argumente mit
+  # "while read", und read verwirft die letzte Zeile ohne \n.
+  python3 - "$ws" "$WEBSEARCH_MCP_SCRIPT" "$OWL_BASE_URL" "$QQ_USER" \
+    "${OWL_HDR_AGENT_TOOL:-}" "${OWL_HDR_REQUEST_CONTEXT:-}" "${OWL_HDR_PROJECT:-}" "${OWL_HDR_USER:-}" "${pl:-null}" <<'PY_MCP'
+import json, sys
+ws, web, url, user, h_agent, h_ctx, h_proj, h_user, pl = sys.argv[1:10]
+servers = {}
+if ws == "1":
+    servers["websearch"] = {"type": "stdio", "command": "python3", "args": [web], "env": {
+        "QUITEQUE_URL": url, "OWL_PROXY_USER": user, "OWL_HDR_AGENT_TOOL": h_agent,
+        "OWL_HDR_REQUEST_CONTEXT": h_ctx, "OWL_HDR_PROJECT": h_proj, "OWL_HDR_USER": h_user}}
+if json.loads(pl):
+    servers["paperless"] = json.loads(pl)
+print(json.dumps({"mcpServers": servers}))
+PY_MCP
 }
 
 _owl_minimal_tool_args() {
@@ -2071,15 +2094,193 @@ run_nano_session() {
 
   local hint; hint="$CLAU_DIR/QUITEQUE_HINT.md"
   [[ "${CLAU_QQ_HINT:-1}" == "1" && -f "$hint" ]] || hint=""
+  local nano_tools=""
+  if [[ "${CLAU_OWL_MINIMAL_TOOLS:-1}" == "1" ]]; then
+    nano_tools="$(_nano_tool_names)"
+  fi
+  # MCP-Server (z.B. Websuche) als Konfig-Datei; nano startet sie selbst
+  local mcp_file=""
+  if [[ "${CLAU_OWL_MINIMAL_TOOLS:-1}" == "1" ]]; then
+    local mcp_json; mcp_json="$(_owl_mcp_config)"
+    if [[ "$mcp_json" == *'"command"'* ]]; then
+      mcp_file="$(mktemp "${TMPDIR:-/tmp}/clau-mcp.XXXXXX")"
+      printf '%s\n' "$mcp_json" > "$mcp_file"
+    fi
+  fi
+  NANO_MCP_CONFIG="$mcp_file" \
+  NANO_TOOLS="$nano_tools" \
   NANO_CONTEXT_WINDOW="${cw:-200000}" \
   NANO_APPEND_SYSTEM_PROMPT_FILE="$hint" \
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
   ANTHROPIC_API_KEY="sk-owl" \
   "$NANO_BIN" --model "$nano_model" "${nano_perm_args[@]}" "${real_args[@]}" "${API_PROMPT_ARGS[@]}" || true
 
+  [[ -n "$mcp_file" ]] && rm -f "$mcp_file"
   _kill_owl_proxy
   _usage_report "$CLAU_USAGE_SID"
   trap - EXIT INT TERM
+}
+
+# Tool-Allowlist des Verzeichnisses in nano-Namen (Aufgaben-Tools = TodoWrite;
+# AskUserQuestion/Plan-Modus kennt nano nicht).
+_nano_tool_names() {
+  local t out=() seen=" "
+  for t in $(echo "${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}" | tr ',' ' '); do
+    case "$t" in
+      TaskCreate|TaskGet|TaskList|TaskUpdate) t="TodoWrite" ;;
+      AskUserQuestion|EnterPlanMode|ExitPlanMode) continue ;;
+    esac
+    [[ "$seen" == *" $t "* ]] && continue
+    seen+="$t "; out+=("$t")
+  done
+  (IFS=,; echo "${out[*]}")
+}
+
+# Tool-Freigaben für dieses Verzeichnis (owl-Modelle: Claude Code und nano)
+choose_builtin_tools_menu() {
+  local catalog=(
+    "Read|Read|Dateien lesen"
+    "Write|Write|Dateien anlegen / überschreiben"
+    "Edit|Edit|Dateien gezielt ändern"
+    "Bash|Bash|Shell-Befehle (auch grep, find, git)"
+    "Glob|Glob|Dateien nach Muster suchen"
+    "Grep|Grep|Dateiinhalte durchsuchen"
+    "WebFetch|WebFetch|Webseiten abrufen"
+    "Aufgabenliste|TaskCreate,TaskGet,TaskList,TaskUpdate|Aufgabenliste (4 Tools; nano: TodoWrite)"
+    "Plan-Modus|EnterPlanMode,ExitPlanMode|Plan-Modus (nur Claude Code)"
+    "Rückfragen|AskUserQuestion|Rückfragen mit Auswahl (nur Claude Code)"
+    "Agent|Agent|Subagenten starten"
+    "Notebook|NotebookEdit|Jupyter-Notebooks bearbeiten"
+  )
+  while true; do
+    local cur=",${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}," i=0 e key tools label on n_on=0
+    echo
+    echo "Eingebaute Tools für dieses Verzeichnis ($(basename "$PWD")) — gilt für owl-Modelle, nano und Claude Code"
+    echo "Je weniger Tools, desto kürzer der Prompt und desto schneller das Modell. Gespeichert in .clau.conf."
+    for e in "${catalog[@]}"; do
+      ((i++)) || true
+      IFS='|' read -r key tools label <<< "$e"
+      on=" "; [[ "$cur" == *",${tools%%,*},"* ]] && { on="x"; ((n_on++)) || true; }
+      printf "  %2d) [%s] %s\n" "$i" "$on" "$label"
+    done
+    echo "   m) Minimal (Read, Write, Edit, Bash)   s) Standard + Suche (Glob, Grep)   v) Voll   0) Fertig"
+    printf "Umschalten [1-%d, m, s, v, 0=Zurück]: " "$i"
+    local c; read -r c
+    local new=""
+    case "$c" in
+      m|M) new="Read,Write,Edit,Bash" ;;
+      s|S) new="Read,Write,Edit,Bash,Glob,Grep" ;;
+      v|V) new="Read,Write,Edit,Bash,Glob,Grep,WebFetch,TaskCreate,TaskGet,TaskList,TaskUpdate,EnterPlanMode,ExitPlanMode,AskUserQuestion,Agent,NotebookEdit" ;;
+      ''|0|q|Q) return 0 ;;
+      *)
+        if [[ "$c" =~ ^[0-9]+$ && "$c" -ge 1 && "$c" -le "${#catalog[@]}" ]]; then
+          IFS='|' read -r key tools label <<< "${catalog[$((c-1))]}"
+          local out=() found=0 t
+          for t in $(echo "${cur//,/ }"); do
+            if [[ ",$tools," == *",$t,"* ]]; then found=1; continue; fi
+            out+=("$t")
+          done
+          if [[ "$found" -eq 0 ]]; then
+            for t in ${tools//,/ }; do out+=("$t"); done
+          fi
+          new="$(IFS=,; echo "${out[*]}")"
+        else
+          echo "Ungültige Auswahl."; continue
+        fi
+        ;;
+    esac
+    CLAU_OWL_TOOLS="$new"
+    save_config
+  done
+}
+
+# MCP-Server: externe Programme, die dem Modell zusätzliche Tools liefern
+choose_mcp_menu() {
+  while true; do
+    local tok="fehlt"; [[ -s "$(_paperless_token_file)" ]] && tok="gesetzt"
+    echo
+    echo "MCP-Server für dieses Verzeichnis ($(basename "$PWD")) — Claude Code und nano"
+    echo "Jeder aktive Server fügt seine Tool-Schemas zu jeder Anfrage hinzu."
+    echo "   1) [$([[ "${CLAU_WEBSEARCH:-1}" == "1" ]] && echo x || echo " ")] Websuche (QuiteQue, lokal)"
+    echo "   2) [$([[ "${CLAU_PAPERLESS:-0}" == "1" ]] && echo x || echo " ")] Paperless (Dokumente suchen/lesen: ${CLAU_PAPERLESS_URL:-http://11.0.0.12:8010}, Token $tok)"
+    echo "   t) Paperless-Token / URL setzen"
+    printf "Umschalten [1-2, t, 0=Zurück]: "
+    local c; read -r c
+    case "$c" in
+      1) if [[ "${CLAU_WEBSEARCH:-1}" == "1" ]]; then CLAU_WEBSEARCH=0; else CLAU_WEBSEARCH=1; fi; save_config ;;
+      2) if [[ "${CLAU_PAPERLESS:-0}" == "1" ]]; then CLAU_PAPERLESS=0; else
+           CLAU_PAPERLESS=1
+           [[ -s "$(_paperless_token_file)" ]] || echo "Hinweis: noch kein Token — mit t setzen, sonst melden die Tools einen Fehler."
+         fi; save_config ;;
+      t|T) local u t
+           printf "Paperless-URL [%s]: " "${CLAU_PAPERLESS_URL:-http://11.0.0.12:8010}"; read -r u
+           [[ -n "$u" ]] && CLAU_PAPERLESS_URL="$u"
+           printf "API-Token (Paperless → Profil, leer = unverändert): "; read -rs t; echo
+           if [[ -n "$t" ]]; then
+             mkdir -p "$(dirname "$(_paperless_token_file)")"
+             ( umask 077; printf '%s\n' "$t" > "$(_paperless_token_file)" )
+             echo "Token gespeichert ($(_paperless_token_file))."
+           fi
+           save_config ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+# Skills: Anleitungen, die das Modell bei Bedarf lädt (kein Tool, keine Ausführung)
+choose_skills_menu() {
+  while true; do
+    local d f names=() on="aus"
+    for d in "$HOME/.claude/skills" "./.claude/skills"; do
+      [[ -d "$d" ]] || continue
+      for f in "$d"/*/SKILL.md; do
+        [[ -f "$f" ]] && names+=("$(basename "$(dirname "$f")")")
+      done
+    done
+    [[ ",${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}," == *",Skill,"* ]] && on="an"
+    echo
+    echo "Skills für dieses Verzeichnis ($(basename "$PWD")) — das Modell lädt sie nur, wenn die Aufgabe passt"
+    echo "   1) [$([[ "$on" == "an" ]] && echo x || echo " ")] Skills erlauben (Skill-Tool, kostet ein Tool-Schema)"
+    if [[ "${#names[@]}" -gt 0 ]]; then
+      echo "   Gefunden (${#names[@]}): ${names[*]}"
+    else
+      echo "   Keine Skills gefunden (~/.claude/skills/<name>/SKILL.md oder ./.claude/skills/)."
+    fi
+    printf "Umschalten [1, 0=Zurück]: "
+    local c; read -r c
+    case "$c" in
+      1)
+        local cur="${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}"
+        if [[ "$on" == "an" ]]; then
+          cur="$(echo ",$cur," | sed 's/,Skill,/,/g; s/^,//; s/,$//')"
+        else
+          cur="$cur,Skill"
+        fi
+        CLAU_OWL_TOOLS="$cur"; save_config ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+# Obermenü: Tools, MCP-Server und Skills getrennt verwalten
+choose_tools_menu() {
+  while true; do
+    local ntools; ntools="$(echo "${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}" | tr ',' '\n' | grep -vc '^Skill$')"
+    echo
+    echo "Fähigkeiten für dieses Verzeichnis ($(basename "$PWD")):"
+    echo "  1) Tools        eingebaute Werkzeuge (Read, Bash, …)         $ntools aktiv"
+    echo "  2) MCP-Server   externe Programme mit eigenen Tools         Websuche $([[ "${CLAU_WEBSEARCH:-1}" == "1" ]] && echo an || echo aus)"
+    echo "  3) Skills       Anleitungen, die das Modell bei Bedarf lädt  $([[ ",${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}," == *",Skill,"* ]] && echo an || echo aus)"
+    echo "  0) Zurück"
+    printf "Auswahl [1-3, Enter=Zurück]: "
+    local c; read -r c
+    case "$c" in
+      1) choose_builtin_tools_menu ;;
+      2) choose_mcp_menu ;;
+      3) choose_skills_menu ;;
+      *) return 0 ;;
+    esac
+  done
 }
 
 # Startet ein owl-Modell mit der gewählten CLI-Engine (nano oder Claude Code).
@@ -2206,7 +2407,7 @@ _conf_fallback_file() {
 # Update-Check/Websuche).
 CLAU_ENV_OVERRIDES=(CLAU_TEAM CLAU_TEAM_LEAD_MODEL CLAU_TEAM_EXEC_MODEL CLAU_TEAM_MAX_AGENTS
   CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_TEAM_SUBAGENTS CLAU_TEAM_SET CLAU_API CLAU_API_BIND CLAU_API_TOKEN
-  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS)
+  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS CLAU_OWL_TOOLS CLAU_PAPERLESS CLAU_PAPERLESS_URL)
 
 load_config() {
   local _ov _envsave=()
@@ -2383,6 +2584,9 @@ CLAU_OFFLINE="${CLAU_OFFLINE:-0}"
 CLAU_OWL_ROUTES="${CLAU_OWL_ROUTES:-}"
 CLAU_QQ_USER="${CLAU_QQ_USER:-ccclau}"
 CLAU_MODEL_FAVS="${CLAU_MODEL_FAVS:-120 350 351 41 42 46 382 399 45 513}"
+CLAU_OWL_TOOLS="${CLAU_OWL_TOOLS:-}"
+CLAU_PAPERLESS="${CLAU_PAPERLESS:-0}"
+CLAU_PAPERLESS_URL="${CLAU_PAPERLESS_URL:-http://11.0.0.12:8010}"
 CLAU_BACKEND="${CLAU_BACKEND:-claude}"
 CLAU_QWEN_MODEL="${CLAU_QWEN_MODEL:-qwen3.8-max}"
 CLAU_QWEN_FAST_MODEL="${CLAU_QWEN_FAST_MODEL:-qwen3.8-flash}"
@@ -2692,7 +2896,7 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_OWL_TIMEOUT="1800"            owlAPI-Request-Timeout in Sekunden (Default 1800 = 30 Min)
   owlAPI-Proxy-Log: ~/.cache/clau/owl_proxy.log (wird bei jedem Start überschrieben)
   CLAU_OWL_MINIMAL_TOOLS="1"         Schlankes Tool-Set + keine MCP-Server für owlAPI (Default an)
-  CLAU_OWL_TOOLS="Bash,Edit,..."     Eigene Tool-Allowlist statt des Defaults (s.o.)
+  CLAU_OWL_TOOLS="Read,Write,Edit,Bash"  Tool-Allowlist für owl-Modelle (Standard; Hauptmenü x schaltet pro Verzeichnis um)
   CLAU_UPDATE_CHECK="1"              Beim Start gegen GitHub auf Updates prüfen (0 = aus)
   CLAU_OFFLINE="0"                   1 = ohne Internet: kein Update-Check, keine Websuche, keine Netz-Installation
   CLAU_TEAM="0"                      1 = Team-Modus (Teamleiter owl-122, Ausführer-Agenten owl-121)
@@ -5325,13 +5529,14 @@ interactive_start() {
   echo "   s) Weitere Sessions …           (alle hier / alle auf dem System / laufende)"
   echo "   w) Modell wechseln"
   echo "   u) Benutzer wechseln            ($QQ_USER; gilt für alle Engines)"
+  echo "   x) Tools, MCP, Skills …         (Freigaben für dieses Verzeichnis)"
   echo "   i) Markdown importieren         (neue Session aus Datei)"
   local ntm=0; _have tmux && ntm="$( { tmux ls 2>/dev/null || true; } | wc -l)"
   echo "   t) tmux-Sitzungen …             ($ntm laufen auf diesem Rechner)"
   echo "   f) Fernsteuerung …              (Telegram/Handy, API)"
   echo "   e) Einstellungen …              (Engine, Qwen-Key, Bot, Team, Update)"
   echo "   q) Beenden"
-  printf "Auswahl [%sn s w u i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt 3 ]] && echo "m, ")"
+  printf "Auswahl [%sn s w u x i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt 3 ]] && echo "m, ")"
   local c; read -r c
   case "${c:-n}" in
     [1-3])
@@ -5342,6 +5547,7 @@ interactive_start() {
     m|M) choose_session_list here; interactive_start ;;
     w|W) choose_model_interactive; interactive_start ;;
     u|U) choose_user_interactive; interactive_start ;;
+    x|X) choose_tools_menu; interactive_start ;;
     i|I) choose_import_md_interactive || interactive_start ;;
     t|T) choose_tmux_menu; interactive_start ;;
     f|F) choose_remote_menu; interactive_start ;;

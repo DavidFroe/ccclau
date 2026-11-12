@@ -11,3 +11,5 @@ Neu-Vendoring einfach bleibt.
 | `nano_claude_code/prompts.py` | `build_system_prompt` | Env `NANO_APPEND_SYSTEM_PROMPT_FILE`: Datei wird an den System-Prompt gehängt (QUITEQUE_HINT.md) | 2026-11-08 |
 | `nano_claude_code/cc_import.py` (neu) | `load_cc_session` | liest Claude-Code-Sessions (`~/.claude/projects/*/<uuid>.jsonl`) nur lesend und wandelt sie in nano-Nachrichten um | 2026-11-08 |
 | `nano_claude_code/cli.py` | `_load_resume_session` | ruft `load_cc_session` auf, wenn das Argument eine CC-UUID/.jsonl ist | 2026-11-08 |
+| `nano_claude_code/tools_impl.py` | `anthropic_tool_defs` | Env `NANO_TOOLS` (kommagetrennt) beschränkt die an das Modell gesendeten Tools (Allowlist pro Verzeichnis aus clau) | 2026-11-08 |
+| `nano_claude_code/mcp_client.py` (neu), `tools_impl.py` | `anthropic_tool_defs`, `dispatch_tool` | MCP-Client (stdio): Server aus Env `NANO_MCP_CONFIG` (Claude-Code-Format), Tools als `mcp__<server>__<tool>` | 2026-11-08 |

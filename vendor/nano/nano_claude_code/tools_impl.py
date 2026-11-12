@@ -843,6 +843,9 @@ TOOL_DISPATCH: dict[str, Callable] = {
 def dispatch_tool(cwd: Path, name: str, tool_input: dict) -> str | list:
     """Dispatch a tool call. Returns str for text results, or a list of content
     blocks for rich results (e.g. images via Read tool)."""
+    from nano_claude_code.mcp_client import call_mcp_tool, is_mcp_tool
+    if is_mcp_tool(name):
+        return call_mcp_tool(name, tool_input)
     handler = TOOL_DISPATCH.get(name)
     if handler is None:
         return f"Error: unknown tool '{name}'"
@@ -856,6 +859,17 @@ def dispatch_tool(cwd: Path, name: str, tool_input: dict) -> str | list:
 
 
 def anthropic_tool_defs() -> list[dict]:
+    """Tool-Schemas; Env NANO_TOOLS (kommagetrennt) beschränkt auf diese Namen."""
+    defs = _all_tool_defs()
+    allow = os.environ.get("NANO_TOOLS")
+    if allow:
+        names = {n.strip() for n in allow.split(",") if n.strip()}
+        defs = [d for d in defs if d["name"] in names]
+    from nano_claude_code.mcp_client import mcp_tool_defs
+    return defs + mcp_tool_defs()
+
+
+def _all_tool_defs() -> list[dict]:
     return [
         {
             "name": "Read",
