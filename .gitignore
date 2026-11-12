@@ -4,3 +4,4 @@ __pycache__/
 .clau.conf
 vendor/nano/build/
 vendor/nano/*.egg-info/
+PLAN.md
