@@ -33,6 +33,9 @@ CLAU_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 OWL_PROXY_SCRIPT="$CLAU_DIR/owl_proxy.py"
 CC_COMPACT_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc_compact.py"
 WEBSEARCH_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/websearch_mcp.py"
+MATLAB_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/matlab_mcp.py"
+SOLIDCRAFT_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/solidcraft_mcp.py"
+PICOGK_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/picogk_mcp.py"
 LLM_STATUS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/llm_status_mcp.py"
 CLAU_TEAM_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/team"
 PI_TEAM_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pi_team_mcp.py"
@@ -122,10 +125,24 @@ _owl_models_refresh() {
 # Chat-taugliche Modelle als TSV: id status anbieter ctx preis name
 # Sortiert: lokal → gratis → nach Anbieter, darin nach Eingabepreis. Ohne Bild/Audio/Suche.
 _owl_models_tsv() {
-  _owl_models_refresh "${1:-}" || return 1
-  python3 - "$OWL_MODELS_CACHE" <<'PY'
+  local direct; direct="$(python3 "$CLAU_DIR/backends.py" tsv 2>/dev/null)"
+  # QuiteQue gerade nicht erreichbar: keine veralteten Cache-Zeilen anbieten, nur Direkt-Modelle
+  if ! curl -sf -m 2 -o /dev/null "${OWL_BASE_URL}/v1/models" -H "X-User: ${CLAU_USER_TAG:-$(whoami)}" \
+       -H "X-Agent-Tool: ${CLAU_AGENT_TOOL:-ccclau-$(whoami)}" 2>/dev/null; then
+    [[ -n "$direct" ]] || return 1
+    printf '%s\n' "$direct"; return 0
+  fi
+  if ! _owl_models_refresh "${1:-}"; then
+    # QuiteQue nicht erreichbar: direkt angebundene Modelle trotzdem anbieten
+    [[ -n "$direct" ]] || return 1
+    printf '%s\n' "$direct"; return 0
+  fi
+  [[ -n "$direct" ]] && printf '%s\n' "$direct"
+  python3 - "$OWL_MODELS_CACHE" "$direct" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))["data"]
+_direct_ids = {l.split("\t")[0] for l in sys.argv[2].splitlines() if l}
+data = [m for m in data if str(m.get("numerical_id")) not in _direct_ids]
 skip_owner = {"searchllm", "ohrwurm"}
 rows = []
 for m in data:
@@ -150,6 +167,9 @@ PY
 owl_context_window() {
   local owl_id="${1:-}"
   local cw=""
+  cw="$(python3 "$CLAU_DIR/backends.py" ctx "$owl_id" 2>/dev/null)"
+  if [[ -n "$cw" && "$cw" -gt 0 ]] 2>/dev/null; then echo "$cw"; return; fi
+  cw=""
   if _owl_models_refresh 2>/dev/null; then
     cw="$(python3 -c '
 import json, sys
@@ -583,6 +603,13 @@ _start_owl_proxy() {
     threaded=1
     slot_limits="$(team_exec_model)=$(_team_exec_slots)"
   fi
+  local esc_t="${CLAU_ESC_TARGET:-}"; esc_t="${esc_t#owl:}"
+  OWL_ESC="${CLAU_ESC:-0}" OWL_ESC_TARGET="$esc_t" OWL_ESC_TARGET_CTX="$([[ -n "$esc_t" ]] && owl_context_window "$esc_t")" \
+  OWL_ESC_COMPACT_MAX="${CLAU_ESC_COMPACT:-3}" OWL_ESC_FEHLER_MAX="${CLAU_ESC_FEHLER:-5}" \
+  OWL_ESC_ABBRUECHE_MAX="${CLAU_ESC_ABBRUECHE:-3}" OWL_ESC_SCHLEIFE_MAX="${CLAU_ESC_SCHLEIFE:-4}" \
+  OWL_ESC_FENSTER="${CLAU_ESC_FENSTER:-60}" OWL_ESC_ZURUECK_NACH="${CLAU_ESC_ZURUECK:-0}" \
+  OWL_ESC_FILE="$(_usage_dir)/${CLAU_USAGE_SID:-run-$$}.esc.jsonl" OWL_REG_CWD="$PWD" \
+  OWL_TRACE="${CLAU_TRACE:-0}" OWL_TRACE_FILE="$(_usage_dir)/${CLAU_USAGE_SID:-run-$$}.trace.jsonl" \
   OWL_PROXY_THREADED="$threaded" OWL_SLOT_LIMITS="$slot_limits" OWL_ROUTES="${CLAU_OWL_ROUTES:-}" \
   OWL_USAGE_FILE="${CLAU_USAGE_FILE:-}" \
   OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
@@ -628,6 +655,8 @@ _usage_report() {
   if [[ -n "$sid" ]]; then f="$(_usage_dir)/${sid%.json}.jsonl"
   else f="$(ls -t "$(_usage_dir)"/*.jsonl 2>/dev/null | head -1)"; fi
   [[ -n "$f" && -s "$f" ]] || { echo "Keine Token-Daten${sid:+ für $sid}."; return 0; }
+  local escf="${f%.jsonl}.esc.jsonl"
+  [[ -s "$escf" ]] && python3 "$CLAU_DIR/eskalation.py" report "$escf" "$f"
   python3 - "$f" <<'PYEOF'
 import json, os, sys
 f = sys.argv[1]
@@ -1479,7 +1508,26 @@ PY_PL
 
 _paperless_token_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/clau/paperless.token"; }
 
+# Optionale MCP-Server (Default aus): CLAU_MATLAB=1 → matlab_mcp.py, CLAU_SOLIDCRAFT=1 → solidcraft_mcp.py, CLAU_PICOGK=1 → picogk_mcp.py
 _owl_mcp_config() {
+  if [[ "${CLAU_MATLAB:-0}" != "1" && "${CLAU_SOLIDCRAFT:-0}" != "1" && "${CLAU_PICOGK:-0}" != "1" ]]; then
+    _owl_mcp_config_base
+    return
+  fi
+  _owl_mcp_config_base | python3 -c '
+import json, os, sys
+c = json.load(sys.stdin)
+srv = c.setdefault("mcpServers", {})
+if os.environ.get("CLAU_MATLAB") == "1" and os.path.exists(sys.argv[1]):
+    srv["matlab"] = {"type": "stdio", "command": "python3", "args": [sys.argv[1]]}
+if os.environ.get("CLAU_SOLIDCRAFT") == "1" and os.path.exists(sys.argv[2]):
+    srv["solidcraft"] = {"type": "stdio", "command": "python3", "args": [sys.argv[2]]}
+if os.environ.get("CLAU_PICOGK") == "1" and os.path.exists(sys.argv[3]):
+    srv["picogk"] = {"type": "stdio", "command": "python3", "args": [sys.argv[3]]}
+print(json.dumps(c))' "$MATLAB_MCP_SCRIPT" "$SOLIDCRAFT_MCP_SCRIPT" "$PICOGK_MCP_SCRIPT"
+}
+
+_owl_mcp_config_base() {
   if team_active && [[ -f "$LLM_STATUS_MCP_SCRIPT" ]]; then
     # Team-Modus: llm_status (Slot-Auslastung des Ausführer-Modells) immer,
     # Websuche wie gehabt nur mit CLAU_WEBSEARCH=1.
@@ -2361,6 +2409,11 @@ run_owl_headless_via_claude() {
   local tool_args=()
   while IFS= read -r line; do tool_args+=("$line"); done < <(_owl_minimal_tool_args; _team_claude_args)
   while IFS= read -r line; do tool_args+=("$line"); done < <(_api_claude_args headless)
+  # Zusatzargumente je Aufruf (clau_delegate.py): NUL-getrennte Datei
+  if [[ -n "${CLAU_HEADLESS_ARGS_FILE:-}" && -r "$CLAU_HEADLESS_ARGS_FILE" ]]; then
+    local _xa
+    while IFS= read -r -d '' _xa; do tool_args+=("$_xa"); done < "$CLAU_HEADLESS_ARGS_FILE"
+  fi
   local perm_args=()
   [[ -n "${CLAU_API_SESSION_ID:-}" && "${DANGEROUS_SKIP:-0}" -eq 1 ]] && perm_args=(--dangerously-skip-permissions)
   if team_active; then
@@ -2407,7 +2460,7 @@ _conf_fallback_file() {
 # Update-Check/Websuche).
 CLAU_ENV_OVERRIDES=(CLAU_TEAM CLAU_TEAM_LEAD_MODEL CLAU_TEAM_EXEC_MODEL CLAU_TEAM_MAX_AGENTS
   CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_TEAM_SUBAGENTS CLAU_TEAM_SET CLAU_API CLAU_API_BIND CLAU_API_TOKEN
-  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS CLAU_OWL_TOOLS CLAU_PAPERLESS CLAU_PAPERLESS_URL)
+  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_MATLAB CLAU_SOLIDCRAFT CLAU_PICOGK CLAU_TRACE CLAU_ATOMIC_INSTALL CLAU_ATOMIC_HOME CLAU_ATOMIC_VERSION CLAU_ESC CLAU_ESC_TARGET CLAU_ESC_COMPACT CLAU_ESC_FEHLER CLAU_ESC_ABBRUECHE CLAU_ESC_SCHLEIFE CLAU_ESC_FENSTER CLAU_ESC_ZURUECK CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS CLAU_OWL_TOOLS CLAU_PAPERLESS CLAU_PAPERLESS_URL)
 
 load_config() {
   local _ov _envsave=()
@@ -2564,6 +2617,11 @@ CLAU_DISABLE_TOOLS="${CLAU_DISABLE_TOOLS:-}"
 CLAU_DISABLE_ARTIFACT="${CLAU_DISABLE_ARTIFACT:-0}"
 CLAU_DISABLE_AGENT_VIEW="${CLAU_DISABLE_AGENT_VIEW:-0}"
 CLAU_WEBSEARCH="${CLAU_WEBSEARCH:-1}"
+CLAU_MATLAB="${CLAU_MATLAB:-0}"
+CLAU_SOLIDCRAFT="${CLAU_SOLIDCRAFT:-0}"
+CLAU_PICOGK="${CLAU_PICOGK:-0}"
+CLAU_TRACE="${CLAU_TRACE:-0}"
+CLAU_ESC="${CLAU_ESC:-0}"; CLAU_ESC_TARGET="${CLAU_ESC_TARGET:-}"   # Laufzeit-Eskalation auf größeres Modell, Default aus
 CLAU_TEAM="${CLAU_TEAM:-0}"
 CLAU_TEAM_LEAD_MODEL="${CLAU_TEAM_LEAD_MODEL:-122}"
 CLAU_TEAM_EXEC_MODEL="${CLAU_TEAM_EXEC_MODEL:-121}"
@@ -2581,7 +2639,7 @@ CLAU_API="${CLAU_API:-0}"
 CLAU_API_BIND="${CLAU_API_BIND:-127.0.0.1:7010}"
 CLAU_API_TOKEN="${CLAU_API_TOKEN:-}"
 CLAU_OFFLINE="${CLAU_OFFLINE:-0}"
-CLAU_OWL_ROUTES="${CLAU_OWL_ROUTES:-}"
+CLAU_OWL_ROUTES="${CLAU_OWL_ROUTES:-}"   # leer: owl_proxy liest ~/.config/clau/backends.json selbst
 CLAU_QQ_USER="${CLAU_QQ_USER:-ccclau}"
 CLAU_MODEL_FAVS="${CLAU_MODEL_FAVS:-120 350 351 41 42 46 382 399 45 513}"
 CLAU_OWL_TOOLS="${CLAU_OWL_TOOLS:-}"
@@ -2850,7 +2908,7 @@ Headless-Optionen:
   -p, --prompt TEXT               Prompt-Text für headless mode (erforderlich bei --headless)
   -f, --folder PATH               Zielverzeichnis für --new
   -m, --mdl MODEL                 Modell: haiku | sonnet | opus | fable | owl:<ID>
-      --backend claude|opencode|qwenplan
+      --backend claude|opencode|qwenplan|atomic
                                   CLI-Engine für diesen Aufruf (Standard: claude,
                                   per-Verzeichnis in .clau.conf gespeichert via Menü
                                   "CLI-Engine wechseln"). qwenplan = Claude Code mit
@@ -2886,8 +2944,19 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_TOOLS="WebFetch,Agent"  Tools aus System-Prompt entfernen (kommagetrennt)
   CLAU_DISABLE_ARTIFACT="1"          Artifacts deaktivieren (spart ~2-3K Tokens)
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
+  CLAU_TRACE="0"                     1 = Denkprotokoll/Fortschritt der Session mitschneiden (Proxy; Datei <sid>.trace.jsonl); Abruf live:
+                                     clau --verfolgen [--port P] status|lesen [seit]|live|an|aus, per MCP aktivitaet_lesen/fortschritt
+  CLAU_ATOMIC_INSTALL="0"            1 = bei clau --install auch atomic (bastani-inc/atomic, MIT) von GitHub holen; Engine: --backend atomic
+                                     CLAU_ATOMIC_HOME=<Pfad> (Installation + eigene Konfig, ~1,5 GB frei nötig), CLAU_ATOMIC_VERSION=<Tag>
+  CLAU_ESC="0"                       1 = Laufzeit-Eskalation: bei zu vielen Kompaktierungen/Fehlern/Abbrüchen/Schleifen auf CLAU_ESC_TARGET
+                                     (z.B. d-qwen3.8-flash-next-q3xl-1x261k) umschalten; Schwellen CLAU_ESC_COMPACT=3 _FEHLER=5
+                                     _ABBRUECHE=3 _SCHLEIFE=4 _FENSTER=60 (Anfragen) _ZURUECK=0 (0 = bleibt); von außen steuerbar:
+                                     clau --eskalation status|an|aus|jetzt|zurueck|set k=v   (Statistik am Sessionende)
+  CLAU_PICOGK="0"                    1 = PicoGK-Voxel-CAD (Docker, C#) als MCP einschalten, siehe picogk_mcp.py
+  CLAU_SOLIDCRAFT="0"                1 = SolidCraft-CAD-MCP (Brücke :8311, nur owl-Modelle) einschalten, siehe solidcraft_mcp.py
+  CLAU_MATLAB="0"                    1 = MATLAB-MCP (Windows-VM, nur owl-Modelle) einschalten, siehe matlab_mcp.py
   CLAU_WEBSEARCH="1"                 Lokale QuiteQue-Websuche als MCP-Tool (Default an, ~300 Tokens)
-  CLAU_BACKEND="claude"               CLI-Engine: claude (Standard) | nano | opencode | qwenplan
+  CLAU_BACKEND="claude"               CLI-Engine: claude (Standard) | nano | opencode | qwenplan | atomic
   CLAU_QWEN_MODEL="qwen3.8-max"       Modell für qwenplan (Key: ~/.config/clau/qwenplan.key, chmod 600)
   CLAU_QWEN_FAST_MODEL="qwen3.8-flash" schnelles Modell für qwenplan
   CLAU_QWEN_COMPACT_AT="200000"       qwenplan: Auto-Compact ab so vielen Tokens (Fenster 1M; höher = mehr Credits/Anfrage)
@@ -2977,6 +3046,9 @@ effective_model() {
 
 # CLI-Engine (nicht zu verwechseln mit dem Modell-Routing owl-vs-Claude):
 # "claude" (Claude Code, Standard) oder "opencode".
+# "Externe" Engines (eigene CLI, sprechen OpenAI-Format direkt, kein Claude Code): opencode und atomic
+_ext_engine() { [[ "$(effective_backend)" == "opencode" || "$(effective_backend)" == "atomic" ]]; }
+
 effective_backend() {
   if [[ -n "${CLI_BACKEND_OVERRIDE:-}" ]]; then
     echo "$CLI_BACKEND_OVERRIDE"
@@ -3245,7 +3317,8 @@ choose_backend_interactive() {
   echo "  2) nano                nano-claude-code (Python), nur für owl-Modelle"
   echo "  3) opencode            opencode.ai   alternative Engine"
   echo "  4) qwenplan            Claude Code   mit Alibaba Qwen Token Plan (nur interaktiv)"
-  printf "Auswahl [1-4, Enter=1]: "
+  echo "  5) atomic              bastani-inc/atomic (MIT) – Workflows/Prüfstufen, nur owl-Modelle, wird von GitHub geholt"
+  printf "Auswahl [1-5, Enter=1]: "
   read -r choice
   case "${choice:-1}" in
     1) CLAU_BACKEND="claude" ;;
@@ -3264,6 +3337,15 @@ choose_backend_interactive() {
       _qwenplan_key >/dev/null 2>&1 || qwenplan_set_key_interactive \
         || echo "Ohne Key startet 'qwenplan' nicht — später: Einstellungen (e → 2) oder clau --qwen-key." >&2
       choose_qwen_model_interactive
+      ;;
+    5)
+      CLAU_BACKEND="atomic"
+      if ! _atomic_bin >/dev/null; then
+        echo "atomic ist noch nicht installiert (Quelle: https://github.com/bastani-inc/atomic)."
+        if ask_yes_no "Jetzt von GitHub holen?"; then
+          _ensure_atomic || echo "Installation fehlgeschlagen — 'atomic' bleibt vorerst nicht nutzbar." >&2
+        fi
+      fi
       ;;
     *) echo "Ungültige Auswahl."; return ;;
   esac
@@ -3548,7 +3630,7 @@ run_new_session_named() {
   local sid; sid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid;print(uuid.uuid4())')"
   CLAU_SESSION_NAME="$sname"
   save_config
-  if [[ "$(effective_backend)" != "opencode" ]]; then
+  if ! _ext_engine; then
     NEW_SESSION_ARGS=(--session-id "$sid" --name "$sname")
     _set_session_title "$(_claude_projects_dir)/$(_project_hash_for)" "$sid" "$sname" 2>/dev/null || {
       mkdir -p "$(_claude_projects_dir)/$(_project_hash_for)"
@@ -3642,6 +3724,7 @@ _ensure_opencode() {
 # über Davids eigenes `opencode auth login`, nicht über uns).
 _opencode_model_arg() {
   local mdl="$1"
+  if [[ "$(effective_backend)" == "atomic" ]]; then _atomic_model_arg "$mdl"; return; fi
   if is_owl_model "$mdl"; then
     echo "owl/$(owl_model_id "$mdl")"
   else
@@ -3655,6 +3738,7 @@ _opencode_model_arg() {
 # wird gemergt, nicht überschrieben (andere Keys bleiben erhalten).
 _opencode_sync_config() {
   local mdl="$1"
+  if [[ "$(effective_backend)" == "atomic" ]]; then _atomic_sync_config "$mdl"; return; fi
   local model_arg; model_arg="$(_opencode_model_arg "$mdl")"
   if is_owl_model "$mdl"; then
     # QuiteQue verlangt X-Request-Context/X-Agent-Tool/X-Project inzwischen
@@ -3717,6 +3801,7 @@ PY
 
 # Stellt sicher dass opencode installiert ist (fragt ggf. nach Installation).
 _ensure_opencode_runtime() {
+  if [[ "$(effective_backend)" == "atomic" ]]; then _ensure_atomic_runtime; return; fi
   _have opencode && return 0
   echo "opencode ist nicht installiert." >&2
   if ask_yes_no "Jetzt installieren?"; then
@@ -3739,6 +3824,12 @@ run_opencode_session() {
   _ensure_opencode_runtime || exit 1
   _opencode_sync_config "$mdl"
   local model_arg; model_arg="$(_opencode_model_arg "$mdl")"
+  if [[ "$(effective_backend)" == "atomic" ]]; then
+    echo "Starte atomic (Modell: $mdl) ..."
+    cleanup_tool_blocking; unset_token_saver_env
+    _atomic_env
+    exec "$(_atomic_bin)" --model "$model_arg"
+  fi
   echo "Starte opencode (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   cleanup_tool_blocking
   unset_token_saver_env
@@ -3761,7 +3852,89 @@ build_opencode_headless_cmd() {
     echo "--headless erfordert einen Prompt mit -p/--prompt." >&2
     exit 1
   fi
+  if [[ "$(effective_backend)" == "atomic" ]]; then
+    _atomic_env
+    OPENCODE_CMD=("$(_atomic_bin)" --model "$model_arg" --print "$PROMPT_TEXT")
+    return
+  fi
   OPENCODE_CMD+=("$PROMPT_TEXT")
+}
+
+# ── Backend "atomic": https://github.com/bastani-inc/atomic (MIT), optionale Engine ───────
+# Eigene Agent-Laufzeit (TypeScript). Kein Fork, nichts vendored: die Quelle (Release-Archiv) wird bei Bedarf von
+# GitHub geholt (clau --install mit CLAU_ATOMIC_INSTALL=1, oder beim ersten Start der Engine). atomic spricht
+# OpenAI-Format direkt und liest unsere Modelle aus einer eigenen models.json (atomic_setup.py): Direkt-Modelle
+# (owl:d…) und QuiteQue (owl:ID). Eigener Konfig-/Sitzungsordner, die eigene ~/.atomic bleibt unberührt.
+CLAU_ATOMIC_HOME="${CLAU_ATOMIC_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/clau/atomic}"
+ATOMIC_SETUP_SCRIPT="$CLAU_DIR/atomic_setup.py"
+
+_atomic_bin() {
+  local p
+  for p in "$CLAU_ATOMIC_HOME/bin/atomic" "$(command -v atomic 2>/dev/null)"; do
+    [[ -n "$p" && -x "$p" ]] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+_ensure_atomic() {
+  if _atomic_bin >/dev/null; then
+    echo "  atomic: bereits vorhanden ($(_atomic_bin))"
+    return 0
+  fi
+  if [[ "${CLAU_OFFLINE:-0}" == "1" ]]; then
+    echo "  atomic: fehlt, CLAU_OFFLINE=1 → übersprungen (nur für --backend atomic nötig)."
+    return 1
+  fi
+  _have curl || { echo "  WARN: atomic braucht curl zum Herunterladen." >&2; return 1; }
+  # Das Release-Archiv ist ~105 MB (entpackt mehr): nicht auf eine fast volle Platte
+  mkdir -p "$CLAU_ATOMIC_HOME" 2>/dev/null
+  local free_mb; free_mb="$(df -Pm "$CLAU_ATOMIC_HOME" 2>/dev/null | awk 'NR==2{print $4}')"
+  if [[ -n "$free_mb" && "$free_mb" -lt 1500 ]]; then
+    echo "  WARN: nur ${free_mb} MB frei unter $CLAU_ATOMIC_HOME (nötig ~1500 MB)." >&2
+    echo "        Anderen Ort wählen: CLAU_ATOMIC_HOME=/pfad/mit/platz" >&2
+    return 1
+  fi
+  echo "  atomic: nicht gefunden — hole Release von GitHub (bastani-inc/atomic, MIT; Installer prüft SHA256SUMS) ..."
+  local inst; inst="$(mktemp)"
+  if ! curl -fsSL https://raw.githubusercontent.com/bastani-inc/atomic/main/install.sh -o "$inst"; then
+    rm -f "$inst"; echo "  WARN: Installer nicht ladbar (Netz?)." >&2; return 1
+  fi
+  local rc=0
+  env ATOMIC_INSTALL_DIR="$CLAU_ATOMIC_HOME/install" ATOMIC_BIN_DIR="$CLAU_ATOMIC_HOME/bin" NO_COLOR=1 \
+      ${CLAU_ATOMIC_VERSION:+ATOMIC_VERSION="$CLAU_ATOMIC_VERSION"} sh "$inst" || rc=$?
+  rm -f "$inst"
+  [[ $rc -eq 0 ]] && _atomic_bin >/dev/null
+}
+
+_ensure_atomic_runtime() {
+  _atomic_bin >/dev/null && return 0
+  echo "atomic ist nicht installiert (Quelle: https://github.com/bastani-inc/atomic, MIT)." >&2
+  if ask_yes_no "Jetzt von GitHub holen und installieren?"; then
+    _ensure_atomic && return 0
+  fi
+  echo "Kann ohne atomic nicht fortfahren." >&2
+  return 1
+}
+
+# atomic kennt nur OpenAI-kompatible Endpunkte: owl:d… (direkt) und owl:ID (QuiteQue), keine Claude-Abo-Modelle.
+_atomic_model_arg() {
+  local mdl="$1"
+  if ! is_owl_model "$mdl"; then
+    echo "atomic unterstützt nur owl-Modelle (owl:d… direkt oder owl:ID über QuiteQue), nicht '$mdl'." >&2
+    exit 1
+  fi
+  CLAU_ATOMIC_AGENT_DIR="$CLAU_ATOMIC_HOME/agent" python3 "$ATOMIC_SETUP_SCRIPT" model-arg "$mdl"
+}
+
+_atomic_sync_config() {
+  _owl_activity_env "agent"
+  CLAU_ATOMIC_AGENT_DIR="$CLAU_ATOMIC_HOME/agent" CLAU_QQ_USER="$QQ_USER" python3 "$ATOMIC_SETUP_SCRIPT" sync >/dev/null
+}
+
+_atomic_env() {
+  export ATOMIC_CODING_AGENT_DIR="$CLAU_ATOMIC_HOME/agent" ATOMIC_TELEMETRY=0 ATOMIC_SKIP_VERSION_CHECK=1
+  [[ "${CLAU_OFFLINE:-0}" == "1" ]] && export ATOMIC_OFFLINE=1
+  return 0
 }
 
 # ── Backend "qwenplan": Alibaba Model Studio Token Plan (Qwen-Abo) ───────────
@@ -4030,6 +4203,7 @@ install_self() {
   echo "Prüfe/Installiere Abhängigkeiten ..."
   _ensure_claude_code || true
   _ensure_opencode || true
+  [[ "${CLAU_ATOMIC_INSTALL:-0}" == "1" ]] && { _ensure_atomic || true; }
   _ensure_tmux || true
   _ensure_python_requests || true
 
@@ -4049,6 +4223,7 @@ install_self() {
   echo "Fertig. 'clau' ist einsatzbereit."
   _have claude   || echo "  Hinweis: 'claude' evtl. erst nach Shell-Neustart im PATH."
   _have opencode || echo "  Hinweis: 'opencode' evtl. erst nach Shell-Neustart im PATH."
+  _atomic_bin >/dev/null || echo "  Optional: 'atomic' (https://github.com/bastani-inc/atomic, MIT) als Engine: CLAU_ATOMIC_INSTALL=1 clau --install, oder 'clau --backend atomic' (holt es dann von GitHub)."
 }
 
 uninstall_self() {
@@ -4449,14 +4624,15 @@ run_import_md() {
     ensure_model
     mdl="$(effective_model)"
   fi
-  if [[ "$(effective_backend)" == "opencode" ]]; then
+  if _ext_engine; then
     _ensure_opencode_runtime || exit 1
     _opencode_sync_config "$mdl"
     local model_arg; model_arg="$(_opencode_model_arg "$mdl")"
     local content; content="$(cat "$md_file")"
-    echo "Starte opencode mit $md_file als Startprompt ..."
+    echo "Starte $(effective_backend) mit $md_file als Startprompt ..."
     cleanup_tool_blocking
     unset_token_saver_env
+    if [[ "$(effective_backend)" == "atomic" ]]; then _atomic_env; exec "$(_atomic_bin)" --model "$model_arg" "$content"; fi
     exec opencode --model "$model_arg" --prompt "$content"
   fi
   local new_id; new_id="$(_session_import_md "$md_file")"
@@ -5118,7 +5294,7 @@ run_resume_picker() {
     run_qwenplan_session --resume
     return
   fi
-  if [[ "$(effective_backend)" == "opencode" ]]; then
+  if _ext_engine; then
     # opencode hat seinen eigenen /sessions-Picker in der TUI -- kein von
     # außen scriptbares Äquivalent zu Claudes --resume ohne ID.
     run_opencode_session
@@ -5150,7 +5326,7 @@ run_saved_session() {
     run_qwenplan_session --resume "$CLAU_SESSION_ID"
     return
   fi
-  if [[ "$(effective_backend)" == "opencode" ]]; then
+  if _ext_engine; then
     # CLAU_SESSION_ID ist ein Claude-Code-Session-Format, überträgt sich
     # nicht auf opencode -- dessen eigene TUI übernimmt die Fortsetzung.
     run_opencode_session
@@ -5182,7 +5358,7 @@ run_new_session() {
     run_qwenplan_session "${NEW_SESSION_ARGS[@]}"
     return
   fi
-  if [[ "$(effective_backend)" == "opencode" ]]; then
+  if _ext_engine; then
     run_opencode_session
     return
   fi
@@ -5212,7 +5388,7 @@ run_resume_id() {
     ensure_model
     mdl="$(effective_model)"
   fi
-  [[ "$(effective_backend)" != "opencode" ]] && _session_meta_set "$rid" "$(_current_model_spec)"
+  ! _ext_engine && _session_meta_set "$rid" "$(_current_model_spec)"
   if [[ -z "${TMUX:-}" ]] && { _tmux_running "$rid" || _session_tmux_get "$rid"; }; then
     _tmux_wrap resume "$rid" "$(_get_session_title "$(_claude_projects_dir)/$(_project_hash_for)" "$rid")" || true
   fi
@@ -5220,7 +5396,7 @@ run_resume_id() {
     run_qwenplan_session --resume "$rid"
     return
   fi
-  if [[ "$(effective_backend)" == "opencode" ]]; then
+  if _ext_engine; then
     # $rid ist eine Claude-Code-Session-ID (aus cc_compact.py) -- opencode
     # hat kein passendes Gegenstück dazu (Phase 2: Kompressions-Brücke).
     echo "Hinweis: Session-ID $rid ist Claude-Code-Format, nicht auf opencode übertragbar." >&2
@@ -5334,16 +5510,22 @@ build_headless_cmd() {
     CLAUDE_CMD+=(--max-budget-usd "$MAX_BUDGET_USD")
   fi
 
+  # Zusatzargumente je Aufruf (clau_delegate.py): NUL-getrennte Datei, vor dem Prompt
+  if [[ -n "${CLAU_HEADLESS_ARGS_FILE:-}" && -r "$CLAU_HEADLESS_ARGS_FILE" ]]; then
+    local _xa
+    while IFS= read -r -d '' _xa; do CLAUDE_CMD+=("$_xa"); done < "$CLAU_HEADLESS_ARGS_FILE"
+  fi
+
   CLAUDE_CMD+=("$PROMPT_TEXT")
 }
 
 run_headless_here() {
   local mdl; mdl="$(effective_model)"
   [[ "$(effective_backend)" == "qwenplan" ]] && _qwenplan_refuse_headless
-  if [[ "$(effective_backend)" == "opencode" ]]; then
+  if _ext_engine; then
     _ensure_opencode_runtime || exit 1
     build_opencode_headless_cmd
-    echo "Starte opencode headless im Verzeichnis: $(pwd)"
+    echo "Starte $(effective_backend) headless im Verzeichnis: $(pwd)"
     exec "${OPENCODE_CMD[@]}"
   fi
   if is_owl_model "$mdl"; then
@@ -5365,13 +5547,13 @@ run_headless_in_dir() {
   mkdir -p "$dir"
   local mdl; mdl="$(effective_model)"
   [[ "$(effective_backend)" == "qwenplan" ]] && _qwenplan_refuse_headless
-  if [[ "$(effective_backend)" == "opencode" ]]; then
+  if _ext_engine; then
     _ensure_opencode_runtime || exit 1
-    echo "Projektverzeichnis bereit für opencode headless: $dir"
+    echo "Projektverzeichnis bereit für $(effective_backend) headless: $dir"
     (
       cd "$dir"
       build_opencode_headless_cmd
-      echo "Starte opencode headless in: $dir"
+      echo "Starte $(effective_backend) headless in: $dir"
       exec "${OPENCODE_CMD[@]}"
     )
     return
@@ -5854,8 +6036,8 @@ parse_args() {
         shift 2
         ;;
       --backend)
-        if [[ -z "${2:-}" || ( "$2" != "claude" && "$2" != "opencode" && "$2" != "qwenplan" ) ]]; then
-          echo "--backend erwartet: claude|opencode|qwenplan" >&2
+        if [[ -z "${2:-}" || ( "$2" != "claude" && "$2" != "opencode" && "$2" != "qwenplan" && "$2" != "atomic" ) ]]; then
+          echo "--backend erwartet: claude|opencode|qwenplan|atomic" >&2
           exit 1
         fi
         CLI_BACKEND_OVERRIDE="$2"
@@ -6064,6 +6246,21 @@ parse_args() {
       --new)
         ACTION="new"
         shift
+        ;;
+      --verfolgen)
+        # clau --verfolgen [--port P] status|lesen [seit]|live|an|aus → Denkprotokoll/Fortschritt des laufenden owl_proxy
+        shift
+        exec python3 "$CLAU_DIR/aktivitaet.py" ctl "$@"
+        ;;
+      --eskalation)
+        # clau --eskalation [--port P] status|an|aus|jetzt|zurueck|ziel <id>|set k=v → laufender owl_proxy
+        shift
+        exec python3 "$CLAU_DIR/eskalation.py" ctl "$@"
+        ;;
+      --delegate)
+        # clau --delegate <start|status|result|wait|more|stop|list> ... → clau_delegate.py
+        shift
+        exec python3 "$CLAU_DIR/clau_delegate.py" "$@"
         ;;
       --headless)
         HEADLESS=1

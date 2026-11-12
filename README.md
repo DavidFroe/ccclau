@@ -423,6 +423,114 @@ eine Session = Fortsetzen. Ohne `DISPLAY` zeigt die GUI einen klaren Fehler stat
 Nicht-interaktive Flags (auch von der GUI genutzt): `--sessions-json [here|all]`, `--set-model <spec>`,
 `--rename <sid> <name>`, `--export-md <sid>`, `--delete-session <sid>`, `--tmux-pin <sid> <on|off>`.
 
+## Direktanbindung ohne QuiteQue (`backends.json`)
+
+`~/.config/clau/backends.json` (Vorlage: `backends.example.json`, Pfad per `CLAU_BACKENDS_FILE`) bindet Modelle
+direkt an einen OpenAI-kompatiblen Server an, z.B. das Karten-Tor `127.0.0.1:8275` auf dem Mainframe. Schlüssel
+= owl-ID der QuiteQue-Entsprechung, gewählt wird das Direkt-Modell als **`owl:d<ID>`** (z.B. `owl:d137`) – getrennt vom QuiteQue-Eintrag derselben Nummer. Felder `url`, `model`, `ctx`, `name`, optional `api_key`. Gilt für Claude Code und nano (beide laufen über
+`owl_proxy.py`), taucht im Modellmenü als `[direkt]` auf und funktioniert auch bei unerreichbarem QuiteQue.
+`CLAU_OWL_ROUTES` hat Vorrang. Prüfen: `python3 backends.py check`.
+
+**Quellen (`"_quellen"`):** `{"name":"Tor","url":"http://127.0.0.1:8275/v1"}` fragt `/v1/models` ab und bietet alle Chat-Modelle
+(Kontext aus `meta.n_ctx_slot`) automatisch als `owl:d-<modellname>` an; Bild-/Audio-Modelle fallen raus, Dubletten zu
+Einzeleinträgen ebenfalls. Ist die Quelle nicht erreichbar, erscheint nichts (kurzer Cache, 20 s). Ist QuiteQue nicht erreichbar,
+zeigt das Menü keine veralteten QuiteQue-Zeilen, nur die Direkt-Modelle (und die Claude-Modelle); kommt QuiteQue zurück, sind
+seine Modelle wieder da, die Direkt-Modelle bleiben daneben getrennt wählbar.
+
+## Delegieren (`clau --delegate`, MCP `clau_delegate_mcp.py`)
+
+Schwere Aufgabe an einen eigenen Claude-Code-Lauf geben, ohne Rückfragen; alles pro Aufruf konfigurierbar
+(Modell, Tools, MCP-Server, Skills, Systemprompt, Kontext, Limits, Preset aus `~/.config/clau/delegate/presets/`).
+Standardmäßig in einem eigenen Git-Worktree, zurück kommen Ergebnis und Diff.
+
+```bash
+clau --delegate start spec.json     # → job_id   (spec: aufgabe, modell, ordner, tools, mcp_server, skills, limits, …)
+clau --delegate status <id>         # Zwischenstand
+clau --delegate wait <id> 600       # Ergebnis + Diff
+clau --delegate more|stop|list
+claude mcp add clau-delegate -- python3 /pfad/zu/clau_delegate_mcp.py   # als Unteragent für andere KIs
+```
+
+Pro Modell läuft ein Job gleichzeitig, weitere warten (`wartet_auf_slot`). Details: Kopf von `clau_delegate.py`.
+
+## Optionale Werkzeuge: MATLAB, SolidCraft und PicoGK (Default aus)
+
+Beides sind MCP-Server, die nur existieren, wenn man sie einschaltet: `CLAU_MATLAB=1` / `CLAU_SOLIDCRAFT=1` / `CLAU_PICOGK=1`
+(Umgebung oder `.clau.conf`, gilt für owl-Modelle) bzw. `"matlab": true` / `"solidcraft": true` / `"picogk": true` im
+`clau --delegate`-Spec. Arbeitsverzeichnis = cwd, Kennung aus `CLAU_CHAT_ID` (sonst Ordnername).
+
+- **`matlab_mcp.py`**: MATLAB R2020a in der Windows-VM (SSH, startet bei Bedarf über `win10-matlab.service`).
+  Werkzeuge `matlab_status`, `matlab_run`, `matlab_files_sync`, `matlab_latex`, `matlab_spickzettel`. Neue Ergebnisdateien
+  (PNG, MP4, CSV, MAT, PDF …) landen im cwd, Zeitlimit beendet auch das matlab.exe in der VM, Läufe stehen in
+  `matlab-tuning/fehlerlog/zugriffe.jsonl`. Die Regeln (Stapelbetrieb, Figurgröße, `exportgraphics(gcf,…)`) stehen in den
+  Werkzeugbeschreibungen. Eigene Kopie der Grundfunktionen aus `matlab_kvm.py` (dort unverändert): SSH/SCP, VM-Start,
+  Datei-Spiegelung, `_matlab_beenden`, Fehlerdeutung, Protokoll.
+- **`picogk_mcp.py`** (`CLAU_PICOGK=1` / `"picogk": true`): PicoGK-Voxel-CAD (C#) über das vorhandene Docker-Setup `3ddruck/picogk`
+  (unverändert). Werkzeuge `picogk_hilfe` (geprüfte Referenz + Vorlagen, zur Laufzeit aus dem WebUI-Werkzeug gelesen),
+  `picogk_modelle_auflisten`, `picogk_code_zeigen`, `picogk_code_speichern`, `picogk_bauen`, `picogk_shape`. Eigene Projekte
+  `cc_<kennung>_<name>`, fremde (WebUI/Wilfrieds Chat) nur lesbar. Ergebnis im cwd: `<name>.stl`, `<name>.cs`, `<name>_vorschau.png`.
+  Zeitlimit beendet auch den Container. Feine Voxel (< 0,2 mm) sind sehr speicherhungrig, für Gravuren nur kleine Bauräume.
+- **`solidcraft_mcp.py`**: stdio-Schicht vor der SolidCraft-Brücke (`mcp_bruecke.py`, Port 8311, ein CLI-Prozess je Kennung).
+  Spiegelt Dateien zwischen cwd und Brücken-Ordner (modell.stl, STEP, PNG, .sc …); 3D-Ansicht-Link und `netz_abziehen`
+  bleiben erhalten.
+
+## Denkprotokoll und Fortschritt in Echtzeit (Default aus)
+
+Der `owl_proxy` sieht den ganzen Stream und kann ihn mitschneiden: **Denken** (reasoning), **Zwischentext**, **Tool-Aufrufe**
+und **Tool-Ergebnisse**, gegliedert in **Schritte** (eine Modellantwort = eine größere Etappe zwischen den Werkzeugläufen).
+Einschalten: `CLAU_TRACE=1` (Datei `~/.local/share/clau/usage/<sid>.trace.jsonl`), oder zur Laufzeit ohne Neustart.
+Ereignisse sind nummeriert; Ring-Puffer im Speicher (1500), Textstücke werden alle ~0,7 s gebündelt.
+
+```bash
+clau --verfolgen [--port P] an|aus|status|lesen [seit]|live     # live = Strom, z.B. 💭 Denken / 💬 Text / 🔧 Tool / ✓✗ Ergebnis / ── Schritt
+```
+Per MCP (`clau_delegate_mcp.py`): `fortschritt` (Kurzstand: was passiert gerade, letzte Schritte, Zähler), `aktivitaet_lesen`
+(Polling mit `seit`/`naechste`, optional `warte_s` zum Warten auf Neues), `trace_setzen`; jeweils mit `job_id` für einen
+Delegate-Job (Spec `"verfolgen": true`) oder `port`. Der Strom (SSE) hängt am Steuer-Port des Proxys, den jeder Proxy in
+`~/.cache/clau/proxies/<port>.json` meldet.
+
+**Sicherheit:** Denkprotokolle sind sensibel. Der Steuer-Port lauscht nur auf 127.0.0.1 und verlangt ein Token (`X-Clau-Token`),
+das nur in der Registry-Datei (Rechte 0600, Ordner 0700) steht; andere Benutzer auf dem Rechner kommen nicht heran. Aus: es wird
+nichts aufgezeichnet.
+
+## Laufzeit-Eskalation auf ein größeres Modell (Default aus)
+
+Der `owl_proxy` sieht jede Anfrage von Claude Code. Zählt er in den letzten `FENSTER` Anfragen zu viele **Kompaktierungen**
+(Claudes Zusammenfassungs-Anfrage), **Tool-/Backend-Fehler**, **Kontext-Überläufe**, **Abbrüche** (Client trennt mitten im Stream)
+oder **Schleifen** (derselbe Tool-Aufruf ≥ N-mal), lenkt er das Hauptmodell ab der nächsten Anfrage auf `CLAU_ESC_TARGET` um.
+Der Verlauf reist mit (die API ist zustandslos), ein Neustart ist nicht nötig. Damit Claude Code dabei auch wirklich das größere
+Fenster nutzt, meldet der Proxy danach die Token umgerechnet auf das alte Fenster (alt/neu, z.B. 99K → 261K = 0,38); sein
+Auto-Compact greift entsprechend später. Echte Zahlen stehen weiter im Token-Protokoll.
+
+```bash
+CLAU_ESC="1"  CLAU_ESC_TARGET="d-qwen3.8-flash-next-q3xl-1x261k"      # in .clau.conf oder Umgebung
+CLAU_ESC_COMPACT=3 CLAU_ESC_FEHLER=5 CLAU_ESC_ABBRUECHE=3 CLAU_ESC_SCHLEIFE=4 CLAU_ESC_FENSTER=60 CLAU_ESC_ZURUECK=0
+clau --eskalation [--port P] status|an|aus|jetzt|zurueck|ziel <id>|set fehler_max=2 ...   # laufende Session, ohne Neustart
+```
+
+Von außen steuerbar auch über den MCP (`eskalation_status`, `eskalation_setzen` in `clau_delegate_mcp.py`) und im
+Delegate-Spec (`"eskalation": {"ziel": "...", "fehler_max": 3}`). Jeder Proxy trägt sich in `~/.cache/clau/proxies/` ein
+(eigener Steuer-Port mit Token, blockiert nie hinter einem langen Stream). Am Sessionende erscheint die **Statistik** (Ereignisse nach Art,
+Zeitpunkt/Grund/Modellwechsel mit Kontextgrößen, Anfragen und Token je Modell). Die Erkennung der Kompaktierung beruht auf dem
+Zusammenfassungs-Prompt von Claude Code (Version 2.1.322 geprüft); ändert er sich, zählt sie nicht mehr.
+
+## Engine „atomic“ (optional, Quelle: GitHub)
+
+[bastani-inc/atomic](https://github.com/bastani-inc/atomic) (MIT) ist eine eigene Agent-Laufzeit (TypeScript, pi-Abkömmling) mit
+Workflows, Prüfstufen und Freigabe-Schritten. ccclau bindet sie nur als weitere Engine ein, **kein Fork, nichts vendored**: die Quelle
+wird bei Bedarf von GitHub geholt (Release-Archiv ~105 MB, entpackt ~360 MB; der Installer prüft `SHA256SUMS`).
+
+```bash
+CLAU_ATOMIC_INSTALL=1 clau --install        # holt atomic bei der Installation mit (sonst nur ein Hinweis am Ende)
+clau --backend atomic -m owl:d137           # oder Engine-Menü Punkt 5; fehlt atomic, wird es nach Rückfrage von GitHub geholt
+CLAU_ATOMIC_HOME=/pfad/mit/platz            # Installation + eigene Konfig (≥ 1,5 GB frei nötig, Standard ~/.local/share/clau/atomic)
+CLAU_ATOMIC_VERSION=0.9.78                  # Version festnageln (Standard: neuestes Release)
+```
+atomic spricht OpenAI-Format direkt (kein `owl_proxy`) und liest eine eigene `models.json` (`atomic_setup.py`): die Direkt-Modelle
+(`owl:d…`, siehe `backends.json`) und QuiteQue (`owl:<ID>`, nur wenn erreichbar). Claude-Abo-Modelle gehen damit nicht. Eigener
+Konfig-/Sitzungsordner (`$CLAU_ATOMIC_HOME/agent`), deine `~/.atomic` bleibt unberührt; Telemetrie und Versionsprüfung sind aus,
+mit `CLAU_OFFLINE=1` auch alles Netz. Hinweis: Im Druckmodus liest atomic piped Eingaben mit – bei Skripten `</dev/null` setzen.
+
 ## Offline-Betrieb
 
 Für Umgebungen ohne Internet (devport-VMs: nur Gitea, apt-Cache, lokale LLMs):

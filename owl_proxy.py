@@ -235,6 +235,17 @@ def _parse_routes(spec):
 
 
 ROUTES = _parse_routes(os.environ.get("OWL_ROUTES", ""))
+# Direkt-Backends aus ~/.config/clau/backends.json (backends.py); OWL_ROUTES gewinnt.
+ROUTE_KEYS = {}
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import backends as _backends
+    for _k, _v in _backends.load().items():
+        ROUTES.setdefault(_k, (_v["url"], _v["model"]))
+        if _v["api_key"]:
+            ROUTE_KEYS[_v["url"]] = _v["api_key"]
+except Exception as _e:  # fehlende/kaputte Datei darf den Proxy nie stoppen
+    log(f"backends.json nicht geladen: {_e!r}")
 
 
 def backend_for(target):
@@ -242,6 +253,38 @@ def backend_for(target):
     url, name = ROUTES.get(target, (OWL_BASE, None))
     return url, name or target
 
+
+# ── Laufzeit-Eskalation (eskalation.py), Default aus, per /_clau/eskalation steuerbar ──
+def _esc_ctx(modell):
+    modell = str(modell)
+    if modell == str(OWL_MODEL):
+        return int(os.environ.get("OWL_CTX_LIMIT") or 0)
+    try:
+        c = _backends.load().get(modell)
+        if c and c["ctx"]:
+            return int(c["ctx"])
+    except Exception:
+        pass
+    return int(os.environ.get("OWL_ESC_TARGET_CTX") or 0)
+
+
+try:
+    from eskalation import Eskalation
+    ESC = Eskalation(OWL_MODEL, _esc_ctx, os.environ.get("OWL_ESC_FILE", ""), log)
+except Exception as _e:
+    log(f"Eskalation nicht geladen: {_e!r}")
+    ESC = None
+
+# ── Denkprotokoll / Fortschritt (aktivitaet.py), Default aus ──
+try:
+    from aktivitaet import Aktivitaet
+    AKT = Aktivitaet(OWL_MODEL, os.environ.get("OWL_TRACE_FILE", ""), os.environ.get("OWL_TRACE", "0") == "1")
+    if ESC is not None:
+        ESC.hook = lambda e: (AKT.ereignis("eskalation", art=e["typ"], detail=e.get("detail", ""), req=e.get("req"))
+                              if e["typ"] not in ("tool_fehler", "konfig") else None)
+except Exception as _e:
+    log(f"Aktivitaet nicht geladen: {_e!r}")
+    AKT = None
 
 SLOT_LIMITS_SPEC = os.environ.get("OWL_SLOT_LIMITS", "")
 SLOT_SEMS = _parse_slot_limits(SLOT_LIMITS_SPEC)
@@ -350,7 +393,7 @@ def tools_ant_to_oai(tools):
     } for t in tools]
 
 
-def oai_resp_to_ant(oai_resp, model_name, est_input_tokens=0):
+def oai_resp_to_ant(oai_resp, model_name, est_input_tokens=0, skala=1.0):
     choice = oai_resp.get("choices", [{}])[0]
     message = choice.get("message", {})
     content = []
@@ -386,7 +429,7 @@ def oai_resp_to_ant(oai_resp, model_name, est_input_tokens=0):
         "usage": {
             # Fällt das Backend ohne usage zurück, lieber die Schätzung als 0 —
             # 0 würde die Kontext-Anzeige der CLI wieder blind machen.
-            "input_tokens": usage.get("prompt_tokens") or est_input_tokens,
+            "input_tokens": int((usage.get("prompt_tokens") or est_input_tokens) * skala),
             "output_tokens": usage.get("completion_tokens", 0)
         }
     }
@@ -401,6 +444,9 @@ class StreamTranslator:
         # Schätzung bis das Backend echte prompt_tokens liefert (kommt erst
         # im letzten Chunk, message_start braucht den Wert aber sofort).
         self.input_tokens = input_tokens
+        self.akt = None   # Denkprotokoll (aktivitaet.Aktivitaet) und Schritt-Handle
+        self.h = None
+        self.skala = 1.0  # nach Eskalation: gemeldete Token auf das alte Fenster umrechnen
         self.msg_id = "msg_" + uuid.uuid4().hex[:24]
         self.next_index = 0
         self.thinking_started = False
@@ -417,6 +463,13 @@ class StreamTranslator:
         self.stop_reason = None
         self.ended = False
 
+    def _akt_tools(self):
+        """Tool-Aufrufe einmal ins Denkprotokoll (Argumente sind erst am Ende vollständig)."""
+        if self.akt is not None and not getattr(self, "_akt_t", False):
+            self._akt_t = True
+            for buf in self.tool_buffers.values():
+                self.akt.tool(self.h, buf["name"], buf["args"])
+
     def _evt(self, name, data):
         return f"event: {name}\ndata: {json.dumps(data)}\n\n"
 
@@ -428,7 +481,7 @@ class StreamTranslator:
                     "id": self.msg_id, "type": "message", "role": "assistant",
                     "content": [], "model": self.model,
                     "stop_reason": None, "stop_sequence": None,
-                    "usage": {"input_tokens": self.input_tokens, "output_tokens": 0}
+                    "usage": {"input_tokens": int(self.input_tokens * self.skala), "output_tokens": 0}
                 }
             }) +
             self._evt("ping", {"type": "ping"})
@@ -471,6 +524,8 @@ class StreamTranslator:
                 "type": "content_block_delta", "index": self.thinking_index,
                 "delta": {"type": "thinking_delta", "thinking": reasoning}
             }))
+            if self.akt is not None:
+                self.akt.delta(self.h, "denken", reasoning)
 
         text = delta.get("content") or ""
         if text:
@@ -491,6 +546,8 @@ class StreamTranslator:
                 "type": "content_block_delta", "index": self.text_index,
                 "delta": {"type": "text_delta", "text": text}
             }))
+            if self.akt is not None:
+                self.akt.delta(self.h, "text", text)
 
         # Tool calls
         for tc in delta.get("tool_calls", []):
@@ -568,6 +625,7 @@ class StreamTranslator:
                         "type": "content_block_stop", "index": buf["bidx"]
                     }))
             self.stop_reason = "tool_use" if (finish_reason == "tool_calls" or self.tool_buffers) else "end_turn"
+            self._akt_tools()
             # message_delta/message_stop bewusst NICHT hier: den usage-Chunk mit
             # prompt_tokens/completion_tokens schickt das Backend erst NACH dem
             # Chunk mit finish_reason. Wer hier abschließt, verliert beide Werte —
@@ -599,11 +657,14 @@ class StreamTranslator:
                 out.append(self._evt("content_block_stop", {
                     "type": "content_block_stop", "index": buf["bidx"]
                 }))
+        self._akt_tools()
+        if self.akt is not None:
+            self.akt.ende(self.h, self.stop_reason or "end_turn", self.input_tokens, self.output_tokens)
         out.append(self._evt("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": self.stop_reason or "end_turn",
                       "stop_sequence": None},
-            "usage": {"input_tokens": self.input_tokens,
+            "usage": {"input_tokens": int(self.input_tokens * self.skala),
                       "output_tokens": self.output_tokens}
         }))
         out.append(self._evt("message_stop", {"type": "message_stop"}))
@@ -656,6 +717,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _handle(self, req):
         model_name = req.get("model", "claude-sonnet-4-6")
         target = resolve_model(model_name)
+        if ESC is not None:
+            target = ESC.anfrage(req.get("messages"), req.get("system"), target)
+            self._skala = ESC.skala_fuer(target)
         stream = req.get("stream", False)
 
         base, backend_model = backend_for(target)
@@ -667,6 +731,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         }
         if req.get("max_tokens"):
             oai_payload["max_tokens"] = req["max_tokens"]
+        # 2026-11-09: Denktiefe der lokalen Modelle (Karten-Tor/llama.cpp) per Umgebung drosseln: OWL_REASONING_EFFORT=low|medium|xhigh
+        if os.environ.get("OWL_REASONING_EFFORT") and "reasoning_effort" not in oai_payload:
+            oai_payload["reasoning_effort"] = os.environ["OWL_REASONING_EFFORT"]
         tools = tools_ant_to_oai(req.get("tools"))
         if tools:
             oai_payload["tools"] = tools
@@ -676,6 +743,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._action = _is_new_action(req.get("messages", []))
         n_msgs = len(oai_payload["messages"])
         est_input_tokens = _estimate_input_tokens(oai_payload)
+        self._akt_h = AKT.anfrage(req.get("messages"), req.get("system"), target, est_input_tokens, self._action) if AKT is not None else None
         _dump_debug_payload(oai_payload)
         roles_summary = ", ".join(
             f"{m.get('role','?')}({len(str(m.get('content') or ''))}c)"
@@ -743,6 +811,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         # etwas unter unserem eigenen Timeout.
                         "X-Owl-Max-Wait": str(max(60, REQUEST_TIMEOUT - 60)),
                         **ACTIVITY_HEADERS,
+                        **({"Authorization": "Bearer " + ROUTE_KEYS[base]} if base in ROUTE_KEYS else {}),
                     },
                     stream=stream,
                     timeout=REQUEST_TIMEOUT
@@ -768,6 +837,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             status = e.response.status_code if e.response is not None else 502
             body_text = (e.response.text or "")[:2000] if e.response is not None else str(e)
             log(f"✗ Backend HTTP {status} (model={target}) nach {time.monotonic()-t0:.1f}s: {body_text!r}")
+            _esc_status = status
             if 400 <= status < 500:
                 dump_path = _dump_request_payload(oai_payload)
                 if dump_path:
@@ -782,6 +852,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             ctx_msg = _ctx_overflow_message(
                 body_text, est_input_tokens,
                 OWL_CTX_LIMIT if str(target) == str(OWL_MODEL) else 0)
+            if ESC is not None:
+                ESC.melde("ueberlauf" if ctx_msg else "backend_fehler", f"HTTP {_esc_status}")
             if ctx_msg:
                 log(f"  → als Kontext-Überlauf an Claude Code gemeldet: {ctx_msg[:120]}")
                 self._fail(400, ctx_msg, sse)
@@ -797,6 +869,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # Kein HTTP-Response da (Verbindungsabbruch, Timeout, ...) — das ist
             # tatsächlich transient, 502 bleibt hier angemessen.
             log(f"✗ Request-Fehler (model={target}) nach {time.monotonic()-t0:.1f}s: {e!r}")
+            if ESC is not None:
+                ESC.melde("backend_fehler", type(e).__name__)
             self._fail(502, f"owlAPI error: {e}", sse)
             return
         log(f"← Header nach {time.monotonic()-t0:.1f}s, status={resp.status_code}, model={target}")
@@ -816,12 +890,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _single(self, owl_resp, model_name, est_input_tokens=0, target=None):
         try:
-            ant = oai_resp_to_ant(owl_resp.json(), model_name, est_input_tokens)
-            record_usage(target or OWL_MODEL, ant["usage"]["input_tokens"],
+            ant = oai_resp_to_ant(owl_resp.json(), model_name, est_input_tokens, getattr(self, "_skala", 1.0))
+            _u = owl_resp.json().get("usage") or {}
+            record_usage(target or OWL_MODEL, _u.get("prompt_tokens") or est_input_tokens,
                          ant["usage"]["output_tokens"],
                          real=bool((owl_resp.json().get("usage") or {}).get("prompt_tokens")),
                          action=self._action)
             body = json.dumps(ant).encode()
+            _h = getattr(self, "_akt_h", None)
+            if AKT is not None and _h is not None:
+                _m = ((owl_resp.json().get("choices") or [{}])[0]).get("message") or {}
+                AKT.delta(_h, "denken", _m.get("reasoning_content") or "")
+                AKT.delta(_h, "text", _m.get("content") or "")
+                for _tc in _m.get("tool_calls") or []:
+                    AKT.tool(_h, (_tc.get("function") or {}).get("name", ""), (_tc.get("function") or {}).get("arguments", ""))
+                AKT.ende(_h, "single", _u.get("prompt_tokens") or est_input_tokens, ant["usage"]["output_tokens"])
         except Exception:
             self.send_error(502, "Bad owlAPI response")
             return
@@ -834,8 +917,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
+        _tr = StreamTranslator(model_name, est_input_tokens, target)
+        _tr.skala = getattr(self, "_skala", 1.0)
+        _tr.akt, _tr.h = AKT, getattr(self, "_akt_h", None)
         sse = {
-            "tr": StreamTranslator(model_name, est_input_tokens, target),
+            "tr": _tr,
             "lock": threading.Lock(),
             "stop": threading.Event(),
             "dead": threading.Event(),
@@ -892,6 +978,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     err = payload["error"]
                     err_msg = err.get("message") if isinstance(err, dict) else str(err)
                     log(f"  Backend-Fehler im Stream nach {time.monotonic()-t0:.1f}s: {err_msg!r}")
+                    if ESC is not None:
+                        ESC.melde("backend_fehler", "Stream: " + str(err_msg)[:60])
                     self._stream_abort(tr, f"[owlAPI Fehler: {err_msg}]", write_lock)
                     return
                 try:
@@ -914,11 +1002,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 f"cached={tr.cached_tokens if tr.cached_tokens is not None else '?'} Tokens")
         except BrokenPipeError:
             log(f"  Client trennte Verbindung nach {time.monotonic()-t0:.1f}s ({n_lines} Zeilen)")
+            if ESC is not None:
+                ESC.melde("abbruch", f"nach {time.monotonic()-t0:.0f}s")
         except requests.exceptions.RequestException as e:
             # Backend-Verbindung riss mitten im Stream ab (Timeout, Reset, ...) —
             # sauberen Fehlertext + Stream-Ende senden statt Client mit toter
             # Verbindung hängen zu lassen (führte sonst zu doppeltem Retry + 502).
             log(f"  Backend-Verbindung riss nach {time.monotonic()-t0:.1f}s ab ({n_lines} Zeilen): {e!r}")
+            if ESC is not None:
+                ESC.melde("backend_fehler", "Verbindung abgerissen")
             if sse is not None:
                 self._stream_abort(sse["tr"], f"[owlAPI-Verbindung abgebrochen: {e}]", sse["lock"])
         finally:
@@ -955,10 +1047,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
             evts.append(tr._evt("message_delta", {
                 "type": "message_delta",
                 "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                "usage": {"input_tokens": tr.input_tokens,
+                "usage": {"input_tokens": int(tr.input_tokens * tr.skala),
                           "output_tokens": tr.output_tokens}
             }))
             evts.append(tr._evt("message_stop", {"type": "message_stop"}))
+            if tr.akt is not None:
+                tr.akt.ende(tr.h, "fehler/abbruch", tr.input_tokens, tr.output_tokens)
             tr.ended = True  # finish() soll nicht nochmal abschließen
             with write_lock:
                 self.wfile.write("".join(evts).encode())
@@ -984,6 +1078,92 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+CTL_TOKEN = __import__("secrets").token_hex(16)
+
+
+class ControlHandler(BaseHTTPRequestHandler):
+    """Eigener Listener für die Steuerung von außen (blockiert nie hinter einem langen Stream).
+    Jeder Aufruf braucht das Token aus der Registry-Datei (Header X-Clau-Token, Rechte 0600)."""
+    def log_message(self, fmt, *args):
+        pass
+
+    def _send(self, code, obj):
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _auth(self):
+        import hmac
+        if not hmac.compare_digest(self.headers.get("X-Clau-Token", ""), CTL_TOKEN):
+            self._send(403, {"fehler": "Token fehlt oder falsch (steht in ~/.cache/clau/proxies/<port>.json)"})
+            return False
+        return True
+
+    def do_GET(self):
+        if not self._auth():
+            return
+        from urllib.parse import urlparse, parse_qs
+        u = urlparse(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if u.path == "/aktivitaet" and AKT is not None:
+            arten = [a for a in q.get("arten", "").split(",") if a]
+            self._send(200, AKT.lesen(int(q.get("seit", 0)), arten, int(q.get("max", 200)), min(30.0, float(q.get("warte", 0)))))
+        elif u.path == "/fortschritt" and AKT is not None:
+            self._send(200, AKT.fortschritt(int(q.get("n", 8))))
+        elif u.path == "/stream" and AKT is not None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            seit = int(q.get("seit", AKT.seq))
+            try:
+                while True:
+                    r = AKT.lesen(seit, None, 0, 15.0)
+                    if not r["ereignisse"]:
+                        self.wfile.write(b": ping\n\n")
+                    for e in r["ereignisse"]:
+                        self.wfile.write(("data: " + json.dumps(e, ensure_ascii=False) + "\n\n").encode())
+                    seit = r["naechste"]
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        else:
+            self._send(200, ESC.status() if ESC is not None else {"fehler": "Eskalation nicht geladen"})
+
+    def do_POST(self):
+        if not self._auth():
+            return
+        try:
+            d = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            if self.path.startswith("/trace"):
+                self._send(200, {"aktiv": AKT.setze(d.get("aktiv", True))} if AKT is not None else {"fehler": "nicht geladen"})
+            else:
+                self._send(200, ESC.setze(d))
+        except Exception as e:
+            self._send(400, {"fehler": str(e)})
+
+
+PROXY_REG_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "clau", "proxies")
+
+
+def _registrieren(port, ctl_port):
+    path = os.path.join(PROXY_REG_DIR, f"{port}.json")
+    try:
+        os.makedirs(PROXY_REG_DIR, mode=0o700, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # Token nur für den eigenen Benutzer lesbar
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"port": port, "steuerung": ctl_port, "token": CTL_TOKEN, "pid": os.getpid(), "modell": OWL_MODEL,
+                       "cwd": os.environ.get("OWL_REG_CWD") or os.getcwd(), "gestartet": time.time(),
+                       "esc_datei": os.environ.get("OWL_ESC_FILE", ""), "trace_datei": os.environ.get("OWL_TRACE_FILE", "")}, f)
+    except OSError:
+        return
+    import atexit
+    atexit.register(lambda: os.path.exists(path) and os.remove(path))
+
+
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv_cls = ThreadingHTTPServer if THREADED else HTTPServer
@@ -993,7 +1173,14 @@ def main():
         extra += " routes=" + ",".join(f"{k}→{u}" for k, (u, _) in ROUTES.items())
     if THREADED or SLOT_LIMITS_SPEC:
         extra += f" routing=owl-<ID> threaded={THREADED} slots={SLOT_LIMITS_SPEC or '-'}"
+    if ESC is not None or AKT is not None:
+        ctl = ThreadingHTTPServer(("127.0.0.1", 0), ControlHandler)
+        threading.Thread(target=ctl.serve_forever, daemon=True).start()
+        _registrieren(port, ctl.server_address[1])
+        extra += f" eskalation={'an' if ESC and ESC.cfg['aktiv'] else 'aus'} trace={'an' if AKT and AKT.aktiv else 'aus'} steuerung=:{ctl.server_address[1]}"
     print(f"owl_proxy :{port} → {OWL_BASE} model={OWL_MODEL}{extra}", flush=True)
+    import signal
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # damit atexit (Registry) läuft
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
