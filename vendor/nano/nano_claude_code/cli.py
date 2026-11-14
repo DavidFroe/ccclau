@@ -1124,190 +1124,6 @@ def _setup_readline() -> None:
 
 # ── Interactive REPL ──────────────────────────────────────────────────────
 
-MASCOT_CONFIG_PATH = Path.home() / ".config" / "nano-claude-code" / "mascot"
-
-MASCOT_NAMES = ["duck", "cat", "bunny", "frog", "penguin"]
-
-
-def _get_mascot_art() -> dict[str, list[tuple[str, str]]]:
-    """Return (plain, colored) art rows for each mascot. Each plain row is 17 chars."""
-    r = "\033[0m"
-    ey = "\033[38;5;255m"
-
-    yw = "\033[38;5;220m"; dk = "\033[38;5;178m"; ob = "\033[38;5;208m"
-    duck = [
-        ("      ▄██▄       ", f"      {dk}▄{yw}██{dk}▄{r}       "),
-        ("     █ ●█▀▀      ", f"     {yw}█ {ey}●{yw}█{ob}▀▀{r}      "),
-        ("     ▀█████      ", f"     {dk}▀{yw}█████{r}      "),
-        ("      ▀██▀       ", f"      {dk}▀{yw}██{dk}▀{r}       "),
-    ]
-
-    cp = "\033[38;5;183m"; cd = "\033[38;5;139m"; pk = "\033[38;5;217m"
-    cat = [
-        ("    ▄▀    ▀▄     ", f"    {cd}▄▀    ▀▄{r}     "),
-        ("    █ ●  ● █     ", f"    {cp}█ {ey}●  ●{cp} █{r}     "),
-        ("    █  ▽▽  █     ", f"    {cp}█  {pk}▽▽{cp}  █{r}     "),
-        ("    ▀██████▀     ", f"    {cd}▀{cp}██████{cd}▀{r}     "),
-    ]
-
-    bw = "\033[38;5;255m"; bd = "\033[38;5;249m"
-    bunny = [
-        ("     ▄█▄  ▄█▄    ", f"     {bd}▄{bw}█{pk}▄{r}  {bd}▄{bw}█{pk}▄{r}    "),
-        ("     ██  ██      ", f"     {bw}██  ██{r}      "),
-        ("     █●▽▽●█      ", f"     {bw}█{ey}●{pk}▽▽{ey}●{bw}█{r}      "),
-        ("     ▀████▀      ", f"     {bd}▀{bw}████{bd}▀{r}      "),
-    ]
-
-    fg = "\033[38;5;82m"; fd = "\033[38;5;34m"; fw = "\033[38;5;226m"
-    frog = [
-        ("    ●▄▄▄▄▄▄●     ", f"    {fw}●{fd}▄▄▄▄▄▄{fw}●{r}     "),
-        ("    ████████     ", f"    {fg}████████{r}     "),
-        ("    █ ▽  ▽ █     ", f"    {fg}█ {fw}▽  ▽ {fg}█{r}     "),
-        ("    ▀██████▀     ", f"    {fd}▀{fg}██████{fd}▀{r}     "),
-    ]
-
-    pb = "\033[38;5;236m"; pw = "\033[38;5;255m"; po = "\033[38;5;208m"
-    penguin = [
-        ("      ▄██▄       ", f"      {pb}▄{pw}██{pb}▄{r}       "),
-        ("     █▀●●▀█      ", f"     {pb}█{pw}▀{ey}●●{pw}▀{pb}█{r}      "),
-        ("     █ ▄▄ █      ", f"     {pb}█ {pw}▄▄ {pb}█{r}      "),
-        ("      ▀██▀       ", f"      {pb}▀{po}██{pb}▀{r}       "),
-    ]
-
-    return {"duck": duck, "cat": cat, "bunny": bunny, "frog": frog, "penguin": penguin}
-
-
-def _load_mascot() -> str | None:
-    """Load saved mascot preference."""
-    try:
-        return MASCOT_CONFIG_PATH.read_text().strip()
-    except OSError:
-        return None
-
-
-def _save_mascot(name: str) -> None:
-    """Save mascot preference."""
-    MASCOT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    MASCOT_CONFIG_PATH.write_text(name + "\n")
-
-
-def _pick_mascot() -> str:
-    """Interactive mascot picker shown on first run."""
-    r = "\033[0m"; b = "\033[1m"; d = "\033[2m"
-    art = _get_mascot_art()
-    print()
-    print(f"  {b}Pick your coder:{r}")
-    print()
-    for i, name in enumerate(MASCOT_NAMES, 1):
-        rows = art[name]
-        label = f"  {b}{i}. {name.capitalize()}{r}"
-        print(label)
-        for _, colored in rows:
-            print(f"  {colored}")
-    print()
-    while True:
-        try:
-            choice = input(f"  Enter number (1-{len(MASCOT_NAMES)}) [{d}default: 1{r}]: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            choice = "1"
-        if choice == "":
-            choice = "1"
-        if choice.isdigit() and 1 <= int(choice) <= len(MASCOT_NAMES):
-            selected = MASCOT_NAMES[int(choice) - 1]
-            _save_mascot(selected)
-            print(f"\n  Saved! You picked {b}{selected.capitalize()}{r}. "
-                  f"{d}(change anytime with --mascot){r}\n")
-            return selected
-        print(f"  Please enter a number between 1 and {len(MASCOT_NAMES)}.")
-
-
-def _print_banner(provider: str, provider_label: str, model: str, perm_mode: str,
-                  tools_count: int, resume_state: dict | None = None,
-                  state: AgentState | None = None,
-                  session_title: str = "", skill_count: int = 0,
-                  mascot: str | None = None) -> None:
-    """Print the startup banner with chosen mascot."""
-    g1 = "\033[38;5;40m"   # bright green (title text)
-    mg = "\033[38;5;176m"  # muted mauve
-    wh = "\033[38;5;252m"  # warm white
-    b  = "\033[1m"
-    r  = "\033[0m"
-    d  = "\033[2m"
-    y  = "\033[38;5;222m"  # soft gold
-    gn = "\033[38;5;114m"  # sage green
-    cy = "\033[38;5;116m"  # muted teal
-    bx = "\033[38;5;240m"  # box border
-
-    tools_plain = f"{tools_count} built-in"
-    tools_label = f"{gn}{tools_count}{r} built-in"
-    if skill_count > 0:
-        tools_plain += f" + {skill_count} skills"
-        tools_label += f" + {mg}{skill_count}{r} skills"
-
-    cwd_str = str(Path.cwd())
-    g = " " * 17
-
-    if not mascot or mascot not in MASCOT_NAMES:
-        mascot = "duck"
-    art_rows = _get_mascot_art()[mascot]
-
-    info_lines = [
-        ("nano claude code", f"{g1}{b}nano claude code{r}"),
-        ("✦ Nano AI Coding Agent ✦", f"{g1}✦ Nano AI Coding Agent ✦{r}"),
-        (f"Provider     {provider}", f"{wh}Provider{r}     {provider_label}"),
-        (f"Model        {model}", f"{wh}Model{r}        {cy}{b}{model}{r}"),
-    ]
-
-    rows: list[tuple[str, str]] = []
-    rows.append(("", ""))
-    for (art_plain, art_colored), (info_plain, info_colored) in zip(art_rows, info_lines):
-        rows.append((art_plain + info_plain, art_colored + info_colored))
-
-    rows.append((
-        f"{g}Tools        {tools_plain}",
-        f"{g}{wh}Tools{r}        {tools_label}",
-    ))
-    rows.append((
-        f"{g}CWD          {cwd_str}",
-        f"{g}{wh}CWD{r}          {d}{cwd_str}{r}",
-    ))
-    if session_title:
-        rows.append((
-            f"{g}Session      {session_title}",
-            f"{g}{wh}Session{r}      {b}{session_title}{r}",
-        ))
-    if resume_state and state:
-        n_msgs = len(state.messages)
-        res_txt = f"{n_msgs} messages, {state.turn_count} turns"
-        rows.append((
-            f"{g}Resumed      {res_txt}",
-            f"{g}{wh}Resumed{r}      {y}{res_txt}{r}",
-        ))
-    rows.append(("", ""))
-    rows.append((
-        "  Type / to see commands  ·  Tab to select",
-        f"  Type {b}/{r} to see commands  ·  {b}Tab{r} to select",
-    ))
-    rows.append((
-        "  /help for all commands   ·  Ctrl+C to cancel",
-        f"  {b}/help{r} for all commands   ·  {b}Ctrl+C{r} to cancel",
-    ))
-
-    inner_w = max(len(plain) for plain, _ in rows) + 2
-    if inner_w < 50:
-        inner_w = 50
-
-    bar = "─" * inner_w
-
-    print()
-    print(f"  {bx}╭{bar}╮{r}")
-    for plain, colored in rows:
-        padding = " " * (inner_w - len(plain))
-        print(f"  {bx}│{r}{colored}{padding}{bx}│{r}")
-    print(f"  {bx}╰{bar}╯{r}")
-    print()
-
-
 def run_repl(config: dict, resume_state: dict | None = None) -> int:
     import anthropic as anth
 
@@ -1383,16 +1199,12 @@ def run_repl(config: dict, resume_state: dict | None = None) -> int:
         "proxy": _clr(api_env.get("base_url", "proxy"), "yellow"),
     }.get(provider, _clr(provider, "yellow"))
 
-    mascot_name = config.get("_mascot")
-    if not mascot_name:
-        mascot_name = _load_mascot()
-    if not mascot_name:
-        mascot_name = _pick_mascot()
+    from nano_claude_code import ui
 
-    _print_banner(provider, provider_label, model, perm_mode, len(tools),
-                  resume_state=resume_state, state=state,
-                  session_title=session_title, skill_count=skill_count,
-                  mascot=mascot_name)
+    _resumed = f"{len(state.messages)} messages, {state.turn_count} turns" if (resume_state and state.messages) else ""
+    ui.print_banner(model, provider, len(tools), skill_count=skill_count,
+                    session_title=session_title, resumed=_resumed)
+    ui.STATUS.update(model=model, mode=perm_mode, ctx="")
 
     last_ctrl_c = 0.0
     while True:
@@ -1400,11 +1212,14 @@ def run_repl(config: dict, resume_state: dict | None = None) -> int:
             cwd_short = Path.cwd().name
             if pt_session:
                 from prompt_toolkit.formatted_text import HTML
-                prompt_html = HTML(f"\n<style fg='#666666'>[{cwd_short}]</style> <style fg='#00d4ff'><b>❯ </b></style>")
-                user_input = pt_session.prompt(prompt_html).strip()
+                from prompt_toolkit.formatted_text import ANSI
+                ui.STATUS.update(model=config.get("model", model), mode=config.get("permission_mode", perm_mode))
+                user_input = pt_session.prompt(
+                    ANSI(ui.prompt_plain()),
+                    bottom_toolbar=lambda: ANSI(ui.c(ui.status_text(), ui.GREY)),
+                ).strip()
             else:
-                prompt = _clr(f"\n[{cwd_short}] ", "dim") + _clr("❯ ", "cyan", "bold")
-                user_input = input(prompt).strip()
+                user_input = input(ui.prompt_plain()).strip()
             last_ctrl_c = 0.0
         except EOFError:
             print(_clr("\nGoodbye!", "green"))
@@ -1434,7 +1249,10 @@ def run_repl(config: dict, resume_state: dict | None = None) -> int:
 
         system_prompt = build_system_prompt(cwd=str(Path.cwd()), bare=config.get("bare", False))
 
-        print(_clr("\n╭─ Assistant ", "dim") + _clr("●", "green") + _clr(" ───────────────────────", "dim"))
+        print()
+        textout = ui.TextOut()
+        spinner = ui.Spinner()
+        turn_t0 = time.monotonic()
 
         thinking_started = False
         msg_count_before = len(state.messages)
@@ -1458,14 +1276,21 @@ def run_repl(config: dict, resume_state: dict | None = None) -> int:
                     thinking=thinking, thinking_budget=thinking_budget,
                     permission_mode=perm_mode,
                 )
-            for event in event_iter:
+            def _lab(ev):
+                if isinstance(ev, ToolStart):
+                    return f"Running {ev.name}"
+                if isinstance(ev, ToolEnd):
+                    return "Thinking"
+                return None
+            spinner.label = "Thinking"
+            for event in ui.with_spinner(event_iter, spinner, _lab):
                 if isinstance(event, CompactionNotice):
                     print(_clr(
                         f"\n  [context compacted: {event.old_count} → {event.new_count} messages]",
                         "yellow",
                     ))
                 elif isinstance(event, TextChunk):
-                    _stream_text(event.text)
+                    textout.write(event.text)
                 elif isinstance(event, ThinkingChunk):
                     if verbose:
                         if not thinking_started:
@@ -1473,29 +1298,24 @@ def run_repl(config: dict, resume_state: dict | None = None) -> int:
                             thinking_started = True
                         print(_clr(event.text, "dim"), end="", flush=True)
                 elif isinstance(event, ToolStart):
-                    _flush_response()
+                    textout.end_block()
                     desc = _tool_desc(event.name, event.inputs)
-                    print(_clr(f"\n  ⚙ {desc}", "dim", "cyan"), flush=True)
+                    print(ui.tool_line(desc), flush=True)
                     if verbose:
                         preview = json.dumps(event.inputs, ensure_ascii=False)[:200]
                         print(_clr(f"    inputs: {preview}", "dim"))
                 elif isinstance(event, PermissionRequest):
-                    event.granted = _ask_permission(event.description, config)
+                    spinner.stop()
+                    textout.end_block()
+                    event.granted = ui.ask_permission(event.description, config)
                     perm_mode = config.get("permission_mode", perm_mode)
                 elif isinstance(event, ToolEnd):
-                    if not event.permitted:
-                        print(_clr(f"  ✗ Denied", "dim", "red"), flush=True)
-                    elif isinstance(event.result, str) and event.result.startswith("Error:"):
-                        print(_clr(f"  ✗ {event.result[:120]}", "dim", "red"), flush=True)
-                    else:
-                        result_str = event.result if isinstance(event.result, str) else str(event.result)
-                        lines = result_str.count("\n") + 1
-                        size = len(result_str)
-                        print(_clr(f"  ✓ {event.name} → {lines} lines ({size} chars)", "dim", "green"), flush=True)
+                    print(ui.tool_result_line(event.name, event.result, event.permitted), flush=True)
                     if verbose and event.permitted and isinstance(event.result, str) and not event.result.startswith("Error:"):
                         preview = event.result[:500].replace("\n", "\n    ")
                         print(_clr(f"    {preview}", "dim"))
                 elif isinstance(event, TurnDone):
+                    ui.STATUS["ctx"] = f"ctx {event.input_tokens/1000:.1f}k"
                     if verbose:
                         cost = calc_cost(model, event.input_tokens, event.output_tokens)
                         cache_info = ""
@@ -1515,9 +1335,9 @@ def run_repl(config: dict, resume_state: dict | None = None) -> int:
             if len(state.messages) > msg_count_before:
                 state.messages = state.messages[:msg_count_before]
 
-        _flush_response()
-        print(_clr("╰──────────────────────────────────────────────", "dim"))
-        print()
+        spinner.stop()
+        textout.end_block()
+        print(ui.c(f"  ({int(time.monotonic() - turn_t0)}s)", ui.GREY))
 
         # Auto-generate session title on first real interaction
         if not config.get("_session_title") and state.messages:
@@ -1637,8 +1457,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-n", "--name", default=None,
                    help="Set a display name/title for this session (shown in /load)")
     p.add_argument("--version", action="store_true", help="Print version and exit")
-    p.add_argument("--mascot", default=None, choices=MASCOT_NAMES,
-                   help="Choose startup mascot (duck, cat, bunny, frog, penguin)")
+    p.add_argument("--mascot", default=None, help=argparse.SUPPRESS)  # entfernt, bleibt als No-op für alte Aufrufe
     return p
 
 
@@ -1695,9 +1514,6 @@ def main(argv: list[str] | None = None) -> int:
         config["permission_mode"] = args.permission_mode
     if args.name:
         config["_session_title"] = args.name.strip()
-    if args.mascot:
-        _save_mascot(args.mascot)
-        config["_mascot"] = args.mascot
 
     prompt = args.print_prompt
     if not prompt and args.prompt:
