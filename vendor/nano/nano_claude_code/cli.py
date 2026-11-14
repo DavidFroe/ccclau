@@ -12,6 +12,7 @@ import atexit
 import json
 import os
 import readline
+import re
 import sys
 import time
 from pathlib import Path
@@ -1125,6 +1126,49 @@ def _setup_readline() -> None:
 # ── Interactive REPL ──────────────────────────────────────────────────────
 
 def run_repl(config: dict, resume_state: dict | None = None) -> int:
+    from nano_claude_code.screen import SCREEN
+    try:
+        return _run_repl(config, resume_state)
+    finally:
+        SCREEN.watch_stop()
+        SCREEN.stop()
+
+
+def _slash_complete(text: str):
+    """Vorschläge für das Eingabefeld: (neuer Text, Beschreibung)."""
+    t = text.lstrip()
+    if " " in t:
+        cmd, _, partial = t.partition(" ")
+        return [(f"{cmd} {c}", "") for c in _ARG_COMPLETIONS.get(cmd, []) if c.startswith(partial)]
+    return [(f"/{n}", f"{cat} · {desc}") for n, (cat, desc) in _CMD_META.items() if f"/{n}".startswith(t)]
+
+
+def _load_history() -> list[str]:
+    out: list[str] = []
+    try:
+        cur: list[str] = []
+        for ln in HISTORY_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
+            if ln.startswith("+"):
+                cur.append(ln[1:])
+            elif cur:
+                out.append("\n".join(cur)); cur = []
+        if cur:
+            out.append("\n".join(cur))
+    except OSError:
+        pass
+    return out[-500:]
+
+
+def _save_history(text: str) -> None:
+    try:
+        ensure_dirs()
+        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+            f.write(f"\n# {time.strftime('%Y-%m-%d %H:%M:%S')}\n" + "".join(f"+{l}\n" for l in text.split("\n")))
+    except OSError:
+        pass
+
+
+def _run_repl(config: dict, resume_state: dict | None = None) -> int:
     import anthropic as anth
 
     api_env = resolve_api_env(config.get("api_key"))
@@ -1202,15 +1246,61 @@ def run_repl(config: dict, resume_state: dict | None = None) -> int:
     from nano_claude_code import ui
 
     _resumed = f"{len(state.messages)} messages, {state.turn_count} turns" if (resume_state and state.messages) else ""
-    ui.print_banner(model, provider, len(tools), skill_count=skill_count,
-                    session_title=session_title, resumed=_resumed)
+    from nano_claude_code.screen import SCREEN
+    from nano_claude_code import agent as _agent_mod
+
+    def _api_label() -> str:
+        lab = os.environ.get("NANO_API_LABEL", "").strip()
+        if lab:
+            return lab
+        base = str(api_env.get("base_url", "") or "")
+        host = re.sub(r"^https?://", "", base).rstrip("/")
+        return {"anthropic": "Anthropic API", "openrouter": "OpenRouter"}.get(provider, host or provider)
+
+    def _effort_label() -> str:
+        if config.get("thinking"):
+            return f"thinking {int(config.get('thinking_budget', 10_000)) // 1000}k"
+        return "off"
+
+    def _ctx_used() -> int:
+        return state.last_input_tokens or (_agent_mod._estimate_message_tokens(state.messages) if state.messages else 0)
+
+    try:
+        _tool_names = [t.get("name", "") for t in tools]
+    except Exception:
+        _tool_names = []
+    try:
+        _skill_names = sorted(get_skills().keys())
+    except Exception:
+        _skill_names = []
+    _screen_on = SCREEN.start(
+        {"model": model, "api": _api_label(), "effort": _effort_label(), "mode": perm_mode,
+         "folder": ui._home_short(Path.cwd()), "tools": _tool_names, "skills": _skill_names,
+         "session": session_title, "resumed": _resumed},
+        ctx_used=_ctx_used, ctx_max=_agent_mod.CONTEXT_WINDOW_TOKENS)
+    if _screen_on:
+        SCREEN.start_ticker()
+        print(ui.c("  /help for commands · Tab completes · Esc interrupts · Ctrl+C twice exits", ui.GREY))
+        hist = _load_history()
+    else:
+        ui.print_banner(model, provider, len(tools), skill_count=skill_count,
+                        session_title=session_title, resumed=_resumed)
     ui.STATUS.update(model=model, mode=perm_mode, ctx="")
 
     last_ctrl_c = 0.0
     while True:
         try:
             cwd_short = Path.cwd().name
-            if pt_session:
+            if _screen_on:
+                SCREEN.update_info(model=config.get("model", model), mode=config.get("permission_mode", perm_mode),
+                                   effort=_effort_label(), session=config.get("_session_title", ""))
+                SCREEN.set_state("idle")
+                user_input = SCREEN.read_line(hist, _slash_complete).strip()
+                if user_input:
+                    hist.append(user_input)
+                    _save_history(user_input)
+                    print("\n" + ui.c("❯ ", ui.BOLD, ui.ACCENT) + user_input)
+            elif pt_session:
                 from prompt_toolkit.formatted_text import HTML
                 from prompt_toolkit.formatted_text import ANSI
                 ui.STATUS.update(model=config.get("model", model), mode=config.get("permission_mode", perm_mode))
@@ -1283,6 +1373,11 @@ def run_repl(config: dict, resume_state: dict | None = None) -> int:
                     return "Thinking"
                 return None
             spinner.label = "Thinking"
+            _cur_inputs: dict = {}
+            _cur_name = ""
+            if _screen_on:
+                SCREEN.set_state("prefill")
+                SCREEN.watch_start()
             for event in ui.with_spinner(event_iter, spinner, _lab):
                 if isinstance(event, CompactionNotice):
                     print(_clr(
@@ -1290,8 +1385,12 @@ def run_repl(config: dict, resume_state: dict | None = None) -> int:
                         "yellow",
                     ))
                 elif isinstance(event, TextChunk):
+                    if _screen_on:
+                        SCREEN.set_state("streaming"); SCREEN.add_out(len(event.text))
                     textout.write(event.text)
                 elif isinstance(event, ThinkingChunk):
+                    if _screen_on:
+                        SCREEN.set_state("reasoning"); SCREEN.add_out(len(event.text))
                     if verbose:
                         if not thinking_started:
                             print(_clr("\n  [thinking]", "dim"))
@@ -1299,6 +1398,10 @@ def run_repl(config: dict, resume_state: dict | None = None) -> int:
                         print(_clr(event.text, "dim"), end="", flush=True)
                 elif isinstance(event, ToolStart):
                     textout.end_block()
+                    _cur_inputs = event.inputs if isinstance(event.inputs, dict) else {}
+                    _cur_name = event.name
+                    if _screen_on:
+                        SCREEN.set_state(f"tool:{event.name}")
                     desc = _tool_desc(event.name, event.inputs)
                     print(ui.tool_line(desc), flush=True)
                     if verbose:
@@ -1308,9 +1411,13 @@ def run_repl(config: dict, resume_state: dict | None = None) -> int:
                     spinner.stop()
                     textout.end_block()
                     event.granted = ui.ask_permission(event.description, config)
+                    if _screen_on:
+                        SCREEN.set_state(f"tool:{_cur_name}" if event.granted else "prefill")
                     perm_mode = config.get("permission_mode", perm_mode)
                 elif isinstance(event, ToolEnd):
-                    print(ui.tool_result_line(event.name, event.result, event.permitted), flush=True)
+                    print(ui.tool_result(event.name, _cur_inputs, event.result, event.permitted), flush=True)
+                    if _screen_on:
+                        SCREEN.set_state("prefill")
                     if verbose and event.permitted and isinstance(event.result, str) and not event.result.startswith("Error:"):
                         preview = event.result[:500].replace("\n", "\n    ")
                         print(_clr(f"    {preview}", "dim"))
@@ -1336,6 +1443,9 @@ def run_repl(config: dict, resume_state: dict | None = None) -> int:
                 state.messages = state.messages[:msg_count_before]
 
         spinner.stop()
+        if _screen_on:
+            SCREEN.watch_stop()
+            SCREEN.set_state("idle")
         textout.end_block()
         print(ui.c(f"  ({int(time.monotonic() - turn_t0)}s)", ui.GREY))
 

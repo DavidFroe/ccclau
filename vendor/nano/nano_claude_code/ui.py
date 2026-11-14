@@ -129,6 +129,8 @@ class TextOut:
         self.fresh = True        # am Zeilenanfang, Zeilenart noch offen
         self.mode: str | None = None   # None | "h" | "q" | "code"
         self.in_code = False
+        self.lang_name = ""
+        self.lang = ""
         self.open = False        # Antwortblock begonnen (Punkt schon gesetzt)
 
     # -- Ausgabe ------------------------------------------------------
@@ -161,10 +163,12 @@ class TextOut:
                             return
                         self.in_code = not self.in_code
                         lang = body[3:].strip()
+                        self.lang_name = _LANG.get(lang.lower().split()[0], "") if self.in_code and lang else ""
                         self._emit(self._prefix() + c("┄┄ " + (lang or "code") if self.in_code else "┄┄", GREY) + "\n")
                         self.buf = self.buf[nl + 1:] if nl >= 0 else ""
                         continue
                     self.mode = "code"
+                    self.lang = self.lang_name
                 elif re.match(r"^#{1,6} ", body):
                     self.mode = "h"
                     self.buf = re.sub(r"^(\s*)#{1,6} ", r"\1", self.buf, count=1)
@@ -205,7 +209,7 @@ class TextOut:
         if not text:
             return
         if self.mode == "code":
-            self._emit(c(text, "\033[38;5;180m"))
+            self._emit(highlight(text, self.lang) if self.lang else c(text, "\033[38;5;180m"))
         elif self.mode == "h":
             self._emit(c(_plain(text), BOLD, ACCENT))
         elif self.mode == "q":
@@ -232,6 +236,127 @@ def tool_line(desc: str) -> str:
     return "\n" + c("▪ ", ACCENT) + c(name, BOLD) + (c("(" + rest, GREY) if rest else "")
 
 
+_KW = {
+    "py": "def class return if elif else for while try except finally with as import from in not and or is None True False "
+          "lambda yield raise pass break continue async await self global nonlocal assert del",
+    "js": "function const let var return if else for while try catch finally new class extends import export from default "
+          "async await null undefined true false this throw typeof switch case break continue of in",
+    "sh": "if then else elif fi for while do done case esac function in local export return echo cd exit set unset",
+    "go": "func package import return if else for range var const type struct interface map chan go defer switch case nil true false",
+    "rs": "fn let mut pub use mod struct enum impl trait return if else for while match loop in as self Self true false",
+    "c": "int char void long short float double unsigned struct enum typedef return if else for while switch case break "
+         "continue static const sizeof NULL include define",
+}
+_LANG = {"py": "py", "python": "py", "js": "js", "ts": "js", "jsx": "js", "tsx": "js", "javascript": "js", "typescript": "js",
+         "sh": "sh", "bash": "sh", "zsh": "sh", "go": "go", "rs": "rs", "rust": "rs", "c": "c", "h": "c", "cpp": "c", "cc": "c",
+         "java": "js", "json": "js"}
+_HL = {}
+
+
+def lang_of(name: str) -> str:
+    return _LANG.get(name.lower().lstrip(".").rsplit(".", 1)[-1], "")
+
+
+def highlight(line: str, lang: str) -> str:
+    """Sehr leichte Syntaxfärbung (Kommentar, Zeichenkette, Zahl, Schlüsselwort) für eine Zeile."""
+    if not _TTY or not lang:
+        return line
+    if lang not in _HL:
+        kw = "|".join(sorted(_KW.get(lang, "").split(), key=len, reverse=True)) or "(?!)"
+        com = r"#.*$" if lang in ("py", "sh") else r"//.*$"
+        _HL[lang] = re.compile(
+            r"(?P<com>" + com + r")|(?P<str>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')|(?P<num>\b\d[\d_.]*\b)|(?P<kw>\b(?:" + kw + r")\b)"
+        )
+    col = {"com": GREY, "str": "\033[38;5;180m", "num": "\033[38;5;141m", "kw": "\033[38;5;75m"}
+
+    def rep(m):
+        k = m.lastgroup
+        return f"{col[k]}{m.group(0)}\033[0m"
+    return _HL[lang].sub(rep, line)
+
+
+_BG_ADD = "\033[48;5;22m"
+_BG_DEL = "\033[48;5;52m"
+
+
+def _code_rows(lines, start: int, lang: str, limit: int, kind: str = "") -> list[str]:
+    """Nummerierte Codezeilen; kind '+' / '-' färbt als Diff."""
+    out = []
+    width = len(str(start + len(lines)))
+    for k, ln in enumerate(lines[:limit]):
+        num = str(start + k).rjust(width)
+        ln = ln.replace("\t", "    ").rstrip("\n")
+        if len(ln) > _width() - 14:
+            ln = ln[:_width() - 15] + "…"
+        if kind == "+":
+            out.append("      " + c(num + " + ", GREEN) + _BG_ADD + highlight(ln, lang) + "\033[0m")
+        elif kind == "-":
+            out.append("      " + c(num + " - ", RED) + _BG_DEL + ln + "\033[0m")
+        else:
+            out.append("      " + c(num + "   ", GREY) + highlight(ln, lang))
+    if len(lines) > limit:
+        out.append("      " + c(f"… +{len(lines) - limit} lines", GREY))
+    return out
+
+
+def _file_lines(path: str) -> list[str]:
+    try:
+        return Path(path).expanduser().read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return []
+
+
+def tool_result(name: str, inputs: dict, result, permitted: bool) -> str:
+    """Ergebniszeile(n) unter einer Tool-Zeile: Zusammenfassung plus Code-/Diff-Ausschnitt wie bei Claude Code."""
+    head = tool_result_line(name, result, permitted)
+    if not permitted:
+        return head
+    text = result if isinstance(result, str) else str(result)
+    if text.startswith("Error:"):
+        return head
+    path = str(inputs.get("file_path") or inputs.get("path") or "")
+    lang = lang_of(path) if path else ""
+    rows: list[str] = []
+    pre = "  " + c("└ ", GREY)
+    if name == "Edit" and inputs.get("old_string") is not None:
+        old = str(inputs.get("old_string")).splitlines()
+        new = str(inputs.get("new_string", "")).splitlines()
+        fl = _file_lines(path)
+        first = new[0] if new else ""
+        at = next((i for i in range(len(fl)) if fl[i:i + len(new)] == new), None) if new else None
+        if at is None:
+            at = 0
+        before = fl[max(0, at - 2):at]
+        after = fl[at + len(new):at + len(new) + 2]
+        ln0 = max(1, at + 1)
+        rows += _code_rows(before, max(1, ln0 - len(before)), lang, 3)
+        rows += _code_rows(old, ln0, lang, 12, "-")
+        rows += _code_rows(new, ln0, lang, 12, "+")
+        rows += _code_rows(after, ln0 + len(new), lang, 3)
+        summ = f"Updated {_home_short(path)}  " + c(f"+{len(new)}", GREEN) + c(" ", GREY) + c(f"-{len(old)}", RED)
+        return pre + summ + "\n" + "\n".join(rows)
+    if name == "Write" and inputs.get("content") is not None:
+        body = str(inputs["content"]).splitlines()
+        rows = _code_rows(body, 1, lang, 10)
+        return pre + f"Wrote {len(body)} lines to {_home_short(path)}" + "\n" + "\n".join(rows)
+    if name == "Read":
+        body = [re.sub(r"^\s*\d+[\t|→:]\s?", "", l) for l in text.splitlines()]
+        start = int(inputs.get("offset") or 1)
+        rows = _code_rows(body, start, lang, 6)
+        return pre + c(f"Read {len(body)} lines", GREY) + "\n" + "\n".join(rows)
+    if name in ("Bash", "Grep", "Glob", "WebSearch", "WebFetch", "Agent"):
+        body = [l for l in text.splitlines()]
+        n = len(body)
+        show = body[:6]
+        rows = ["      " + c(l[:_width() - 8] + ("…" if len(l) > _width() - 8 else ""), DIM) for l in show]
+        if n > 6:
+            rows.append("      " + c(f"… +{n - 6} lines", GREY))
+        if not n:
+            return pre + c("(no output)", GREY)
+        return pre + c(f"{n} line{'s' if n != 1 else ''}", GREY) + "\n" + "\n".join(rows)
+    return head
+
+
 def tool_result_line(name: str, result, permitted: bool) -> str:
     if not permitted:
         return "  " + c("└ ", GREY) + c("denied", RED)
@@ -248,11 +373,30 @@ def tool_result_line(name: str, result, permitted: bool) -> str:
 # ── Rückfrage ────────────────────────────────────────────────────────────
 
 def ask_permission(desc: str, config: dict) -> bool:
+    from nano_claude_code.screen import SCREEN
     print()
     print("  " + c("? ", BOLD, AMBER) + c(desc, BOLD))
     print("    " + c("1", BOLD) + " Yes")
     print("    " + c("2", BOLD) + " Yes, and don't ask again this session")
-    print("    " + c("3", BOLD) + " No   " + c("(Enter)", GREY))
+    print("    " + c("3", BOLD) + " No   " + c("(Enter / Esc)", GREY))
+    if SCREEN.active:
+        SCREEN.watch_stop()
+        SCREEN.set_state("approval")
+        try:
+            while True:
+                k = SCREEN.getkey().lower()
+                if k in ("1", "y"):
+                    ok = True; break
+                if k in ("2", "a"):
+                    config["permission_mode"] = "accept-all"
+                    print("  " + c("accept-all for this session", GREY))
+                    ok = True; break
+                if k in ("3", "n", "\n", "\x1b", "\x03"):
+                    ok = False; break
+        finally:
+            SCREEN.watch_start()
+        print("  " + c("› " + ("yes" if ok else "no"), GREY))
+        return ok
     try:
         ans = input("  " + c("› ", ACCENT)).strip().lower()
     except (KeyboardInterrupt, EOFError):

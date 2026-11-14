@@ -2161,6 +2161,7 @@ run_nano_session() {
   NANO_MCP_CONFIG="$mcp_file" \
   NANO_TOOLS="$nano_tools" \
   NANO_CONTEXT_WINDOW="${cw:-200000}" \
+  NANO_API_LABEL="QuiteQue ${OWL_BASE_URL#http://}" \
   NANO_APPEND_SYSTEM_PROMPT_FILE="$hint" \
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
   ANTHROPIC_API_KEY="sk-owl" \

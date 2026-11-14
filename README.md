@@ -158,6 +158,10 @@ Sessions: nano speichert in `~/.nano_claude/sessions/*.json` (in der Liste „Al
 Claude-Code-Sessions (`~/.claude/projects/*/<uuid>.jsonl`) lassen sich in nano per `--resume <uuid>` fortsetzen;
 die Originaldatei wird nur gelesen, nie verändert. Fortsetzen geht für nano-Sessions, Komprimieren/Löschen nur für Claude-Code-Sessions.
 
+nano-Oberfläche: feste Kopfzeile (Propeller, Modell/API, Tools- und Skill-Liste), scrollender Verlauf, Eingabefeld unten fest mit Statusleiste
+(Modell · API · Effort · Modus │ Zustand idle/prefill/reasoning/streaming/Tool │ Kontext z.B. `23.4k/94k`). Edit/Write/Read/Bash zeigen
+Code- bzw. Diff-Ausschnitte, Esc unterbricht den laufenden Zug. `NANO_PLAIN=1` schaltet auf die einfache Ausgabe.
+
 Lokale Änderungen an nano (Kontextfenster per `NANO_CONTEXT_WINDOW`, QuiteQue-Hinweis per
 `NANO_APPEND_SYSTEM_PROMPT_FILE`, CC-Import, Absturz bei fehlenden Cache-Tokens) stehen in `vendor/nano/PATCHES.md`.
 Relevante Variablen: `CLAU_BACKEND`, `CLAU_OFFLINE`, `CLAU_QQ_USER`, `CLAU_QQ_HINT`, `CLAU_CC_1M` (nur Claude Code).
