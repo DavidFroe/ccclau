@@ -1944,8 +1944,11 @@ _ensure_nano() {
     pip_cmd=(pip3 --python "$venv/bin/python")
   elif "$venv/bin/python" -m pip --version >/dev/null 2>&1; then
     pip_cmd=("$venv/bin/python" -m pip)
+  elif command -v uv >/dev/null 2>&1; then
+    # uv ersetzt pip, wenn weder pip3 noch ensurepip da sind
+    pip_cmd=(env UV_PYTHON="$venv/bin/python" uv pip)
   else
-    echo "⚠️  kein pip für die venv (pip3 fehlt, ensurepip fehlt) — Rückfall auf Claude Code." >&2
+    echo "⚠️  kein pip für die venv (pip3, ensurepip und uv fehlen) — Rückfall auf Claude Code. Abhilfe: sudo apt install python3-pip python3-venv" >&2
     return 1
   fi
   if ! "${pip_cmd[@]}" install -q "$CLAU_DIR/vendor/nano" 2>/dev/null; then
