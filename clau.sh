@@ -5054,6 +5054,36 @@ TMUXLOOP
   exec tmux new-session -s "$tn" -c "$PWD" "bash $(printf %q "$script")"
 }
 
+# Modell, Zustand und letzte Ausgabezeile einer tmux-Session: "modell|zustand|zeile"
+_tmux_info() {
+  local sn="$1" pdir="$2"
+  python3 - "$sn" "$pdir" <<'PY' 2>/dev/null || echo "?|?|"
+import glob, json, os, re, subprocess, sys
+sn, pdir = sys.argv[1:3]
+sid8 = sn[5:] if sn.startswith("clau-") else ""
+model = ""
+if sid8:
+    for f in glob.glob(os.path.join(pdir, "*", ".clau-session-meta.json")):
+        try:
+            for sid, e in json.load(open(f)).items():
+                if sid.startswith(sid8):
+                    model = e.get("model", "")
+        except Exception:
+            pass
+txt = subprocess.run(["tmux", "capture-pane", "-p", "-t", "=" + sn + ":"],
+                     capture_output=True, text=True).stdout
+txt = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", txt)
+lines = [l.rstrip() for l in txt.split("\n") if l.strip()]
+busy = any("esc to interrupt" in l or "to interrupt" in l for l in lines[-8:])
+skip = re.compile(r"^[\s─━│╭╮╰╯┌┐└┘├┤╌-]*$|^\s*[│>❯]?\s*>?\s*$|shortcuts|⏵⏵|bypass permissions|accept edits|auto-compact|esc to interrupt|^\s*[│|]\s*[>❯]")
+cand = [l.strip(" │") for l in lines if not skip.search(l)]
+last = cand[-1] if cand else ""
+if len(last) > 90:
+    last = last[:89] + "…"
+print(f"{model}|{'arbeitet' if busy else 'wartet'}|{last.replace('|', '/')}")
+PY
+}
+
 # Alle tmux-Sitzungen dieses Rechners: anzeigen, reinlinken, beenden, neu
 # starten. clau-<id8>-Sitzungen bekommen den Session-Namen aus dem Scan.
 choose_tmux_menu() {
@@ -5082,24 +5112,37 @@ PY
     if [[ "${#rows[@]}" -eq 0 ]]; then
       echo "  (keine)"
     else
-      printf "  %3s  %s %s %s %s\n" "" "$(_pad "tmux-Name" 16)" "$(_pad "Inhalt" 30)" "$(_pad "Status" 12)" "Ordner"
-      local i=1 sn att cre path cmd what
+      local i=1 sn att cre path cmd what info
       for l in "${rows[@]}"; do
         IFS='|' read -r sn att cre path cmd <<< "$l"
         what="${tnames[$sn]:-}"; [[ -z "$what" ]] && what="$cmd"
-        printf "  %3s  %s %s %s %s\n" "$i)" "$(_pad "$sn" 16)" "$(_pad "$what" 30)" \
-          "$(_pad "$([[ "$att" -gt 0 ]] && echo angehängt || echo Hintergrund)" 12)" "${path/#$HOME/\~}"
+        # Modell, Arbeitszustand und letzte Ausgabe (eine Zeile) der Session
+        info="$(_tmux_info "$sn" "$(_claude_projects_dir)")"
+        local mdl="${info%%|*}"; info="${info#*|}"
+        local zst="${info%%|*}"; local last="${info#*|}"
+        printf "  %3s  %s %s\n" "$i)" "$(_pad "$sn" 16)" "$(_pad "$what" 30)"
+        printf "       Ordner: %s · Modell: %s · %s · %s\n" "${path/#$HOME/\~}" "${mdl:-?}" \
+          "$([[ "$att" -gt 0 ]] && echo angehängt || echo Hintergrund)" "$zst"
+        [[ -n "$last" ]] && printf "       zuletzt: %s\n" "$last"
         ((i++))
       done
     fi
     echo
     echo "  <Nr>) Sitzung öffnen (reinlinken / beenden)"
+    echo "    k<Nr>) Sitzung direkt beenden (z.B. k1)"
     echo "     n) Neue clau-Session in tmux starten"
     echo "     0) Zurück"
     printf "Auswahl: "
     local c; read -r c
     case "$c" in
       0|"") return 0 ;;
+      k[0-9]*|K[0-9]*)
+        local kn="${c:1}"
+        [[ "$kn" -ge 1 && "$kn" -le "${#rows[@]}" ]] || { echo "Ungültige Nummer."; continue; }
+        local ksn="${rows[$((kn-1))]%%|*}" ky
+        printf "Sitzung %s wirklich beenden? Laufende Programme darin werden beendet [j/N]: " "$ksn"
+        read -r ky
+        if [[ "$ky" =~ ^[jJyY] ]]; then tmux kill-session -t "=$ksn" && echo "✓ Beendet."; fi ;;
       n|N) ( CLAU_TMUX_ONCE=1; run_new_session_named ) || true ;;
       *)
         [[ "$c" =~ ^[0-9]+$ && "$c" -ge 1 && "$c" -le "${#rows[@]}" ]] || { echo "Ungültige Auswahl."; continue; }

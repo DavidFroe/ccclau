@@ -462,6 +462,8 @@ class StreamTranslator:
         self.tools_closed = False
         self.stop_reason = None
         self.ended = False
+        self.retry_ok = False       # Proxy darf eine leere Antwort einmal neu anfragen
+        self.empty_pending = False  # leere Antwort erkannt, Retry steht aus
 
     def _akt_tools(self):
         """Tool-Aufrufe einmal ins Denkprotokoll (Argumente sind erst am Ende vollständig)."""
@@ -580,6 +582,12 @@ class StreamTranslator:
 
         # Finish
         if finish_reason in ("stop", "tool_calls", "length"):
+            if (self.retry_ok and finish_reason == "stop" and not self.text_started
+                    and not self.tool_buffers and not self.thinking_started):
+                # Komplett leer (kein Text, kein Denken, kein Tool): nichts ausgeben,
+                # _stream fragt einmal neu an. Erst wenn auch das leer bleibt, kommt der Hinweis.
+                self.empty_pending = True
+                return "".join(out)
             if self.thinking_started and not self.thinking_closed:
                 self.thinking_closed = True
                 out.append(self._evt("content_block_stop", {
@@ -876,7 +884,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
         log(f"← Header nach {time.monotonic()-t0:.1f}s, status={resp.status_code}, model={target}")
 
         if stream:
-            self._stream(resp, model_name, est_input_tokens, target, sse)
+            def _retry_leer():
+                # Bei identischer Anfrage liefert ein lokales Modell oft wieder leer,
+                # daher beim Wiederholen die Temperatur leicht anheben.
+                pl = dict(oai_payload)
+                pl["temperature"] = min(1.0, (pl.get("temperature") or 0.3) + 0.2)
+                return requests.post(
+                    f"{base}/chat/completions", json=pl, stream=True, timeout=REQUEST_TIMEOUT,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-OwlTrail-User": OWL_USER,
+                        "X-Owl-Max-Wait": str(max(60, REQUEST_TIMEOUT - 60)),
+                        **ACTIVITY_HEADERS,
+                        **({"Authorization": "Bearer " + ROUTE_KEYS[base]} if base in ROUTE_KEYS else {}),
+                    })
+            self._stream(resp, model_name, est_input_tokens, target, sse, retry_fn=_retry_leer)
         else:
             self._single(resp, model_name, est_input_tokens, target)
 
@@ -950,46 +972,68 @@ class ProxyHandler(BaseHTTPRequestHandler):
         threading.Thread(target=heartbeat, daemon=True).start()
         return sse
 
-    def _stream(self, owl_resp, model_name, est_input_tokens=0, target=None, sse=None):
+    def _pump(self, owl_resp, tr, write_lock, n_pings, t0, n_lines):
+        """Liest einen Backend-Stream und übersetzt ihn. False = wegen Fehler abgebrochen."""
+        for line in owl_resp.iter_lines():
+            if n_lines == 0:
+                log(f"  erste Zeile vom Backend nach {time.monotonic()-t0:.1f}s ({n_pings[0]} Pings gesendet)")
+            n_lines += 1
+            if not line or not line.startswith(b"data: "):
+                continue
+            data = line[6:]
+            if data == b"[DONE]":
+                break
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and payload.get("error"):
+                # Backend meldet einen Fehler innerhalb des Streams (z.B. bei
+                # Kontextlängen-Überschreitung mitten in der Antwort) — bisher
+                # wurde das stillschweigend verworfen, weil es kein "choices"-
+                # Feld hat. Stattdessen sichtbar machen und Stream sauber beenden.
+                err = payload["error"]
+                err_msg = err.get("message") if isinstance(err, dict) else str(err)
+                log(f"  Backend-Fehler im Stream nach {time.monotonic()-t0:.1f}s: {err_msg!r}")
+                if ESC is not None:
+                    ESC.melde("backend_fehler", "Stream: " + str(err_msg)[:60])
+                self._stream_abort(tr, f"[owlAPI Fehler: {err_msg}]", write_lock)
+                return False
+            try:
+                out = tr.chunk(payload)
+                if out:
+                    with write_lock:
+                        self.wfile.write(out.encode())
+                        self.wfile.flush()
+            except (json.JSONDecodeError, KeyError):
+                pass
+        return n_lines
+
+    def _stream(self, owl_resp, model_name, est_input_tokens=0, target=None, sse=None, retry_fn=None):
         t0 = time.monotonic()
         n_lines = 0
         try:
             if sse is None:
                 sse = self._sse_open(model_name, est_input_tokens, target)
             tr, write_lock, n_pings = sse["tr"], sse["lock"], sse["pings"]
-            for line in owl_resp.iter_lines():
-                if n_lines == 0:
-                    log(f"  erste Zeile vom Backend nach {time.monotonic()-t0:.1f}s ({n_pings[0]} Pings gesendet)")
-                n_lines += 1
-                if not line or not line.startswith(b"data: "):
-                    continue
-                data = line[6:]
-                if data == b"[DONE]":
-                    break
-                try:
-                    payload = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(payload, dict) and payload.get("error"):
-                    # Backend meldet einen Fehler innerhalb des Streams (z.B. bei
-                    # Kontextlängen-Überschreitung mitten in der Antwort) — bisher
-                    # wurde das stillschweigend verworfen, weil es kein "choices"-
-                    # Feld hat. Stattdessen sichtbar machen und Stream sauber beenden.
-                    err = payload["error"]
-                    err_msg = err.get("message") if isinstance(err, dict) else str(err)
-                    log(f"  Backend-Fehler im Stream nach {time.monotonic()-t0:.1f}s: {err_msg!r}")
-                    if ESC is not None:
-                        ESC.melde("backend_fehler", "Stream: " + str(err_msg)[:60])
-                    self._stream_abort(tr, f"[owlAPI Fehler: {err_msg}]", write_lock)
+            tr.retry_ok = retry_fn is not None
+            n_lines = 0
+            while True:
+                r = self._pump(owl_resp, tr, write_lock, n_pings, t0, n_lines)
+                if r is False:
                     return
-                try:
-                    out = tr.chunk(payload)
-                    if out:
-                        with write_lock:
-                            self.wfile.write(out.encode())
-                            self.wfile.flush()
-                except (json.JSONDecodeError, KeyError):
-                    pass
+                n_lines = r
+                if tr.empty_pending and retry_fn is not None:
+                    tr.empty_pending = False
+                    tr.retry_ok = False
+                    log(f"  Leere Antwort (model={tr.target}) -- einmaliger Retry")
+                    try:
+                        owl_resp.close()
+                    except Exception:
+                        pass
+                    owl_resp = retry_fn()
+                    continue
+                break
             end_evts = tr.finish()
             if end_evts:
                 with write_lock:
