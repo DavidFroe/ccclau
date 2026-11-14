@@ -49,7 +49,7 @@ def rule() -> str:
 def print_banner(model: str, provider: str, tools_count: int, skill_count: int = 0,
                  session_title: str = "", resumed: str = "") -> None:
     rows = [
-        (c("nano", BOLD, ACCENT) + c("  ·  terminal coding agent", GREY)),
+        (c("nano", BOLD, ACCENT) + c("  ·  terminal coding agent (Claude Code clone)", GREY)),
         c("model   ", GREY) + c(model, BOLD),
         c("folder  ", GREY) + _home_short(Path.cwd()),
     ]

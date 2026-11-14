@@ -3325,7 +3325,7 @@ choose_backend_interactive() {
   echo
   echo "Harness wählen:"
   echo "  1) claude              Claude Code   Standard  (nötig für Claude-Abo-Modelle und Team-Modus)  [Enter]"
-  echo "  2) nano                nano-claude-code (Python), nur für owl-Modelle"
+  echo "  2) nano                (Claude-Code-Nachbau, Python), nur für owl-Modelle"
   echo "  3) opencode            opencode.ai   alternatives Harness"
   echo "  4) atomic              bastani-inc/atomic (MIT) – Workflows/Prüfstufen, nur owl-Modelle, wird von GitHub geholt"
   echo "  5) pi                  earendil-works/pi (MIT) – minimaler Coding-Agent, nur owl-Modelle, wird von GitHub geholt"
@@ -5998,7 +5998,7 @@ choose_settings_menu() {
   while true; do
     echo
     echo "Einstellungen:"
-    echo "  1) Harness                    : $(effective_backend)   (Claude Code / opencode / Qwen Token Plan)"
+    echo "  1) Harness                    : $(effective_backend)   (Claude Code / nano (Claude-Code-Nachbau) / opencode / atomic / pi)"
     echo "  2) Qwen-Token-Plan-Key       : $([[ -f "$QWENPLAN_KEY_FILE" ]] && echo "vom $(date -r "$QWENPLAN_KEY_FILE" '+%d.%m.%Y')" || echo "fehlt")"
     echo "  3) Bot-Einstellungen …       (Autonomie, sudo, Effort, Auto-Compact, Timeout)"
     echo "  4) Team-Modus …              : $(team_on && echo "AN — $(team_set_label)" || echo aus)"
