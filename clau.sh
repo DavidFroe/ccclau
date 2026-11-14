@@ -39,6 +39,9 @@ PICOGK_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/picogk_mcp.py
 LLM_STATUS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/llm_status_mcp.py"
 CLAU_TEAM_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/team"
 PI_TEAM_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pi_team_mcp.py"
+PI_SUB_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pi_sub_mcp.py"
+GITEA_MGR_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/gitea_mgr.py"
+GITEA_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/gitea_mcp.py"
 CLAU_API_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/clau_api.py"
 PAPERLESS_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/paperless_mcp.py"
 CLAU_GUI_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/clau_gui.py"
@@ -646,6 +649,7 @@ _usage_begin() {
   mkdir -p "$(_usage_dir)" 2>/dev/null || true
   CLAU_USAGE_SID="$sid"
   CLAU_USAGE_FILE="$(_usage_dir)/${sid}.jsonl"
+  _gitea_session_begin || true
 }
 
 # Zusammenfassung: je Modell gesamt + aktuell, dazu die letzte Aktion.
@@ -1509,7 +1513,94 @@ PY_PL
 _paperless_token_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/clau/paperless.token"; }
 
 # Optionale MCP-Server (Default aus): CLAU_MATLAB=1 → matlab_mcp.py, CLAU_SOLIDCRAFT=1 → solidcraft_mcp.py, CLAU_PICOGK=1 → picogk_mcp.py
+# pi als Subagent (CLAU_PI_SUB=1): MCP-Server pi_sub, Modell und Parallelität aus CLAU_PI_SUB_MODEL / CLAU_PI_SUB_MAX.
+# Läuft für jede Engine mit MCP (Claude Code, nano), unabhängig vom Team-Modus.
+_pi_sub_model() {
+  local m="${CLAU_PI_SUB_MODEL:-owl:${CLAU_TEAM_EXEC_MODEL:-121}}"
+  [[ "$m" == owl:* ]] || m="owl:$m"
+  echo "$m"
+}
+
+_pi_sub_server_json() {
+  [[ "${CLAU_PI_SUB:-0}" == "1" && -f "$PI_SUB_MCP_SCRIPT" ]] || return 0
+  local bin; bin="$(_pi_bin)" || { echo "pi-Subagenten: pi nicht installiert (clau --install mit CLAU_PI_INSTALL=1)." >&2; return 0; }
+  local mdl; mdl="$(_pi_sub_model)"
+  _pi_sync_config 2>/dev/null || true
+  local marg; marg="$(CLAU_PI_AGENT_DIR="$CLAU_PI_HOME/agent" python3 "$PI_SETUP_SCRIPT" model-arg "$mdl" 2>/dev/null)"
+  if [[ -z "$marg" ]]; then echo "pi-Subagenten: Modell $mdl nicht auflösbar." >&2; return 0; fi
+  python3 -c '
+import json, sys
+a = sys.argv[1:]
+print(json.dumps({"type": "stdio", "command": "python3", "args": [a[0]], "env": {
+    "CLAU_PI_BIN": a[1], "PI_CODING_AGENT_DIR": a[2], "CLAU_PI_SUB_MODEL": a[3], "CLAU_PI_SUB_LABEL": a[4],
+    "CLAU_PI_SUB_MAX": a[5], "CLAU_PI_SUB_TIMEOUT": a[6], "PATH": a[7], "HOME": a[8]}}))' \
+    "$PI_SUB_MCP_SCRIPT" "$bin" "$CLAU_PI_HOME/agent" "$marg" "$mdl" "${CLAU_PI_SUB_MAX:-2}" "${CLAU_PI_SUB_TIMEOUT:-1800}" "$PATH" "$HOME"
+}
+
+# ── Gitea: eine gemeinsame lokale Instanz für alle clau-Sessions (gitea_mgr.py) ─────────────────────────────
+# Global ein/aus + Port: ~/.config/clau/gitea/settings.json (Einstellungen → Gitea). Pro Projekt abschaltbar
+# (CLAU_GITEA_PROJECT=0 in .clau.conf). Die erste Session startet die Instanz, die letzte beendet sie.
+_gitea_enabled() { [[ -f "$GITEA_MGR_SCRIPT" ]] && python3 "$GITEA_MGR_SCRIPT" enabled; }
+
+# Instanz sicherstellen, Lease für diese Session anlegen, Repo (+ Fork für den Harness) fürs Verzeichnis. Gibt JSON aus.
+_gitea_up() {
+  _gitea_enabled || return 1
+  local args=(--pid "$$")
+  [[ "${CLAU_GITEA_PROJECT:-1}" == "1" ]] && args+=(--dir "$PWD" --harness "$(effective_backend)")
+  python3 "$GITEA_MGR_SCRIPT" up "${args[@]}"
+}
+
+_gitea_info() {
+  _gitea_enabled || return 1
+  if [[ -n "${GITEA_INFO_JSON:-}" ]]; then printf '%s\n' "$GITEA_INFO_JSON"; return 0; fi
+  _gitea_up 2>/dev/null
+}
+
+_gitea_session_begin() {
+  [[ -n "${GITEA_INFO_JSON:-}" ]] && return 0
+  _gitea_enabled || return 0
+  echo "Gitea: starte/verbinde ..." >&2
+  GITEA_INFO_JSON="$(_gitea_up 2>&1 | tail -1)"
+  if [[ "$GITEA_INFO_JSON" != "{"* ]]; then
+    [[ -n "$GITEA_INFO_JSON" ]] && echo "$GITEA_INFO_JSON" >&2
+    GITEA_INFO_JSON=""
+    return 0
+  fi
+  python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+print("Gitea: " + d.get("url", "") + (("  Repo " + d["repo"]) if d.get("repo") else "") + (("  Fork " + d["fork"]) if d.get("fork") else ""))' "$GITEA_INFO_JSON" >&2
+}
+
+_gitea_server_json() {
+  [[ "${CLAU_GITEA_PROJECT:-1}" == "1" && -f "$GITEA_MCP_SCRIPT" ]] || return 0
+  local info; info="$(_gitea_info)" || return 0
+  [[ "$info" == "{"* ]] || return 0
+  python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+if not d.get("repo"):
+    sys.exit(0)
+print(json.dumps({"type": "stdio", "command": "python3", "args": [sys.argv[2]], "env": {
+    "GITEA_URL": d["url"], "GITEA_TOKEN_FILE": d["token_file"], "GITEA_REPO": d["repo"],
+    "GITEA_FORK": d.get("fork", ""), "GITEA_HARNESS": sys.argv[3], "PATH": sys.argv[4], "HOME": sys.argv[5]}}))' \
+    "$info" "$GITEA_MCP_SCRIPT" "$(effective_backend)" "$PATH" "$HOME"
+}
+
 _owl_mcp_config() {
+  local base; base="$(_owl_mcp_config_opt)"
+  local sub; sub="$(_pi_sub_server_json)"
+  local gt; gt="$(_gitea_server_json)"
+  if [[ -z "$sub" && -z "$gt" ]]; then printf '%s\n' "$base"; return; fi
+  python3 -c '
+import json, sys
+c = json.loads(sys.argv[1]); srv = c.setdefault("mcpServers", {})
+if sys.argv[2]: srv["pi_sub"] = json.loads(sys.argv[2])
+if sys.argv[3]: srv["gitea"] = json.loads(sys.argv[3])
+print(json.dumps(c))' "$base" "$sub" "$gt"
+}
+
+_owl_mcp_config_opt() {
   if [[ "${CLAU_MATLAB:-0}" != "1" && "${CLAU_SOLIDCRAFT:-0}" != "1" && "${CLAU_PICOGK:-0}" != "1" ]]; then
     _owl_mcp_config_base
     return
@@ -2258,8 +2349,10 @@ choose_mcp_menu() {
     echo "   3) [$([[ "${CLAU_MATLAB:-0}" == "1" ]] && echo x || echo " ")] MATLAB (Windows-VM, nur owl-Modelle)"
     echo "   4) [$([[ "${CLAU_SOLIDCRAFT:-0}" == "1" ]] && echo x || echo " ")] SolidCraft-CAD (Brücke :8311, nur owl-Modelle)"
     echo "   5) [$([[ "${CLAU_PICOGK:-0}" == "1" ]] && echo x || echo " ")] PicoGK Voxel-CAD (Docker, nur owl-Modelle)"
-    echo "   t) Paperless-Token / URL setzen"
-    printf "Umschalten [1-5, t, 0=Zurück]: "
+    echo "   6) [$([[ "${CLAU_PI_SUB:-0}" == "1" ]] && echo x || echo " ")] pi-Subagenten (Teilaufgaben an schlanke pi-Prozesse: Modell $(_pi_sub_model), max. ${CLAU_PI_SUB_MAX:-2} gleichzeitig)"
+    echo "   7) [$([[ "${CLAU_GITEA_PROJECT:-1}" == "1" ]] && echo x || echo " ")] Gitea-Tickets für dieses Projekt (Gitea selbst: Einstellungen → Gitea, jetzt $(_gitea_enabled && echo an || echo aus))"
+    echo "   t) Paperless-Token / URL setzen   m) Subagenten-Modell   n) Subagenten gleichzeitig"
+    printf "Umschalten [1-7, t, m, n, 0=Zurück]: "
     local c; read -r c
     case "$c" in
       1) if [[ "${CLAU_WEBSEARCH:-1}" == "1" ]]; then CLAU_WEBSEARCH=0; else CLAU_WEBSEARCH=1; fi; save_config ;;
@@ -2270,6 +2363,22 @@ choose_mcp_menu() {
       3) if [[ "${CLAU_MATLAB:-0}" == "1" ]]; then CLAU_MATLAB=0; else CLAU_MATLAB=1; fi; save_config ;;
       4) if [[ "${CLAU_SOLIDCRAFT:-0}" == "1" ]]; then CLAU_SOLIDCRAFT=0; else CLAU_SOLIDCRAFT=1; fi; save_config ;;
       5) if [[ "${CLAU_PICOGK:-0}" == "1" ]]; then CLAU_PICOGK=0; else CLAU_PICOGK=1; fi; save_config ;;
+      6) if [[ "${CLAU_PI_SUB:-0}" == "1" ]]; then CLAU_PI_SUB=0; else
+           CLAU_PI_SUB=1
+           _pi_bin >/dev/null || echo "Hinweis: pi ist nicht installiert — es wird beim nächsten Start nachgefragt/ignoriert (clau --install mit CLAU_PI_INSTALL=1 holt es)."
+         fi; save_config ;;
+      7) if [[ "${CLAU_GITEA_PROJECT:-1}" == "1" ]]; then CLAU_GITEA_PROJECT=0; else CLAU_GITEA_PROJECT=1; fi; save_config ;;
+      m|M) local v; printf "Modell der pi-Subagenten (z.B. 121, owl:137, owl:d137) [%s]: " "$(_pi_sub_model)"; read -r v
+           if [[ -n "$v" ]]; then
+             [[ "$v" == owl:* ]] || v="owl:$v"
+             if _pi_bin >/dev/null && [[ -z "$(CLAU_PI_AGENT_DIR="$CLAU_PI_HOME/agent" python3 "$PI_SETUP_SCRIPT" model-arg "$v" 2>/dev/null)" ]]; then
+               echo "Modell $v ist für pi nicht auflösbar (QuiteQue erreichbar? Direkt-Modelle: owl:d<ID>)."
+             else
+               CLAU_PI_SUB_MODEL="$v"; save_config
+             fi
+           fi ;;
+      n|N) local v; printf "Gleichzeitige Subagenten (1-16) [%s]: " "${CLAU_PI_SUB_MAX:-2}"; read -r v
+           if [[ "$v" =~ ^[0-9]+$ && "$v" -ge 1 && "$v" -le 16 ]]; then CLAU_PI_SUB_MAX="$v"; save_config; elif [[ -n "$v" ]]; then echo "Bitte 1 bis 16."; fi ;;
       t|T) local u t
            printf "Paperless-URL [%s]: " "${CLAU_PAPERLESS_URL:-http://11.0.0.12:8010}"; read -r u
            [[ -n "$u" ]] && CLAU_PAPERLESS_URL="$u"
@@ -2327,7 +2436,7 @@ choose_tools_menu() {
     echo
     echo "Fähigkeiten für dieses Verzeichnis ($(basename "$PWD")):"
     echo "  1) Tools        eingebaute Werkzeuge (Read, Bash, …)         $ntools aktiv"
-    echo "  2) MCP-Server   externe Programme mit eigenen Tools         Websuche $([[ "${CLAU_WEBSEARCH:-1}" == "1" ]] && echo an || echo aus)"
+    echo "  2) MCP-Server   externe Programme mit eigenen Tools         Websuche $([[ "${CLAU_WEBSEARCH:-1}" == "1" ]] && echo an || echo aus), pi-Subagenten $([[ "${CLAU_PI_SUB:-0}" == "1" ]] && echo an || echo aus)"
     echo "  3) Skills       Anleitungen, die das Modell bei Bedarf lädt  $([[ ",${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}," == *",Skill,"* ]] && echo an || echo aus)"
     echo "  0) Zurück"
     printf "Auswahl [1-3, Enter=Zurück]: "
@@ -2470,7 +2579,7 @@ _conf_fallback_file() {
 # Update-Check/Websuche).
 CLAU_ENV_OVERRIDES=(CLAU_TEAM CLAU_TEAM_LEAD_MODEL CLAU_TEAM_EXEC_MODEL CLAU_TEAM_MAX_AGENTS
   CLAU_TEAM_SLOTS_121 CLAU_TEAM_STATUS_URL CLAU_TEAM_SUBAGENTS CLAU_TEAM_SET CLAU_API CLAU_API_BIND CLAU_API_TOKEN
-  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_MATLAB CLAU_SOLIDCRAFT CLAU_PICOGK CLAU_TRACE CLAU_ATOMIC_INSTALL CLAU_ATOMIC_HOME CLAU_ATOMIC_VERSION CLAU_ESC CLAU_ESC_TARGET CLAU_ESC_COMPACT CLAU_ESC_FEHLER CLAU_ESC_ABBRUECHE CLAU_ESC_SCHLEIFE CLAU_ESC_FENSTER CLAU_ESC_ZURUECK CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS CLAU_OWL_TOOLS CLAU_PAPERLESS CLAU_PAPERLESS_URL)
+  CLAU_UPDATE_CHECK CLAU_WEBSEARCH CLAU_MATLAB CLAU_SOLIDCRAFT CLAU_PICOGK CLAU_TRACE CLAU_ATOMIC_INSTALL CLAU_ATOMIC_HOME CLAU_ATOMIC_VERSION CLAU_ESC CLAU_ESC_TARGET CLAU_ESC_COMPACT CLAU_ESC_FEHLER CLAU_ESC_ABBRUECHE CLAU_ESC_SCHLEIFE CLAU_ESC_FENSTER CLAU_ESC_ZURUECK CLAU_OFFLINE CLAU_OWL_ROUTES CLAU_QQ_USER CLAU_MODEL_FAVS CLAU_OWL_TOOLS CLAU_PAPERLESS CLAU_PAPERLESS_URL CLAU_PI_SUB CLAU_PI_SUB_MODEL CLAU_PI_SUB_MAX CLAU_GITEA_PROJECT)
 
 load_config() {
   local _ov _envsave=()
@@ -2513,6 +2622,10 @@ load_config() {
   : "${CLAU_DISABLE_ARTIFACT:=0}"
   : "${CLAU_DISABLE_AGENT_VIEW:=0}"
   : "${CLAU_WEBSEARCH:=1}"
+  : "${CLAU_PI_SUB:=0}"
+  : "${CLAU_GITEA_PROJECT:=1}"
+  : "${CLAU_PI_SUB_MODEL:=}"
+  : "${CLAU_PI_SUB_MAX:=2}"
   # Team-Modus (Teamleiter + Ausführer-Subagenten) und Fernsteuerung, Default aus
   : "${CLAU_TEAM:=0}"
   : "${CLAU_TEAM_LEAD_MODEL:=122}"
@@ -2627,6 +2740,10 @@ CLAU_DISABLE_TOOLS="${CLAU_DISABLE_TOOLS:-}"
 CLAU_DISABLE_ARTIFACT="${CLAU_DISABLE_ARTIFACT:-0}"
 CLAU_DISABLE_AGENT_VIEW="${CLAU_DISABLE_AGENT_VIEW:-0}"
 CLAU_WEBSEARCH="${CLAU_WEBSEARCH:-1}"
+CLAU_GITEA_PROJECT="${CLAU_GITEA_PROJECT:-1}"
+CLAU_PI_SUB="${CLAU_PI_SUB:-0}"
+CLAU_PI_SUB_MODEL="${CLAU_PI_SUB_MODEL:-}"
+CLAU_PI_SUB_MAX="${CLAU_PI_SUB_MAX:-2}"
 CLAU_MATLAB="${CLAU_MATLAB:-0}"
 CLAU_SOLIDCRAFT="${CLAU_SOLIDCRAFT:-0}"
 CLAU_PICOGK="${CLAU_PICOGK:-0}"
@@ -2968,6 +3085,8 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_SOLIDCRAFT="0"                1 = SolidCraft-CAD-MCP (Brücke :8311, nur owl-Modelle) einschalten, siehe solidcraft_mcp.py
   CLAU_MATLAB="0"                    1 = MATLAB-MCP (Windows-VM, nur owl-Modelle) einschalten, siehe matlab_mcp.py
   CLAU_WEBSEARCH="1"                 Lokale QuiteQue-Websuche als MCP-Tool (Default an, ~300 Tokens)
+  CLAU_GITEA=1 / CLAU_GITEA_PORT=3300  Gitea (lokaler Git-Server + Tickets) ein/aus bzw. Port, sonst aus der Einstellung; CLAU_GITEA_PROJECT=0 schaltet es für ein Projekt ab
+  CLAU_PI_SUB="0"                    pi als Subagent (MCP-Tool pi_sub); CLAU_PI_SUB_MODEL="owl:121" Modell, CLAU_PI_SUB_MAX="2" gleichzeitig
   CLAU_BACKEND="claude"               Harness (CLI): claude (Standard) | nano | opencode | qwenplan | atomic | pi
   CLAU_QWEN_MODEL="qwen3.8-max"       Modell für qwenplan (Key: ~/.config/clau/qwenplan.key, chmod 600)
   CLAU_QWEN_FAST_MODEL="qwen3.8-flash" schnelles Modell für qwenplan
@@ -5995,6 +6114,60 @@ choose_remote_menu() {
 }
 
 # Einstellungen: alles, was nicht täglich gebraucht wird
+choose_gitea_menu() {
+  [[ -f "$GITEA_MGR_SCRIPT" ]] || { echo "gitea_mgr.py fehlt."; return 0; }
+  while true; do
+    local st; st="$(python3 "$GITEA_MGR_SCRIPT" status)"
+    local en port ver run url ses nrep
+    read -r en port ver run url ses nrep < <(python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+print(int(d["enabled"]), d["port"], d["installiert"] or "-", int(d["laeuft"]), d["url"] or "-", d["sessions"], d["repos"])' "$st")
+    echo
+    echo "Gitea — eine lokale Instanz für ALLE clau-Sessions (127.0.0.1, SQLite), mit Repos und Ticketsystem"
+    echo "  Die erste Session startet sie, die letzte beendet sie. Jedes Projektverzeichnis bekommt ein Repository,"
+    echo "  jeder Harness einen Fork (Organisation h-<harness>); Tickets bearbeitet das Modell über das Tool 'gitea'."
+    echo "  1) Gitea                  : $([[ "$en" == 1 ]] && echo AN || echo aus)   (Standard aus)"
+    echo "  2) Port                   : $port"
+    echo "  3) Installiert            : $ver   $([[ "$run" == 1 ]] && echo "läuft: $url ($ses Session(s), $nrep Repos)" || echo "läuft gerade nicht")"
+    echo "  4) Dieses Projekt ($(basename "$PWD")) nutzt Gitea : $([[ "${CLAU_GITEA_PROJECT:-1}" == "1" ]] && echo ja || echo nein)   (Tool + Repo nur wenn ja)"
+    echo "  5) Repo/Fork für dieses Verzeichnis jetzt anlegen"
+    echo "  6) Admin-Zugang anzeigen (Weboberfläche)"
+    echo "  7) Gitea installieren / aktualisieren"
+    echo "  0) Zurück"
+    printf "Auswahl [0-7]: "
+    local c v; read -r c
+    case "$c" in
+      1) if [[ "$en" == 1 ]]; then
+           python3 "$GITEA_MGR_SCRIPT" set enabled 0
+           echo "Gitea ist aus. Eine laufende Instanz endet mit der letzten clau-Session."
+         else
+           if [[ "$ver" == "-" ]]; then
+             if ask_yes_no "Gitea ist nicht installiert (go-gitea/gitea, MIT, ~120 MB, SHA256-geprüft). Jetzt von dl.gitea.com holen?"; then
+               python3 "$GITEA_MGR_SCRIPT" install || { echo "Installation fehlgeschlagen — Gitea bleibt aus."; continue; }
+             else
+               echo "Ohne Installation bleibt Gitea aus."; continue
+             fi
+           fi
+           python3 "$GITEA_MGR_SCRIPT" set enabled 1
+           echo "Gitea ist an: Tool und Repo sind in allen Projekten aktiv (pro Projekt mit 4 abschaltbar). Start mit der nächsten Session."
+         fi ;;
+      2) printf "Port [%s]: " "$port"; read -r v
+         if [[ -n "$v" ]]; then
+           python3 "$GITEA_MGR_SCRIPT" set port "$v" && { [[ "$run" == 1 ]] && echo "Neuer Port gilt, sobald keine clau-Session mehr läuft und Gitea neu startet."; }
+         fi ;;
+      4) if [[ "${CLAU_GITEA_PROJECT:-1}" == "1" ]]; then CLAU_GITEA_PROJECT=0; else CLAU_GITEA_PROJECT=1; fi; save_config ;;
+      5) if [[ "$en" != 1 ]]; then echo "Gitea ist aus."; else
+           GITEA_INFO_JSON=""; local pj="$CLAU_GITEA_PROJECT"; CLAU_GITEA_PROJECT=1
+           _gitea_session_begin; CLAU_GITEA_PROJECT="$pj"
+         fi ;;
+      6) python3 "$GITEA_MGR_SCRIPT" admin ;;
+      7) python3 "$GITEA_MGR_SCRIPT" install "$(python3 "$GITEA_MGR_SCRIPT" latest 2>/dev/null)" ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
 choose_settings_menu() {
   while true; do
     echo
@@ -6008,12 +6181,14 @@ choose_settings_menu() {
     echo "  7) Claude Code prüfen        (claude doctor, $(claude --version 2>/dev/null | cut -d' ' -f1))"
     echo "  8) Claude Code aktualisieren (claude update)"
     echo "  9) Benutzer (Quiteque)       : ${QQ_USER}   (ccclau = normal, master = höchste Priorität)"
+    echo "  g) Gitea (lokaler Git-Server mit Tickets) : $(_gitea_enabled && echo an || echo aus)"
     echo "  0) Zurück"
-    printf "Auswahl [0-9]: "
+    printf "Auswahl [0-9, g]: "
     local c; read -r c
     case "$c" in
       9) if [[ "$QQ_USER" == "master" ]]; then CLAU_QQ_USER=ccclau; else CLAU_QQ_USER=master; fi
          QQ_USER="$CLAU_QQ_USER"; save_config ;;
+      g|G) choose_gitea_menu ;;
       1) choose_backend_interactive ;;
       2) qwenplan_set_key_interactive ;;
       3) choose_bot_settings ;;

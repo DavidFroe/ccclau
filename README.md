@@ -177,6 +177,25 @@ Drei getrennte Dinge, pro Verzeichnis einstellbar (gespeichert in `.clau.conf`),
 | **Skills** | Anleitungen aus `~/.claude/skills/` und `./.claude/skills/`, die das Modell bei Bedarf lädt | Schalter für das Skill-Tool |
 
 Je weniger Tools und MCP-Server aktiv sind, desto kürzer der Prompt und desto schneller das Modell.
+**pi als Subagent** (`CLAU_PI_SUB=1`, Standard aus; Hauptmenü `x` → MCP-Server → `6`): Claude Code und nano bekommen die Tools
+`pi_agent_starten`, `pi_agent_abwarten` und `pi_agent_status` (MCP-Server `pi_sub_mcp.py`). Der Hauptagent gibt abgegrenzte Teilaufgaben ab, jede
+läuft als eigener schlanker `pi -p`-Prozess (~1,7k statt ~36k Token Prompt) im Projektordner; mit `nur_lesen` darf der Subagent nichts ändern.
+Einstellbar: `CLAU_PI_SUB_MODEL` (Standard `owl:121`, auch `owl:d<ID>` für Direkt-Modelle; im Menü `m`) und `CLAU_PI_SUB_MAX` (gleichzeitige
+Subagenten, Standard 2; im Menü `n`) – weitere Aufträge warten in der Schlange. Läuft unabhängig vom Team-Modus; braucht pi
+(`CLAU_PI_INSTALL=1 clau --install`). Berichte stehen auch unter `~/.cache/clau/pi-sub/`.
+
+**Gitea** (Standard aus; Einstellungen → `g`): eine lokale Gitea-Instanz ([go-gitea/gitea](https://github.com/go-gitea/gitea), MIT) für alle clau-Sessions
+mit Git-Repositories und Ticketsystem. Einschalten holt das Release-Binary (~120 MB, SHA256-geprüft, nach `~/.local/share/clau/gitea`, anderer Ort:
+`CLAU_GITEA_HOME`) und gilt global; der Port ist einstellbar (Standard 3300, auch `CLAU_GITEA_PORT`; `CLAU_GITEA=1/0` überschreibt den Schalter einmalig).
+Die Instanz hört nur auf 127.0.0.1 (SQLite, keine Registrierung, kein SSH). Die erste clau-Session startet sie, weitere hängen sich an dieselbe Instanz,
+die letzte beendet sie (ein Wächter prüft alle 2 s, auch nach Absturz). Zugang zur Weboberfläche: Menü → 6 (Benutzer `clau`).
+Pro Projektverzeichnis legt clau ein Repository `clau/<ordner>` an, setzt in Git-Projekten den Remote `gitea` und schiebt beim ersten Anlegen
+den aktuellen Stand hinein. Jeder Harness bekommt einen Fork in einer eigenen Organisation (`h-claude`, `h-nano`, `h-opencode`, `h-atomic`, `h-pi`;
+Remote `gitea-<harness>`). Das Tool `gitea` (MCP, `gitea_mcp.py`) gibt dem Modell `ticket_liste`, `ticket_lesen`, `ticket_neu`, `ticket_kommentar`,
+`ticket_aendern`, `pull_request_neu` und `repo_info`, damit der Harness Tickets abarbeitet. Es ist automatisch aktiv, sobald Gitea an ist, und lässt sich
+pro Projekt abschalten (`x` → MCP-Server → 7, `CLAU_GITEA_PROJECT=0` in `.clau.conf`). Tool und Repo-Anlage gelten für owl-Sessions
+(Claude Code und nano über QuiteQue/Direkt); für andere Sessions legt Menü → 5 das Repo an.
+
 nano enthält dafür einen eigenen MCP-Client (stdio); die Konfiguration übergibt clau per `NANO_MCP_CONFIG`.
 
 ## Qwen Token Plan (Harness `qwenplan`)
