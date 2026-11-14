@@ -9,7 +9,7 @@ aus clau.sh (bzw. den Sidecar-Dateien) und führt Aktionen über die nicht-inter
 clau-Flags aus. Die Kernlogik bleibt in clau.sh (Single Source of Truth).
 
 Bereiche:
-  * Config-Leiste   aktueller Ordner + Zusammenfassung (Modell, Engine, Autonomie, Team, Websuche)
+  * Config-Leiste   aktueller Ordner + Zusammenfassung (Modell, Harness, Autonomie, Team, Websuche)
   * Modellwahl      Presets (Claude + owl) + Qwen-Optionen + freies Feld → clau --set-model
   * Session-Tabelle Hier/Alle, Aktionen: Neu, Fortsetzen, Umbenennen, Export, Löschen, tmux fixieren
   * tmux-Panel      tmux ls + Anbinden / Beenden
@@ -59,7 +59,7 @@ ALL_PRESETS = CLAUDE_PRESETS + OWL_PRESETS + QWEN_PRESETS
 # ── Konfig-Schlüssel, die die GUI in der Leiste anzeigt ───────────────────────
 DISPLAY_KEYS = {
     "CLAU_MODEL": "Modell",
-    "CLAU_BACKEND": "Engine",
+    "CLAU_BACKEND": "Harness",
     "CLAU_QWEN_MODEL": "Qwen-Modell",
     "CLAU_INTERACTION_LEVEL": "Autonomie",
     "CLAU_TEAM": "Team",

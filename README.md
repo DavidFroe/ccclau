@@ -77,7 +77,7 @@ clau --git-down               # Pull von origin
 ### Hauptmenü
 
 ```
-clau — mario  [owl:120, Engine: claude]
+clau — mario  [owl:120, Harness: claude]
   Letzte Sessions hier:
        Name                         Modell         Zuletzt     Tokens
    1)  Mario-Game mit Python        owl:120        vor 3 Min      54k
@@ -91,7 +91,7 @@ clau — mario  [owl:120, Engine: claude]
    w) Modell wechseln
    i) Markdown importieren         (neue Session aus Datei)
    f) Fernsteuerung …              (Telegram/Handy, API)
-   e) Einstellungen …              (Engine, Qwen-Key, Bot, Team, Update)
+   e) Einstellungen …              (Harness, Qwen-Key, Bot, Team, Update)
 ```
 
 - **Neue Session** braucht einen Namen. clau gibt die Session-ID vor (`--session-id`) und
@@ -117,34 +117,34 @@ clau — mario  [owl:120, Engine: claude]
 
 ### Modellwahl (interaktiv, Taste w)
 
-| Taste | Engine | Modell |
+| Taste | Harness | Modell |
 |-------|--------|--------|
 | 1-4 | Claude Code + Claude-Abo | haiku (4.5) / sonnet (5.5) / opus (5.5) / fable (5) |
-| 9 (Standard, Enter) | gewählte Engine + owlAPI | Universal `owl:222` (ab 96k, lädt nie um) |
-| 5 | Engine + owlAPI | Turbo 27B `owl:122` (97k) |
-| 6 | Engine + owlAPI | Flash-Next `owl:121`, 2 Sessions à 97k, MTP |
-| 7 | Engine + owlAPI | Flash-Next `owl:126`, 261k, 1 Session, ohne MTP |
-| a | Engine + owlAPI | Flash-Next `owl:139`, 97k, 1 Session, MTP |
-| b | Engine + owlAPI | Qwen3.8-35B-A3B `owl:129` (32k, 3 Slots, Tools+Vision, ~110 Tok/s) |
-| 8 | Engine + owlAPI | Coder `owl:137` (97k) |
-| 0 | Engine + owlAPI | QuiteQue Free-Plan `owl:free` (Router) |
+| 9 (Standard, Enter) | gewählte Harness + owlAPI | Universal `owl:222` (ab 96k, lädt nie um) |
+| 5 | Harness + owlAPI | Turbo 27B `owl:122` (97k) |
+| 6 | Harness + owlAPI | Flash-Next `owl:121`, 2 Sessions à 97k, MTP |
+| 7 | Harness + owlAPI | Flash-Next `owl:126`, 261k, 1 Session, ohne MTP |
+| a | Harness + owlAPI | Flash-Next `owl:139`, 97k, 1 Session, MTP |
+| b | Harness + owlAPI | Qwen3.8-35B-A3B `owl:129` (32k, 3 Slots, Tools+Vision, ~110 Tok/s) |
+| 8 | Harness + owlAPI | Coder `owl:137` (97k) |
+| 0 | Harness + owlAPI | QuiteQue Free-Plan `owl:free` (Router) |
 | q1-q10 | Claude Code + Qwen Token Plan | qwen3.8-max (Standard), qwen3.8-flash, … glm-5.2, auto |
-| owl-ID (z.B. `350`) | Engine + owlAPI | alle übrigen Modelle, live aus `/v1/models`, in Spalten nach Anbieter |
-| o | Engine + owlAPI | ID direkt eingeben |
+| owl-ID (z.B. `350`) | Harness + owlAPI | alle übrigen Modelle, live aus `/v1/models`, in Spalten nach Anbieter |
+| o | Harness + owlAPI | ID direkt eingeben |
 
-(Engine = Claude Code, oder nano mit `CLAU_BACKEND=nano`.)
+(Harness = Claude Code, oder nano mit `CLAU_BACKEND=nano`.)
 
 Die owlAPI-Liste wird live abgefragt und in `~/.cache/clau/owl_models.json` gecacht (1 h);
 daraus kommt auch das Kontext-Fenster für Auto-Compact.
 
-## Engines (nano, Claude Code, opencode)
+## Harnesses (nano, Claude Code, opencode)
 
-Standard-Engine ist **Claude Code** (`CLAU_BACKEND="claude"`); **nano** (`CLAU_BACKEND="nano"`) ist wählbar: ein Python-Nachbau von Claude Code
+Standard-Harness ist **Claude Code** (`CLAU_BACKEND="claude"`); **nano** (`CLAU_BACKEND="nano"`) ist wählbar: ein Python-Nachbau von Claude Code
 ([nano-claude-code](https://github.com/DavidFroe/Propellerlabs-Coder), MIT, im Repo unter `vendor/nano/`).
 Er wird beim ersten Start in eine eigene venv installiert (`~/.local/share/clau/nano-venv`, braucht Python ≥ 3.10)
 und spricht über den lokalen owl-Proxy mit QuiteQue. Claude Code muss dafür nicht installiert sein.
 
-| Engine | Wann |
+| Harness | Wann |
 |--------|------|
 | `nano` (wählbar) | alle `owl:*`-Modelle, interaktiv und als Kurzauftrag `clau "AUFTRAG"` |
 | `claude` (Standard) | alle Modelle, besonders Claude-Abo-Modelle (haiku/sonnet/opus/fable), Team-Modus, Fernsteuerung (`--api`), Qwen Token Plan |
@@ -152,7 +152,7 @@ und spricht über den lokalen owl-Proxy mit QuiteQue. Claude Code muss dafür ni
 
 Rückfall auf Claude Code passiert automatisch, wenn nano nicht installierbar ist (`CLAU_OFFLINE=1` ohne
 vorhandene Installation, Python < 3.10) oder das Modell/der Modus nano nicht bedient.
-Umschalten: Hauptmenü → Einstellungen → CLI-Engine, oder `CLAU_BACKEND=claude clau`.
+Umschalten: Hauptmenü → Einstellungen → CLI-Harness, oder `CLAU_BACKEND=claude clau`.
 
 Sessions: nano speichert in `~/.nano_claude/sessions/*.json` (in der Liste „Alle auf diesem System" mit `[nano]`).
 Claude-Code-Sessions (`~/.claude/projects/*/<uuid>.jsonl`) lassen sich in nano per `--resume <uuid>` fortsetzen;
@@ -175,7 +175,7 @@ Drei getrennte Dinge, pro Verzeichnis einstellbar (gespeichert in `.clau.conf`),
 Je weniger Tools und MCP-Server aktiv sind, desto kürzer der Prompt und desto schneller das Modell.
 nano enthält dafür einen eigenen MCP-Client (stdio); die Konfiguration übergibt clau per `NANO_MCP_CONFIG`.
 
-## Qwen Token Plan (Engine `qwenplan`)
+## Qwen Token Plan (Harness `qwenplan`)
 
 Claude Code direkt gegen Alibabas Anthropic-kompatiblen Token-Plan-Endpunkt, ohne Proxy.
 
@@ -189,7 +189,7 @@ clau --qwen-model                # Modell wählen (Default qwen3.8-max, schnell 
 - Vor dem Start ein Mini-Request (`max_tokens=1`): Key, Modell und leeres Kontingent werden klar gemeldet
   (`CLAU_QWENPLAN_PREFLIGHT=0` schaltet das ab).
 - Prompt-Cache greift auch sessionübergreifend (`CLAUDE_CODE_ATTRIBUTION_HEADER=0`).
-- Laut AGB **nur interaktiv**: Headless, MCP/QuiteQue und Telegram-Hooks sind für diese Engine gesperrt.
+- Laut AGB **nur interaktiv**: Headless, MCP/QuiteQue und Telegram-Hooks sind für diese Harness gesperrt.
 
 ## Custom Compact
 
@@ -411,7 +411,7 @@ und führt Aktionen über die nicht-interaktiven Flags aus (Kernlogik bleibt in 
 
 | Bereich | Funktion |
 |---|---|
-| **Konfiguration** | Ordner + Zusammenfassung (Modell, Engine, Autonomie, Team, Websuche, tmux) aus `.clau.conf` |
+| **Konfiguration** | Ordner + Zusammenfassung (Modell, Harness, Autonomie, Team, Websuche, tmux) aus `.clau.conf` |
 | **Modell** | Presets (haiku/sonnet/opus/fable, `owl:120/121/126/129/free`) + Qwen-Optionen + freies Feld → `clau --set-model` |
 | **Sessions** | Tabelle (Hier/Alle) mit Name, Ordner, Modell, Zuletzt, Tokens; Aktionen: Neue, Fortsetzen, Umbenennen, Export `.md`, tmux fixieren, Löschen |
 | **tmux** | `tmux ls` + Anbinden / Beenden |
@@ -514,15 +514,15 @@ Delegate-Spec (`"eskalation": {"ziel": "...", "fehler_max": 3}`). Jeder Proxy tr
 Zeitpunkt/Grund/Modellwechsel mit Kontextgrößen, Anfragen und Token je Modell). Die Erkennung der Kompaktierung beruht auf dem
 Zusammenfassungs-Prompt von Claude Code (Version 2.1.322 geprüft); ändert er sich, zählt sie nicht mehr.
 
-## Engine „atomic“ (optional, Quelle: GitHub)
+## Harness „atomic“ (optional, Quelle: GitHub)
 
 [bastani-inc/atomic](https://github.com/bastani-inc/atomic) (MIT) ist eine eigene Agent-Laufzeit (TypeScript, pi-Abkömmling) mit
-Workflows, Prüfstufen und Freigabe-Schritten. ccclau bindet sie nur als weitere Engine ein, **kein Fork, nichts vendored**: die Quelle
+Workflows, Prüfstufen und Freigabe-Schritten. ccclau bindet sie nur als weitere Harness ein, **kein Fork, nichts vendored**: die Quelle
 wird bei Bedarf von GitHub geholt (Release-Archiv ~105 MB, entpackt ~360 MB; der Installer prüft `SHA256SUMS`).
 
 ```bash
 CLAU_ATOMIC_INSTALL=1 clau --install        # holt atomic bei der Installation mit (sonst nur ein Hinweis am Ende)
-clau --backend atomic -m owl:d137           # oder Engine-Menü Punkt 5; fehlt atomic, wird es nach Rückfrage von GitHub geholt
+clau --backend atomic -m owl:d137           # oder Harness-Menü Punkt 4; fehlt atomic, wird es nach Rückfrage von GitHub geholt
 CLAU_ATOMIC_HOME=/pfad/mit/platz            # Installation + eigene Konfig (≥ 1,5 GB frei nötig, Standard ~/.local/share/clau/atomic)
 CLAU_ATOMIC_VERSION=0.9.78                  # Version festnageln (Standard: neuestes Release)
 ```
@@ -531,7 +531,7 @@ atomic spricht OpenAI-Format direkt (kein `owl_proxy`) und liest eine eigene `mo
 Konfig-/Sitzungsordner (`$CLAU_ATOMIC_HOME/agent`), deine `~/.atomic` bleibt unberührt; Telemetrie und Versionsprüfung sind aus,
 mit `CLAU_OFFLINE=1` auch alles Netz. Hinweis: Im Druckmodus liest atomic piped Eingaben mit – bei Skripten `</dev/null` setzen.
 
-## Engine „pi“ (optional, Quelle: GitHub)
+## Harness „pi“ (optional, Quelle: GitHub)
 
 [earendil-works/pi](https://github.com/earendil-works/pi) (MIT) ist ein minimalistischer Terminal-Coding-Agent. Wie bei atomic: **kein Fork,
 nichts vendored**, das Linux-Release (`pi-linux-x64`/`arm64.tar.gz`, ~60 MB, eigenständiges Binary, kein Node nötig) kommt bei Bedarf von
@@ -539,7 +539,7 @@ GitHub und wird gegen `SHA256SUMS` geprüft.
 
 ```bash
 CLAU_PI_INSTALL=1 clau --install            # holt pi bei der Installation mit
-clau --backend pi -m owl:122                # oder Engine-Menü Punkt 6; fehlt pi, wird es nach Rückfrage von GitHub geholt
+clau --backend pi -m owl:122                # oder Harness-Menü Punkt 5; fehlt pi, wird es nach Rückfrage von GitHub geholt
 CLAU_PI_HOME=/pfad/mit/platz                # Installation + eigene Konfig (≥ 600 MB frei, Standard ~/.local/share/clau/pi)
 CLAU_PI_VERSION=v1.5.2                      # Version festnageln (Standard: neuestes Release)
 ```

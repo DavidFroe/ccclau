@@ -2918,9 +2918,9 @@ Headless-Optionen:
   -f, --folder PATH               Zielverzeichnis für --new
   -m, --mdl MODEL                 Modell: haiku | sonnet | opus | fable | owl:<ID>
       --backend claude|opencode|qwenplan|atomic|pi
-                                  CLI-Engine für diesen Aufruf (Standard: claude,
+                                  CLI-Harness für diesen Aufruf (Standard: claude,
                                   per-Verzeichnis in .clau.conf gespeichert via Menü
-                                  "CLI-Engine wechseln"). qwenplan = Claude Code mit
+                                  "CLI-Harness wechseln"). qwenplan = Claude Code mit
                                   Alibaba Qwen Token Plan, nur interaktiv (AGB)
       --qwen-model [MODELL]       Modell für qwenplan setzen (ohne Wert: Auswahlmenü)
       --qwen-key                  Qwen-Token-Plan-Key eintragen/erneuern (gilt einen Monat)
@@ -2945,7 +2945,7 @@ Model-Mappings:
   Claude Code (agentisch):  1=haiku(4.5)  2=sonnet(5)  3=opus(5.5)  4=fable(5)
   owlAPI (für --model N):   b=owl:129 (35B schnell)  5=owl:122 (Turbo 27B)  6=owl:121 (Flash GSQ 2×97k MTP)  7=owl:126 (Flash Q3 1×261k kein MTP)  a=owl:139 (Flash Q3 1×97k MTP)  8=owl:137 (Coder)  9=owl:222 (Universal ab 96k, Standard)  0=owl:free
   owlAPI direkt:            -m owl:350  oder  -m 350   (interaktiv: Live-Liste der owlAPI)
-  Qwen Token Plan:          -m qwen:qwen3.8-max  (setzt Engine qwenplan für diesen Aufruf)
+  Qwen Token Plan:          -m qwen:qwen3.8-max  (setzt Harness qwenplan für diesen Aufruf)
 
 Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_AUTO_COMPACT_WINDOW="90000"   Festes Auto-Compact-Limit (leer = Prozent-basiert)
@@ -2955,9 +2955,9 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
   CLAU_TRACE="0"                     1 = Denkprotokoll/Fortschritt der Session mitschneiden (Proxy; Datei <sid>.trace.jsonl); Abruf live:
                                      clau --verfolgen [--port P] status|lesen [seit]|live|an|aus, per MCP aktivitaet_lesen/fortschritt
-  CLAU_PI_INSTALL="0"                1 = bei clau --install auch pi (earendil-works/pi, MIT) von GitHub holen; Engine: --backend pi
+  CLAU_PI_INSTALL="0"                1 = bei clau --install auch pi (earendil-works/pi, MIT) von GitHub holen; Harness: --backend pi
                                      CLAU_PI_HOME=<Pfad> (Installation + eigene Konfig), CLAU_PI_VERSION=<Tag>
-  CLAU_ATOMIC_INSTALL="0"            1 = bei clau --install auch atomic (bastani-inc/atomic, MIT) von GitHub holen; Engine: --backend atomic
+  CLAU_ATOMIC_INSTALL="0"            1 = bei clau --install auch atomic (bastani-inc/atomic, MIT) von GitHub holen; Harness: --backend atomic
                                      CLAU_ATOMIC_HOME=<Pfad> (Installation + eigene Konfig, ~1,5 GB frei nötig), CLAU_ATOMIC_VERSION=<Tag>
   CLAU_ESC="0"                       1 = Laufzeit-Eskalation: bei zu vielen Kompaktierungen/Fehlern/Abbrüchen/Schleifen auf CLAU_ESC_TARGET
                                      (z.B. d-qwen3.8-flash-next-q3xl-1x261k) umschalten; Schwellen CLAU_ESC_COMPACT=3 _FEHLER=5
@@ -2967,7 +2967,7 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_SOLIDCRAFT="0"                1 = SolidCraft-CAD-MCP (Brücke :8311, nur owl-Modelle) einschalten, siehe solidcraft_mcp.py
   CLAU_MATLAB="0"                    1 = MATLAB-MCP (Windows-VM, nur owl-Modelle) einschalten, siehe matlab_mcp.py
   CLAU_WEBSEARCH="1"                 Lokale QuiteQue-Websuche als MCP-Tool (Default an, ~300 Tokens)
-  CLAU_BACKEND="claude"               CLI-Engine: claude (Standard) | nano | opencode | qwenplan | atomic | pi
+  CLAU_BACKEND="claude"               Harness (CLI): claude (Standard) | nano | opencode | qwenplan | atomic | pi
   CLAU_QWEN_MODEL="qwen3.8-max"       Modell für qwenplan (Key: ~/.config/clau/qwenplan.key, chmod 600)
   CLAU_QWEN_FAST_MODEL="qwen3.8-flash" schnelles Modell für qwenplan
   CLAU_QWEN_COMPACT_AT="200000"       qwenplan: Auto-Compact ab so vielen Tokens (Fenster 1M; höher = mehr Credits/Anfrage)
@@ -3099,7 +3099,7 @@ show_current() {
   echo "Aktuelles Verzeichnis : $(pwd)"
   echo "Konfiguriertes Modell : $mdl"
   echo "Modell-Route          : $route"
-  echo "CLI-Engine            : $(effective_backend)"
+  echo "Harness                 : $(effective_backend)"
   if [[ "$(effective_backend)" == "qwenplan" ]]; then
     echo "Qwen-Modell           : ${CLAU_QWEN_MODEL} (schnell: ${CLAU_QWEN_FAST_MODEL})"
     echo "Qwen-Key-Datei        : $QWENPLAN_KEY_FILE $([[ -f "$QWENPLAN_KEY_FILE" ]] && echo "(vorhanden)" || echo "(FEHLT)")"
@@ -3262,7 +3262,7 @@ choose_model_interactive() {
         _qwenplan_key >/dev/null 2>&1 || qwenplan_set_key_interactive \
           || echo "Ohne Key startet 'qwenplan' nicht — später: Einstellungen (e → 2) oder clau --qwen-key." >&2
         save_config
-        echo "Engine: qwenplan, Qwen-Modell: $CLAU_QWEN_MODEL"
+        echo "Harness: qwenplan, Qwen-Modell: $CLAU_QWEN_MODEL"
         return 0
       fi
       echo "Ungültige Auswahl."; continue
@@ -3323,14 +3323,13 @@ choose_user_interactive() {
 
 choose_backend_interactive() {
   echo
-  echo "CLI-Engine wählen:"
+  echo "Harness wählen:"
   echo "  1) claude              Claude Code   Standard  (nötig für Claude-Abo-Modelle und Team-Modus)  [Enter]"
   echo "  2) nano                nano-claude-code (Python), nur für owl-Modelle"
-  echo "  3) opencode            opencode.ai   alternative Engine"
-  echo "  4) qwenplan            Claude Code   mit Alibaba Qwen Token Plan (nur interaktiv)"
-  echo "  5) atomic              bastani-inc/atomic (MIT) – Workflows/Prüfstufen, nur owl-Modelle, wird von GitHub geholt"
-  echo "  6) pi                  earendil-works/pi (MIT) – minimaler Coding-Agent, nur owl-Modelle, wird von GitHub geholt"
-  printf "Auswahl [1-6, Enter=1]: "
+  echo "  3) opencode            opencode.ai   alternatives Harness"
+  echo "  4) atomic              bastani-inc/atomic (MIT) – Workflows/Prüfstufen, nur owl-Modelle, wird von GitHub geholt"
+  echo "  5) pi                  earendil-works/pi (MIT) – minimaler Coding-Agent, nur owl-Modelle, wird von GitHub geholt"
+  printf "Auswahl [1-5, Enter=1]: "
   read -r choice
   case "${choice:-1}" in
     1) CLAU_BACKEND="claude" ;;
@@ -3345,12 +3344,6 @@ choose_backend_interactive() {
       fi
       ;;
     4)
-      CLAU_BACKEND="qwenplan"
-      _qwenplan_key >/dev/null 2>&1 || qwenplan_set_key_interactive \
-        || echo "Ohne Key startet 'qwenplan' nicht — später: Einstellungen (e → 2) oder clau --qwen-key." >&2
-      choose_qwen_model_interactive
-      ;;
-    5)
       CLAU_BACKEND="atomic"
       if ! _atomic_bin >/dev/null; then
         echo "atomic ist noch nicht installiert (Quelle: https://github.com/bastani-inc/atomic)."
@@ -3359,7 +3352,7 @@ choose_backend_interactive() {
         fi
       fi
       ;;
-    6)
+    5)
       CLAU_BACKEND="pi"
       if ! _pi_bin >/dev/null; then
         echo "pi ist noch nicht installiert (Quelle: https://github.com/earendil-works/pi)."
@@ -3371,7 +3364,7 @@ choose_backend_interactive() {
     *) echo "Ungültige Auswahl."; return ;;
   esac
   save_config
-  echo "CLI-Engine: $CLAU_BACKEND"
+  echo "Harness: $CLAU_BACKEND"
 }
 
 ensure_model() {
@@ -3848,17 +3841,22 @@ run_opencode_session() {
   _ensure_opencode_runtime || exit 1
   _opencode_sync_config "$mdl"
   local model_arg; model_arg="$(_opencode_model_arg "$mdl")"
+  # Übernommener Verlauf einer Claude-Code-Session (siehe run_resume_id)
+  local _port_prompt=()
+  if [[ -n "${CLAU_PORT_PROMPT_FILE:-}" && -f "$CLAU_PORT_PROMPT_FILE" ]]; then
+    _port_prompt=("$(cat "$CLAU_PORT_PROMPT_FILE")")
+  fi
   if [[ "$(effective_backend)" == "atomic" ]]; then
     echo "Starte atomic (Modell: $mdl) ..."
     cleanup_tool_blocking; unset_token_saver_env
     _atomic_env
-    exec "$(_atomic_bin)" --model "$model_arg"
+    exec "$(_atomic_bin)" --model "$model_arg" "${_port_prompt[@]}"
   fi
   if [[ "$(effective_backend)" == "pi" ]]; then
     echo "Starte pi (Modell: $mdl) ..."
     cleanup_tool_blocking; unset_token_saver_env
     _pi_env
-    exec "$(_pi_bin)" --model "$model_arg"
+    exec "$(_pi_bin)" --model "$model_arg" "${_port_prompt[@]}"
   fi
   echo "Starte opencode (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   cleanup_tool_blocking
@@ -3868,6 +3866,7 @@ run_opencode_session() {
   # Usage/Help zurück statt zu starten). Level-0-Vollautomatik müsste über
   # den "permission"-Block in opencode.json laufen, nicht über einen
   # CLI-Flag -- noch nicht verifiziert, daher vorerst weggelassen.
+  if [[ "${#_port_prompt[@]}" -gt 0 ]]; then exec opencode --model "$model_arg" --prompt "${_port_prompt[0]}"; fi
   exec opencode --model "$model_arg"
 }
 
@@ -3963,7 +3962,9 @@ _atomic_model_arg() {
 
 _atomic_sync_config() {
   _owl_activity_env "agent"
-  CLAU_ATOMIC_AGENT_DIR="$CLAU_ATOMIC_HOME/agent" CLAU_QQ_USER="$QQ_USER" python3 "$ATOMIC_SETUP_SCRIPT" sync >/dev/null
+  OWL_HDR_AGENT_TOOL="ccclau-atomic" OWL_HDR_REQUEST_CONTEXT="$OWL_HDR_REQUEST_CONTEXT" \
+    OWL_HDR_PROJECT="$OWL_HDR_PROJECT" OWL_HDR_USER="$OWL_HDR_USER" \
+    CLAU_ATOMIC_AGENT_DIR="$CLAU_ATOMIC_HOME/agent" CLAU_QQ_USER="$QQ_USER" python3 "$ATOMIC_SETUP_SCRIPT" sync >/dev/null
 }
 
 _atomic_env() {
@@ -4050,7 +4051,10 @@ _pi_model_arg() {
 
 _pi_sync_config() {
   _owl_activity_env "agent"
-  CLAU_PI_AGENT_DIR="$CLAU_PI_HOME/agent" CLAU_QQ_USER="$QQ_USER" python3 "$PI_SETUP_SCRIPT" sync >/dev/null
+  # _owl_activity_env setzt die Header-Variablen nur, exportiert sie nicht -- QuiteQue lehnt ohne sie mit 400 ab
+  OWL_HDR_AGENT_TOOL="ccclau-pi" OWL_HDR_REQUEST_CONTEXT="$OWL_HDR_REQUEST_CONTEXT" \
+    OWL_HDR_PROJECT="$OWL_HDR_PROJECT" OWL_HDR_USER="$OWL_HDR_USER" \
+    CLAU_PI_AGENT_DIR="$CLAU_PI_HOME/agent" CLAU_QQ_USER="$QQ_USER" python3 "$PI_SETUP_SCRIPT" sync >/dev/null
 }
 
 _pi_env() {
@@ -4346,7 +4350,7 @@ install_self() {
   echo "Fertig. 'clau' ist einsatzbereit."
   _have claude   || echo "  Hinweis: 'claude' evtl. erst nach Shell-Neustart im PATH."
   _have opencode || echo "  Hinweis: 'opencode' evtl. erst nach Shell-Neustart im PATH."
-  _atomic_bin >/dev/null || echo "  Optional: 'atomic' (https://github.com/bastani-inc/atomic, MIT) als Engine: CLAU_ATOMIC_INSTALL=1 clau --install, oder 'clau --backend atomic' (holt es dann von GitHub)."
+  _atomic_bin >/dev/null || echo "  Optional: 'atomic' (https://github.com/bastani-inc/atomic, MIT) als Harness: CLAU_ATOMIC_INSTALL=1 clau --install, oder 'clau --backend atomic' (holt es dann von GitHub)."
 }
 
 uninstall_self() {
@@ -4621,7 +4625,7 @@ _session_export_md() {
     slug="$(echo "$title" | tr -cs 'A-Za-z0-9äöüÄÖÜß' '-' | sed 's/^-*//;s/-*$//')"
     [[ -n "$slug" ]] || slug="$sid"
   fi
-  local out="./${slug}.md"
+  local out="${2:-./${slug}.md}"
   python3 - "$sf" "$sid" "${title:-<ohne Titel>}" "$out" <<'PY'
 import json
 import sys
@@ -4681,6 +4685,29 @@ with open(out, "w") as f:
 
 print(out)
 PY
+}
+
+# Verlauf einer Claude-Code-Session als Startprompt für Engines, die das Session-Format nicht lesen
+# (opencode, atomic, pi). Tool-Ausgaben sind schon gekürzt; zu lange Verläufe werden vorn abgeschnitten
+# (CLAU_PORT_MAX_CHARS, Standard 60000 ≈ 15-20k Token). Gibt den Pfad einer Temp-Datei aus.
+_session_port_prompt_file() {
+  local sid="$1" sf tmp
+  sf="$(_session_file_for_id "$sid" 2>/dev/null)" || return 1
+  [[ -f "$sf" ]] || return 1
+  tmp="$(mktemp "${TMPDIR:-/tmp}/clau-port.XXXXXX")"
+  _session_export_md "$sf" "$tmp" >/dev/null || { rm -f "$tmp"; return 1; }
+  python3 - "$tmp" "${CLAU_PORT_MAX_CHARS:-60000}" <<'PY'
+import sys
+p, mx = sys.argv[1], int(sys.argv[2])
+t = open(p, encoding="utf-8").read()
+if len(t) > mx:
+    t = "[… älterer Verlauf weggelassen …]\n\n" + t[-mx:]
+head = ("Das hier ist der bisherige Verlauf einer früheren Session in diesem Projekt (aus einem anderen Harness "
+        "übernommen, Tool-Ausgaben gekürzt). Lies ihn, fasse in ein bis zwei Sätzen zusammen, wo wir stehen, "
+        "und warte dann auf meine nächste Anweisung.\n\n---\n\n")
+open(p, "w", encoding="utf-8").write(head + t)
+PY
+  echo "$tmp"
 }
 
 # Import: nimmt eine beliebige .md-Datei, erzeugt eine neue Session mit ihrem
@@ -4805,6 +4832,21 @@ session_action_menu() {
   fi
   case "${action:-1}" in
     1)
+      # Engine weicht ab → fragen (wie beim Modell), womit fortgesetzt wird
+      local old_eng; old_eng="$(_session_engine_get "$sid")"
+      local cur_eng; cur_eng="$(effective_backend)"
+      if [[ "$old_eng" != "$cur_eng" ]]; then
+        echo "  Diese Session lief zuletzt mit dem Harness $old_eng, eingestellt ist $cur_eng."
+        case "$cur_eng" in
+          opencode|atomic|pi) echo "    a) mit $cur_eng — der Verlauf wird als Text übernommen (Tool-Ausgaben gekürzt)   [Enter]" ;;
+          nano) echo "    a) mit nano — liest den Verlauf der Claude-Code-Session direkt   [Enter]" ;;
+          *) echo "    a) mit $cur_eng   [Enter]" ;;
+        esac
+        echo "    b) mit dem alten Harness $old_eng"
+        printf "  Auswahl [a/b]: "
+        local ee; read -r ee
+        if [[ "$ee" =~ ^[bB] ]]; then CLI_BACKEND_OVERRIDE="$old_eng"; cur="$(_current_model_spec)"; fi
+      fi
       # Modell weicht von der Voreinstellung ab → fragen, womit fortgesetzt wird
       if [[ -n "$model" && "$model" != "owl:?" && "$model" != "$cur" ]]; then
         echo "  Diese Session lief zuletzt mit $(_model_label "$model"), eingestellt ist $(_model_label "$cur")."
@@ -5287,20 +5329,28 @@ PY
 # Merkt sich zu einer Session im aktuellen Ordner das Modell, mit dem clau sie
 # startet (bei owl sieht man es der Session-Datei sonst nicht an).
 _session_meta_set() {
-  local sid="$1" spec="$2"
+  local sid="$1" spec="$2" eng="${3:-$(effective_backend)}"
   [[ -n "$sid" && -n "$spec" ]] || return 0
   local bdir; bdir="$(_claude_projects_dir)/$(_project_hash_for)"
   mkdir -p "$bdir" 2>/dev/null || return 0
-  python3 - "$bdir/.clau-session-meta.json" "$sid" "$spec" <<'PY' 2>/dev/null || true
+  python3 - "$bdir/.clau-session-meta.json" "$sid" "$spec" "$eng" <<'PY' 2>/dev/null || true
 import json, sys, time
-path, sid, spec = sys.argv[1:4]
+path, sid, spec, eng = sys.argv[1:5]
 try:
     d = json.load(open(path))
 except Exception:
     d = {}
-d[sid] = {"model": spec, "t": int(time.time())}
+d[sid] = dict(d.get(sid) or {}, model=spec, engine=eng, t=int(time.time()))
 json.dump(d, open(path, "w"), indent=1)
 PY
+}
+
+# Engine, mit der clau eine Session zuletzt gestartet hat (claude | nano | qwenplan; ohne Eintrag: claude)
+_session_engine_get() {
+  local bdir; bdir="$(_claude_projects_dir)/$(_project_hash_for)"
+  python3 -c 'import json,sys
+try: print((json.load(open(sys.argv[1])).get(sys.argv[2]) or {}).get("engine") or "claude")
+except Exception: print("claude")' "$bdir/.clau-session-meta.json" "$1" 2>/dev/null || echo claude
 }
 
 # Aktuelle Modellwahl als Kennung: opus | owl:120 | qwen:qwen3.8-max
@@ -5566,8 +5616,23 @@ run_resume_id() {
   if _ext_engine; then
     # $rid ist eine Claude-Code-Session-ID (aus cc_compact.py) -- opencode
     # hat kein passendes Gegenstück dazu (Phase 2: Kompressions-Brücke).
-    echo "Hinweis: Session-ID $rid ist Claude-Code-Format, nicht auf opencode übertragbar." >&2
-    run_opencode_session
+    # Verlauf nur nach ausdrücklicher Zustimmung einspeisen: der Startprompt löst sofort eine Modellantwort
+    # (= Token) aus. Ohne Terminal oder bei Enter startet das Harness leer.
+    local _pf=""
+    if [[ -t 0 ]]; then
+      _pf="$(_session_port_prompt_file "$rid")" || _pf=""
+      if [[ -n "$_pf" ]]; then
+        echo "Session ${rid:0:8}… in $(effective_backend) fortsetzen:"
+        echo "    a) mit leerem Kontext starten (keine Token)   [Enter]"
+        echo "    b) Verlauf einspeisen (~$(( $(wc -c < "$_pf") / 4 )) Token Startprompt, danach antwortet das Modell sofort)"
+        printf "  Auswahl [a/b]: "
+        local _pc; read -r _pc
+        [[ "$_pc" =~ ^[bB] ]] || { rm -f "$_pf"; _pf=""; }
+      else
+        echo "Hinweis: Verlauf der Session $rid ließ sich nicht übertragen — $(effective_backend) startet leer." >&2
+      fi
+    fi
+    CLAU_PORT_PROMPT_FILE="$_pf" run_opencode_session
     return
   fi
   if is_owl_model "$mdl"; then
@@ -5867,7 +5932,7 @@ interactive_start() {
   done < <(_here_sessions_scan)
 
   echo
-  echo "clau — $(basename "$(pwd)")  [$tag, Engine: $(effective_backend), Benutzer: $QQ_USER]"
+  echo "clau — $(basename "$(pwd)")  [$tag, Harness: $(effective_backend), Benutzer: $QQ_USER]"
   if [[ "${#recent[@]}" -gt 0 ]]; then
     echo "  Letzte Sessions hier:"
     _session_table 0 1 "${recent[@]}"
@@ -5877,13 +5942,13 @@ interactive_start() {
   echo "   n) Neue Session                 [Enter]"
   echo "   s) Weitere Sessions …           (alle hier / alle auf dem System / laufende)"
   echo "   w) Modell wechseln"
-  echo "   u) Benutzer wechseln            ($QQ_USER; gilt für alle Engines)"
+  echo "   u) Benutzer wechseln            ($QQ_USER; gilt für alle Harnesses)"
   echo "   x) Tools, MCP, Skills …         (Freigaben für dieses Verzeichnis)"
   echo "   i) Markdown importieren         (neue Session aus Datei)"
   local ntm=0; _have tmux && ntm="$( { tmux ls 2>/dev/null || true; } | wc -l)"
   echo "   t) tmux-Sitzungen …             ($ntm laufen auf diesem Rechner)"
   echo "   f) Fernsteuerung …              (Telegram/Handy, API)"
-  echo "   e) Einstellungen …              (Engine, Qwen-Key, Bot, Team, Update)"
+  echo "   e) Einstellungen …              (Harness, Qwen-Key, Bot, Team, Update)"
   echo "   q) Beenden"
   printf "Auswahl [%sn s w u x i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt 3 ]] && echo "m, ")"
   local c; read -r c
@@ -5933,7 +5998,7 @@ choose_settings_menu() {
   while true; do
     echo
     echo "Einstellungen:"
-    echo "  1) CLI-Engine                : $(effective_backend)   (Claude Code / opencode / Qwen Token Plan)"
+    echo "  1) Harness                    : $(effective_backend)   (Claude Code / opencode / Qwen Token Plan)"
     echo "  2) Qwen-Token-Plan-Key       : $([[ -f "$QWENPLAN_KEY_FILE" ]] && echo "vom $(date -r "$QWENPLAN_KEY_FILE" '+%d.%m.%Y')" || echo "fehlt")"
     echo "  3) Bot-Einstellungen …       (Autonomie, sudo, Effort, Auto-Compact, Timeout)"
     echo "  4) Team-Modus …              : $(team_on && echo "AN — $(team_set_label)" || echo aus)"
@@ -6266,7 +6331,7 @@ parse_args() {
         esac
         save_config
         if [[ "$(effective_backend)" == "qwenplan" ]]; then
-          echo "Qwen-Modell gesetzt auf: $CLAU_QWEN_MODEL (Engine: qwenplan)"
+          echo "Qwen-Modell gesetzt auf: $CLAU_QWEN_MODEL (Harness: qwenplan)"
         else
           echo "Standardmodell gesetzt auf: $CLAU_MODEL"
         fi
