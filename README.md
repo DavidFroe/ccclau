@@ -531,6 +531,21 @@ atomic spricht OpenAI-Format direkt (kein `owl_proxy`) und liest eine eigene `mo
 Konfig-/Sitzungsordner (`$CLAU_ATOMIC_HOME/agent`), deine `~/.atomic` bleibt unberührt; Telemetrie und Versionsprüfung sind aus,
 mit `CLAU_OFFLINE=1` auch alles Netz. Hinweis: Im Druckmodus liest atomic piped Eingaben mit – bei Skripten `</dev/null` setzen.
 
+## Engine „pi“ (optional, Quelle: GitHub)
+
+[earendil-works/pi](https://github.com/earendil-works/pi) (MIT) ist ein minimalistischer Terminal-Coding-Agent. Wie bei atomic: **kein Fork,
+nichts vendored**, das Linux-Release (`pi-linux-x64`/`arm64.tar.gz`, ~60 MB, eigenständiges Binary, kein Node nötig) kommt bei Bedarf von
+GitHub und wird gegen `SHA256SUMS` geprüft.
+
+```bash
+CLAU_PI_INSTALL=1 clau --install            # holt pi bei der Installation mit
+clau --backend pi -m owl:122                # oder Engine-Menü Punkt 6; fehlt pi, wird es nach Rückfrage von GitHub geholt
+CLAU_PI_HOME=/pfad/mit/platz                # Installation + eigene Konfig (≥ 600 MB frei, Standard ~/.local/share/clau/pi)
+CLAU_PI_VERSION=v1.5.2                      # Version festnageln (Standard: neuestes Release)
+```
+pi liest eine eigene `models.json` (`pi_setup.py`, gleiche Logik wie atomic): Direkt-Modelle (`owl:d…`) und QuiteQue (`owl:<ID>`). Nur
+owl-Modelle. Eigener Konfigordner (`$CLAU_PI_HOME/agent`), deine `~/.pi` bleibt unberührt; Telemetrie aus, mit `CLAU_OFFLINE=1` auch alles Netz.
+
 ## Offline-Betrieb
 
 Für Umgebungen ohne Internet (devport-VMs: nur Gitea, apt-Cache, lokale LLMs):

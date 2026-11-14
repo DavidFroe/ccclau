@@ -2914,7 +2914,7 @@ Headless-Optionen:
   -p, --prompt TEXT               Prompt-Text für headless mode (erforderlich bei --headless)
   -f, --folder PATH               Zielverzeichnis für --new
   -m, --mdl MODEL                 Modell: haiku | sonnet | opus | fable | owl:<ID>
-      --backend claude|opencode|qwenplan|atomic
+      --backend claude|opencode|qwenplan|atomic|pi
                                   CLI-Engine für diesen Aufruf (Standard: claude,
                                   per-Verzeichnis in .clau.conf gespeichert via Menü
                                   "CLI-Engine wechseln"). qwenplan = Claude Code mit
@@ -2952,6 +2952,8 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_DISABLE_AGENT_VIEW="1"        Hintergrund-Agenten deaktivieren (spart ~1-2K Tokens)
   CLAU_TRACE="0"                     1 = Denkprotokoll/Fortschritt der Session mitschneiden (Proxy; Datei <sid>.trace.jsonl); Abruf live:
                                      clau --verfolgen [--port P] status|lesen [seit]|live|an|aus, per MCP aktivitaet_lesen/fortschritt
+  CLAU_PI_INSTALL="0"                1 = bei clau --install auch pi (earendil-works/pi, MIT) von GitHub holen; Engine: --backend pi
+                                     CLAU_PI_HOME=<Pfad> (Installation + eigene Konfig), CLAU_PI_VERSION=<Tag>
   CLAU_ATOMIC_INSTALL="0"            1 = bei clau --install auch atomic (bastani-inc/atomic, MIT) von GitHub holen; Engine: --backend atomic
                                      CLAU_ATOMIC_HOME=<Pfad> (Installation + eigene Konfig, ~1,5 GB frei nötig), CLAU_ATOMIC_VERSION=<Tag>
   CLAU_ESC="0"                       1 = Laufzeit-Eskalation: bei zu vielen Kompaktierungen/Fehlern/Abbrüchen/Schleifen auf CLAU_ESC_TARGET
@@ -2962,7 +2964,7 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_SOLIDCRAFT="0"                1 = SolidCraft-CAD-MCP (Brücke :8311, nur owl-Modelle) einschalten, siehe solidcraft_mcp.py
   CLAU_MATLAB="0"                    1 = MATLAB-MCP (Windows-VM, nur owl-Modelle) einschalten, siehe matlab_mcp.py
   CLAU_WEBSEARCH="1"                 Lokale QuiteQue-Websuche als MCP-Tool (Default an, ~300 Tokens)
-  CLAU_BACKEND="claude"               CLI-Engine: claude (Standard) | nano | opencode | qwenplan | atomic
+  CLAU_BACKEND="claude"               CLI-Engine: claude (Standard) | nano | opencode | qwenplan | atomic | pi
   CLAU_QWEN_MODEL="qwen3.8-max"       Modell für qwenplan (Key: ~/.config/clau/qwenplan.key, chmod 600)
   CLAU_QWEN_FAST_MODEL="qwen3.8-flash" schnelles Modell für qwenplan
   CLAU_QWEN_COMPACT_AT="200000"       qwenplan: Auto-Compact ab so vielen Tokens (Fenster 1M; höher = mehr Credits/Anfrage)
@@ -3053,7 +3055,7 @@ effective_model() {
 # CLI-Engine (nicht zu verwechseln mit dem Modell-Routing owl-vs-Claude):
 # "claude" (Claude Code, Standard) oder "opencode".
 # "Externe" Engines (eigene CLI, sprechen OpenAI-Format direkt, kein Claude Code): opencode und atomic
-_ext_engine() { [[ "$(effective_backend)" == "opencode" || "$(effective_backend)" == "atomic" ]]; }
+_ext_engine() { [[ "$(effective_backend)" == "opencode" || "$(effective_backend)" == "atomic" || "$(effective_backend)" == "pi" ]]; }
 
 effective_backend() {
   if [[ -n "${CLI_BACKEND_OVERRIDE:-}" ]]; then
@@ -3324,7 +3326,8 @@ choose_backend_interactive() {
   echo "  3) opencode            opencode.ai   alternative Engine"
   echo "  4) qwenplan            Claude Code   mit Alibaba Qwen Token Plan (nur interaktiv)"
   echo "  5) atomic              bastani-inc/atomic (MIT) – Workflows/Prüfstufen, nur owl-Modelle, wird von GitHub geholt"
-  printf "Auswahl [1-5, Enter=1]: "
+  echo "  6) pi                  earendil-works/pi (MIT) – minimaler Coding-Agent, nur owl-Modelle, wird von GitHub geholt"
+  printf "Auswahl [1-6, Enter=1]: "
   read -r choice
   case "${choice:-1}" in
     1) CLAU_BACKEND="claude" ;;
@@ -3350,6 +3353,15 @@ choose_backend_interactive() {
         echo "atomic ist noch nicht installiert (Quelle: https://github.com/bastani-inc/atomic)."
         if ask_yes_no "Jetzt von GitHub holen?"; then
           _ensure_atomic || echo "Installation fehlgeschlagen — 'atomic' bleibt vorerst nicht nutzbar." >&2
+        fi
+      fi
+      ;;
+    6)
+      CLAU_BACKEND="pi"
+      if ! _pi_bin >/dev/null; then
+        echo "pi ist noch nicht installiert (Quelle: https://github.com/earendil-works/pi)."
+        if ask_yes_no "Jetzt von GitHub holen?"; then
+          _ensure_pi || echo "Installation fehlgeschlagen — 'pi' bleibt vorerst nicht nutzbar." >&2
         fi
       fi
       ;;
@@ -3731,6 +3743,7 @@ _ensure_opencode() {
 _opencode_model_arg() {
   local mdl="$1"
   if [[ "$(effective_backend)" == "atomic" ]]; then _atomic_model_arg "$mdl"; return; fi
+  if [[ "$(effective_backend)" == "pi" ]]; then _pi_model_arg "$mdl"; return; fi
   if is_owl_model "$mdl"; then
     echo "owl/$(owl_model_id "$mdl")"
   else
@@ -3745,6 +3758,7 @@ _opencode_model_arg() {
 _opencode_sync_config() {
   local mdl="$1"
   if [[ "$(effective_backend)" == "atomic" ]]; then _atomic_sync_config "$mdl"; return; fi
+  if [[ "$(effective_backend)" == "pi" ]]; then _pi_sync_config "$mdl"; return; fi
   local model_arg; model_arg="$(_opencode_model_arg "$mdl")"
   if is_owl_model "$mdl"; then
     # QuiteQue verlangt X-Request-Context/X-Agent-Tool/X-Project inzwischen
@@ -3808,6 +3822,7 @@ PY
 # Stellt sicher dass opencode installiert ist (fragt ggf. nach Installation).
 _ensure_opencode_runtime() {
   if [[ "$(effective_backend)" == "atomic" ]]; then _ensure_atomic_runtime; return; fi
+  if [[ "$(effective_backend)" == "pi" ]]; then _ensure_pi_runtime; return; fi
   _have opencode && return 0
   echo "opencode ist nicht installiert." >&2
   if ask_yes_no "Jetzt installieren?"; then
@@ -3836,6 +3851,12 @@ run_opencode_session() {
     _atomic_env
     exec "$(_atomic_bin)" --model "$model_arg"
   fi
+  if [[ "$(effective_backend)" == "pi" ]]; then
+    echo "Starte pi (Modell: $mdl) ..."
+    cleanup_tool_blocking; unset_token_saver_env
+    _pi_env
+    exec "$(_pi_bin)" --model "$model_arg"
+  fi
   echo "Starte opencode (Modell: $mdl, Autonomie: $(interaction_label)) ..."
   cleanup_tool_blocking
   unset_token_saver_env
@@ -3861,6 +3882,11 @@ build_opencode_headless_cmd() {
   if [[ "$(effective_backend)" == "atomic" ]]; then
     _atomic_env
     OPENCODE_CMD=("$(_atomic_bin)" --model "$model_arg" --print "$PROMPT_TEXT")
+    return
+  fi
+  if [[ "$(effective_backend)" == "pi" ]]; then
+    _pi_env
+    OPENCODE_CMD=("$(_pi_bin)" --model "$model_arg" --print "$PROMPT_TEXT")
     return
   fi
   OPENCODE_CMD+=("$PROMPT_TEXT")
@@ -3940,6 +3966,93 @@ _atomic_sync_config() {
 _atomic_env() {
   export ATOMIC_CODING_AGENT_DIR="$CLAU_ATOMIC_HOME/agent" ATOMIC_TELEMETRY=0 ATOMIC_SKIP_VERSION_CHECK=1
   [[ "${CLAU_OFFLINE:-0}" == "1" ]] && export ATOMIC_OFFLINE=1
+  return 0
+}
+
+# ── Backend "pi": https://github.com/earendil-works/pi (MIT), optionale Engine ───────────
+# Minimalistischer Terminal-Coding-Agent. Nichts vendored: das Linux-Release (pi-linux-x64/arm64.tar.gz, ~60 MB,
+# eigenständiges Binary, SHA256-geprüft) kommt bei Bedarf von GitHub (clau --install mit CLAU_PI_INSTALL=1 oder beim
+# ersten Start der Engine). pi spricht OpenAI-Format direkt und liest eine eigene models.json (pi_setup.py):
+# Direkt-Modelle (owl:d…) und QuiteQue (owl:ID). Eigener Konfig-Ordner, deine ~/.pi bleibt unberührt.
+CLAU_PI_HOME="${CLAU_PI_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/clau/pi}"
+PI_SETUP_SCRIPT="$CLAU_DIR/pi_setup.py"
+
+_pi_bin() {
+  local p
+  for p in "$CLAU_PI_HOME/install/pi/pi" "$(command -v pi 2>/dev/null)"; do
+    [[ -n "$p" && -x "$p" ]] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+_ensure_pi() {
+  if _pi_bin >/dev/null; then
+    echo "  pi: bereits vorhanden ($(_pi_bin))"
+    return 0
+  fi
+  if [[ "${CLAU_OFFLINE:-0}" == "1" ]]; then
+    echo "  pi: fehlt, CLAU_OFFLINE=1 → übersprungen (nur für --backend pi nötig)."
+    return 1
+  fi
+  _have curl || { echo "  WARN: pi braucht curl zum Herunterladen." >&2; return 1; }
+  local arch; case "$(uname -m)" in
+    x86_64|amd64) arch=x64 ;; aarch64|arm64) arch=arm64 ;;
+    *) echo "  WARN: pi-Release gibt es nur für x86_64/arm64 (hier: $(uname -m))." >&2; return 1 ;;
+  esac
+  mkdir -p "$CLAU_PI_HOME/install" 2>/dev/null || { echo "  WARN: $CLAU_PI_HOME nicht anlegbar." >&2; return 1; }
+  local free_mb; free_mb="$(df -Pm "$CLAU_PI_HOME" 2>/dev/null | awk 'NR==2{print $4}')"
+  if [[ -n "$free_mb" && "$free_mb" -lt 600 ]]; then
+    echo "  WARN: nur ${free_mb} MB frei unter $CLAU_PI_HOME (nötig ~600 MB). Anderer Ort: CLAU_PI_HOME=/pfad" >&2
+    return 1
+  fi
+  local base="https://github.com/earendil-works/pi/releases/latest/download"
+  [[ -n "${CLAU_PI_VERSION:-}" ]] && base="https://github.com/earendil-works/pi/releases/download/${CLAU_PI_VERSION}"
+  echo "  pi: nicht gefunden — hole Release von GitHub (earendil-works/pi, MIT; SHA256 wird geprüft) ..."
+  local tmp; tmp="$(mktemp -d)"
+  local f="pi-linux-${arch}.tar.gz"
+  if ! curl -fsSL "$base/$f" -o "$tmp/$f" || ! curl -fsSL "$base/SHA256SUMS" -o "$tmp/SUMS"; then
+    rm -rf "$tmp"; echo "  WARN: Download fehlgeschlagen (Netz?)." >&2; return 1
+  fi
+  local want have
+  want="$(awk -v f="$f" '$2==f{print $1}' "$tmp/SUMS")"
+  have="$(sha256sum "$tmp/$f" | awk '{print $1}')"
+  if [[ -z "$want" || "$want" != "$have" ]]; then
+    rm -rf "$tmp"; echo "  WARN: SHA256 stimmt nicht — Installation abgebrochen." >&2; return 1
+  fi
+  rm -rf "$CLAU_PI_HOME/install/pi"
+  tar xzf "$tmp/$f" -C "$CLAU_PI_HOME/install" || { rm -rf "$tmp"; echo "  WARN: Entpacken fehlgeschlagen." >&2; return 1; }
+  rm -rf "$tmp"
+  _pi_bin >/dev/null
+}
+
+_ensure_pi_runtime() {
+  _pi_bin >/dev/null && return 0
+  echo "pi ist nicht installiert (Quelle: https://github.com/earendil-works/pi, MIT)." >&2
+  if ask_yes_no "Jetzt von GitHub holen und installieren?"; then
+    _ensure_pi && return 0
+  fi
+  echo "Kann ohne pi nicht fortfahren." >&2
+  return 1
+}
+
+# pi kennt hier nur OpenAI-kompatible Endpunkte: owl:d… (direkt) und owl:ID (QuiteQue), keine Claude-Abo-Modelle.
+_pi_model_arg() {
+  local mdl="$1"
+  if ! is_owl_model "$mdl"; then
+    echo "pi unterstützt nur owl-Modelle (owl:d… direkt oder owl:ID über QuiteQue), nicht '$mdl'." >&2
+    exit 1
+  fi
+  CLAU_PI_AGENT_DIR="$CLAU_PI_HOME/agent" python3 "$PI_SETUP_SCRIPT" model-arg "$mdl"
+}
+
+_pi_sync_config() {
+  _owl_activity_env "agent"
+  CLAU_PI_AGENT_DIR="$CLAU_PI_HOME/agent" CLAU_QQ_USER="$QQ_USER" python3 "$PI_SETUP_SCRIPT" sync >/dev/null
+}
+
+_pi_env() {
+  export PI_CODING_AGENT_DIR="$CLAU_PI_HOME/agent" PI_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1
+  [[ "${CLAU_OFFLINE:-0}" == "1" ]] && export PI_OFFLINE=1
   return 0
 }
 
@@ -4210,6 +4323,7 @@ install_self() {
   _ensure_claude_code || true
   _ensure_opencode || true
   [[ "${CLAU_ATOMIC_INSTALL:-0}" == "1" ]] && { _ensure_atomic || true; }
+  [[ "${CLAU_PI_INSTALL:-0}" == "1" ]] && { _ensure_pi || true; }
   _ensure_tmux || true
   _ensure_python_requests || true
 
@@ -4639,6 +4753,7 @@ run_import_md() {
     cleanup_tool_blocking
     unset_token_saver_env
     if [[ "$(effective_backend)" == "atomic" ]]; then _atomic_env; exec "$(_atomic_bin)" --model "$model_arg" "$content"; fi
+    if [[ "$(effective_backend)" == "pi" ]]; then _pi_env; exec "$(_pi_bin)" --model "$model_arg" "$content"; fi
     exec opencode --model "$model_arg" --prompt "$content"
   fi
   local new_id; new_id="$(_session_import_md "$md_file")"
@@ -6085,8 +6200,8 @@ parse_args() {
         shift 2
         ;;
       --backend)
-        if [[ -z "${2:-}" || ( "$2" != "claude" && "$2" != "opencode" && "$2" != "qwenplan" && "$2" != "atomic" ) ]]; then
-          echo "--backend erwartet: claude|opencode|qwenplan|atomic" >&2
+        if [[ -z "${2:-}" || ( "$2" != "claude" && "$2" != "opencode" && "$2" != "qwenplan" && "$2" != "atomic" && "$2" != "pi" ) ]]; then
+          echo "--backend erwartet: claude|opencode|qwenplan|atomic|pi" >&2
           exit 1
         fi
         CLI_BACKEND_OVERRIDE="$2"
