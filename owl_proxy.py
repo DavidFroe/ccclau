@@ -464,6 +464,8 @@ class StreamTranslator:
         self.ended = False
         self.retry_ok = False       # Proxy darf eine leere Antwort einmal neu anfragen
         self.empty_pending = False  # leere Antwort erkannt, Retry steht aus
+        self.len_retry_ok = False   # Proxy darf einmal neu anfragen, wenn das Token-Limit im Denken verbraucht wurde
+        self.len_pending = False
 
     def _akt_tools(self):
         """Tool-Aufrufe einmal ins Denkprotokoll (Argumente sind erst am Ende vollständig)."""
@@ -587,6 +589,12 @@ class StreamTranslator:
                 # Komplett leer (kein Text, kein Denken, kein Tool): nichts ausgeben,
                 # _stream fragt einmal neu an. Erst wenn auch das leer bleibt, kommt der Hinweis.
                 self.empty_pending = True
+                return "".join(out)
+            if (self.len_retry_ok and finish_reason == "length" and self.thinking_started
+                    and not self.text_started and not self.tool_buffers):
+                # Token-Limit komplett im Denken verbraucht: Denkblock bleibt offen,
+                # _stream fragt einmal mit gedrosselter Denktiefe neu an.
+                self.len_pending = True
                 return "".join(out)
             if self.thinking_started and not self.thinking_closed:
                 self.thinking_closed = True
@@ -898,7 +906,24 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         **ACTIVITY_HEADERS,
                         **({"Authorization": "Bearer " + ROUTE_KEYS[base]} if base in ROUTE_KEYS else {}),
                     })
-            self._stream(resp, model_name, est_input_tokens, target, sse, retry_fn=_retry_leer)
+            def _retry_laenge():
+                # Denken hat das ganze Token-Limit aufgebraucht: kurz denken, direkt antworten.
+                pl = dict(oai_payload)
+                pl["reasoning_effort"] = "low"
+                pl["messages"] = list(pl["messages"]) + [{"role": "system", "content": (
+                    "Dein bisheriges Nachdenken hat das gesamte Token-Limit verbraucht, ohne dass eine Antwort entstand. "
+                    "Denke jetzt höchstens kurz nach und liefere SOFORT die Antwort bzw. den nächsten Tool-Aufruf. "
+                    "Große Aufgaben in kleine Schritte zerlegen und nur den ersten Schritt ausführen.")}]
+                return requests.post(
+                    f"{base}/chat/completions", json=pl, stream=True, timeout=REQUEST_TIMEOUT,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-OwlTrail-User": OWL_USER,
+                        "X-Owl-Max-Wait": str(max(60, REQUEST_TIMEOUT - 60)),
+                        **ACTIVITY_HEADERS,
+                        **({"Authorization": "Bearer " + ROUTE_KEYS[base]} if base in ROUTE_KEYS else {}),
+                    })
+            self._stream(resp, model_name, est_input_tokens, target, sse, retry_fn=_retry_leer, len_retry_fn=_retry_laenge)
         else:
             self._single(resp, model_name, est_input_tokens, target)
 
@@ -1009,7 +1034,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 pass
         return n_lines
 
-    def _stream(self, owl_resp, model_name, est_input_tokens=0, target=None, sse=None, retry_fn=None):
+    def _stream(self, owl_resp, model_name, est_input_tokens=0, target=None, sse=None, retry_fn=None, len_retry_fn=None):
         t0 = time.monotonic()
         n_lines = 0
         try:
@@ -1017,6 +1042,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 sse = self._sse_open(model_name, est_input_tokens, target)
             tr, write_lock, n_pings = sse["tr"], sse["lock"], sse["pings"]
             tr.retry_ok = retry_fn is not None
+            tr.len_retry_ok = len_retry_fn is not None
             n_lines = 0
             while True:
                 r = self._pump(owl_resp, tr, write_lock, n_pings, t0, n_lines)
@@ -1032,6 +1058,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
                     owl_resp = retry_fn()
+                    continue
+                if tr.len_pending and len_retry_fn is not None:
+                    tr.len_pending = False
+                    tr.len_retry_ok = False
+                    log(f"  Token-Limit im Denken verbraucht (model={tr.target}) -- einmaliger Retry mit reasoning_effort=low")
+                    try:
+                        owl_resp.close()
+                    except Exception:
+                        pass
+                    owl_resp = len_retry_fn()
                     continue
                 break
             end_evts = tr.finish()
