@@ -197,6 +197,11 @@ pro Projekt abschalten (`x` → MCP-Server → 7, `CLAU_GITEA_PROJECT=0` in `.cl
 
 nano enthält dafür einen eigenen MCP-Client (stdio); die Konfiguration übergibt clau per `NANO_MCP_CONFIG`.
 
+## Assistent bei „Neue Session“
+
+Nach dem Session-Namen fragt clau kurz (Enter = Vorgabe, nur offene Fragen): **tmux** (überlebt Terminal-Abstürze) und **Gitea** –
+ist Gitea an, ob dieses Projekt es nutzt (`CLAU_GITEA_PROJECT`, wird in `.clau.conf` gemerkt); ist es aus, ob es jetzt eingerichtet werden soll.
+
 ## Custom Compact
 
 Für Sessions, die nicht mehr in den Kontext eines lokalen Modells passen: `cc_compact.py`

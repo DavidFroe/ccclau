@@ -3702,6 +3702,33 @@ choose_bot_settings() {
   done
 }
 
+# Ja/Nein mit Vorgabe (Enter = Vorgabe j|n); fragt immer, auch bei Autonomie 0 (es geht um Einstellungen, nicht um Freigaben).
+_frage_jn() {
+  local prompt="$1" def="${2:-n}" a hint="[j/N]"
+  [[ "$def" == "j" ]] && hint="[J/n]"
+  read -r -p "$prompt $hint: " a || return 1
+  case "${a,,}" in j|ja|y|yes) return 0 ;; n|nein|no) return 1 ;; *) [[ "$def" == "j" ]] ;; esac
+}
+
+# Kurzer Assistent bei "Neue Session": tmux und Gitea, nur Fragen, die noch offen sind.
+_new_session_wizard() {
+  [[ -t 0 ]] || return 0
+  if [[ "${CLAU_TMUX:-0}" != "1" && "${CLAU_TMUX_ONCE:-0}" != "1" && -z "${TMUX:-}" ]] && command -v tmux >/dev/null 2>&1; then
+    _frage_jn "In tmux starten (Session überlebt Terminal-Abstürze)?" n && CLAU_TMUX_ONCE=1
+  fi
+  [[ -f "$GITEA_MGR_SCRIPT" ]] || return 0
+  if _gitea_enabled; then
+    local def=n; [[ "${CLAU_GITEA_PROJECT:-1}" == "1" ]] && def=j
+    if _frage_jn "Gitea (Repo + Tickets) in diesem Projekt nutzen?" "$def"; then CLAU_GITEA_PROJECT=1; else CLAU_GITEA_PROJECT=0; fi
+  elif _frage_jn "Gitea (lokaler Git-Server mit Repo + Tickets, ~120 MB Download) einrichten und nutzen?" n; then
+    local ver; ver="$(python3 "$GITEA_MGR_SCRIPT" status | python3 -c 'import json,sys; print(json.load(sys.stdin).get("installiert") or "-")')"
+    if [[ "$ver" == "-" ]]; then
+      python3 "$GITEA_MGR_SCRIPT" install || { echo "Installation fehlgeschlagen — Gitea bleibt aus."; return 0; }
+    fi
+    python3 "$GITEA_MGR_SCRIPT" set enabled 1 && CLAU_GITEA_PROJECT=1 && echo "Gitea ist an (für alle Projekte; pro Projekt abschaltbar)."
+  fi
+}
+
 # Neue Session mit Pflicht-Namen. clau gibt die Session-ID vor (--session-id),
 # damit Name (--name, /rename-Titel) und Modell zur Session gemerkt werden.
 NEW_SESSION_ARGS=()
@@ -3713,6 +3740,7 @@ run_new_session_named() {
     sname="$(printf '%s' "$sname" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     [[ -z "$sname" ]] && echo "  Bitte einen Namen eingeben (zum Wiederfinden in der Session-Liste)."
   done
+  _new_session_wizard
   local sid; sid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid;print(uuid.uuid4())')"
   CLAU_SESSION_NAME="$sname"
   save_config
