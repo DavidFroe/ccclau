@@ -2107,6 +2107,13 @@ run_owl_via_claude() {
 
   # Timeout-Konfiguration: verhindert dass claude den Proxy nach 2 Min killt
   export BASH_DEFAULT_TIMEOUT_MS="${CLAU_TIMEOUT_DEFAULT:-1800000}"
+  # Lange Antworten lokaler Modelle: Claude Codes Stream-Wächter ("The response stopped arriving") und
+  # API-Timeout hochsetzen, mehr Wiederholungen bei Abbrüchen (Standardwerte sind für die Anthropic-API gedacht).
+  if [[ "${CLAU_DURCHARBEITEN:-1}" == "1" ]]; then
+    export CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS="${CLAU_STREAM_IDLE_MS:-1800000}"
+    export API_TIMEOUT_MS="${CLAU_API_TIMEOUT_MS:-3600000}"
+    export CLAUDE_CODE_MAX_RETRIES="${CLAU_MAX_RETRIES:-10}"
+  fi
   export BASH_MAX_TIMEOUT_MS="${CLAU_TIMEOUT_MAX:-7200000}"
 
   local extra; extra="$(_interaction_args)"
@@ -2500,6 +2507,13 @@ run_owl_headless_via_claude() {
 
   # Timeout-Konfiguration
   export BASH_DEFAULT_TIMEOUT_MS="${CLAU_TIMEOUT_DEFAULT:-1800000}"
+  # Lange Antworten lokaler Modelle: Claude Codes Stream-Wächter ("The response stopped arriving") und
+  # API-Timeout hochsetzen, mehr Wiederholungen bei Abbrüchen (Standardwerte sind für die Anthropic-API gedacht).
+  if [[ "${CLAU_DURCHARBEITEN:-1}" == "1" ]]; then
+    export CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS="${CLAU_STREAM_IDLE_MS:-1800000}"
+    export API_TIMEOUT_MS="${CLAU_API_TIMEOUT_MS:-3600000}"
+    export CLAUDE_CODE_MAX_RETRIES="${CLAU_MAX_RETRIES:-10}"
+  fi
   export BASH_MAX_TIMEOUT_MS="${CLAU_TIMEOUT_MAX:-7200000}"
 
   echo "Claude Code headless → Proxy :${port} → QuiteQue (Modell $owl_id${cw:+, ctx=$cw})"
@@ -2595,6 +2609,7 @@ load_config() {
   QQ_USER="$CLAU_QQ_USER"
   : "${CLAU_SESSION_ID:=}"
   : "${CLAU_INTERACTION_LEVEL:=0}"
+  : "${CLAU_DURCHARBEITEN:=1}"
   : "${CLAU_EFFORT:=}"
   : "${CLAU_SESSION_NAME:=}"
   : "${CLAU_AUTO_COMPACT_ENABLED:=1}"
@@ -2708,6 +2723,7 @@ save_config() {
 CLAU_MODEL="${CLAU_MODEL}"
 CLAU_SESSION_ID="${CLAU_SESSION_ID}"
 CLAU_INTERACTION_LEVEL="${CLAU_INTERACTION_LEVEL}"
+CLAU_DURCHARBEITEN="${CLAU_DURCHARBEITEN:-1}"
 CLAU_EFFORT="${CLAU_EFFORT:-}"
 CLAU_SESSION_NAME="${CLAU_SESSION_NAME:-}"
 CLAU_AUTO_COMPACT_ENABLED="${CLAU_AUTO_COMPACT_ENABLED:-1}"
@@ -3669,8 +3685,9 @@ choose_bot_settings() {
     echo "  3) Effort           — ${CLAU_EFFORT:-medium}  (nur Claude)"
     echo "  4) Auto-Compact     — $(auto_compact_status)"
     echo "  5) Timeout          — $(( CLAU_TIMEOUT_DEFAULT / 60000 )) Min / $(( CLAU_TIMEOUT_MAX / 60000 )) Min"
+    echo "  6) Durcharbeiten    — $([[ "${CLAU_DURCHARBEITEN:-1}" == "1" ]] && echo "AN  (Stream-Wächter 30 Min, API-Timeout 60 Min, 10 Wiederholungen; nur Claude Code)" || echo "AUS (Claude-Code-Standardwerte)")"
     echo "  0) Zurück"
-    printf "Auswahl [0-5]: "
+    printf "Auswahl [0-6]: "
     read -r choice
     case "${choice:-0}" in
       1) choose_interaction_interactive ;;
@@ -3678,6 +3695,7 @@ choose_bot_settings() {
       3) choose_effort_interactive ;;
       4) choose_auto_compact_settings ;;
       5) choose_timeout_settings ;;
+      6) if [[ "${CLAU_DURCHARBEITEN:-1}" == "1" ]]; then CLAU_DURCHARBEITEN=0; else CLAU_DURCHARBEITEN=1; fi; save_config ;;
       0|"") break ;;
       *) echo "Ungültige Auswahl." ;;
     esac
