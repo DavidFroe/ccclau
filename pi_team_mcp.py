@@ -28,7 +28,7 @@ Env:
   CLAU_TEAM_DIR           Ordner mit agents/*.md
   CLAU_TEAM_EXEC_MODEL    Default 121
   CLAU_TEAM_LEAD_MODEL    Default 120
-  CLAU_TEAM_PI_PROVIDER   pi-Provider: owl (QuiteQue, Default) oder qwen-token-plan-individual
+  CLAU_TEAM_PI_PROVIDER   pi-Provider: owl (QuiteQue, Default)
   CLAU_TEAM_PI_SLOTS      z.B. "121=3,120=1" (Default: Ausführer 3, sonst 1)
   CLAU_TEAM_PI_TIMEOUT    Sekunden pro Auftrag, Default 1800
   CLAU_TEAM_LOG_DIR       Default ~/.cache/clau/team
@@ -45,7 +45,7 @@ PI_BIN = os.environ.get("CLAU_PI_BIN", "pi")
 TEAM_DIR = os.environ.get("CLAU_TEAM_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "team"))
 EXEC_MODEL = os.environ.get("CLAU_TEAM_EXEC_MODEL", "121")
 LEAD_MODEL = os.environ.get("CLAU_TEAM_LEAD_MODEL", "120")
-PROVIDER = os.environ.get("CLAU_TEAM_PI_PROVIDER", "owl")  # owl | qwen-token-plan-individual
+PROVIDER = os.environ.get("CLAU_TEAM_PI_PROVIDER", "owl")  # owl
 TIMEOUT = int(os.environ.get("CLAU_TEAM_PI_TIMEOUT", "1800") or 1800)
 LOG_DIR = os.environ.get("CLAU_TEAM_LOG_DIR",
                          os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "clau", "team"))

@@ -91,7 +91,7 @@ clau — mario  [owl:120, Harness: claude]
    w) Modell wechseln
    i) Markdown importieren         (neue Session aus Datei)
    f) Fernsteuerung …              (Telegram/Handy, API)
-   e) Einstellungen …              (Harness, Qwen-Key, Bot, Team, Update)
+   e) Einstellungen …              (Harness, Bot, Team, Update)
 ```
 
 - **Neue Session** braucht einen Namen. clau gibt die Session-ID vor (`--session-id`) und
@@ -128,7 +128,6 @@ clau — mario  [owl:120, Harness: claude]
 | b | Harness + owlAPI | Qwen3.8-35B-A3B `owl:129` (32k, 3 Slots, Tools+Vision, ~110 Tok/s) |
 | 8 | Harness + owlAPI | Coder `owl:137` (97k) |
 | 0 | Harness + owlAPI | QuiteQue Free-Plan `owl:free` (Router) |
-| q1-q10 | Claude Code + Qwen Token Plan | qwen3.8-max (Standard), qwen3.8-flash, … glm-5.2, auto |
 | owl-ID (z.B. `350`) | Harness + owlAPI | alle übrigen Modelle, live aus `/v1/models`, in Spalten nach Anbieter |
 | o | Harness + owlAPI | ID direkt eingeben |
 
@@ -147,8 +146,8 @@ und spricht über den lokalen owl-Proxy mit QuiteQue. Claude Code muss dafür ni
 | Harness | Wann |
 |--------|------|
 | `nano` (wählbar) | alle `owl:*`-Modelle, interaktiv und als Kurzauftrag `clau "AUFTRAG"` |
-| `claude` (Standard) | alle Modelle, besonders Claude-Abo-Modelle (haiku/sonnet/opus/fable), Team-Modus, Fernsteuerung (`--api`), Qwen Token Plan |
-| `opencode` / `qwenplan` | wie bisher |
+| `claude` (Standard) | alle Modelle, besonders Claude-Abo-Modelle (haiku/sonnet/opus/fable), Team-Modus, Fernsteuerung (`--api`) |
+| `opencode` | wie bisher |
 
 Rückfall auf Claude Code passiert automatisch, wenn nano nicht installierbar ist (`CLAU_OFFLINE=1` ohne
 vorhandene Installation, Python < 3.10) oder das Modell/der Modus nano nicht bedient.
@@ -197,22 +196,6 @@ pro Projekt abschalten (`x` → MCP-Server → 7, `CLAU_GITEA_PROJECT=0` in `.cl
 (Claude Code und nano über QuiteQue/Direkt); für andere Sessions legt Menü → 5 das Repo an.
 
 nano enthält dafür einen eigenen MCP-Client (stdio); die Konfiguration übergibt clau per `NANO_MCP_CONFIG`.
-
-## Qwen Token Plan (Harness `qwenplan`)
-
-Claude Code direkt gegen Alibabas Anthropic-kompatiblen Token-Plan-Endpunkt, ohne Proxy.
-
-```bash
-clau --qwen-key                  # Key eintragen/erneuern (verdeckt, wird geprüft; auch Einstellungen e → 2)
-clau --backend qwenplan          # oder Hauptmenü w → q1-q10, oder: clau -m qwen:glm-5.3
-clau --qwen-model                # Modell wählen (Default qwen3.8-max, schnell qwen3.8-flash)
-```
-
-- Key-Datei muss `chmod 600` haben, sonst startet clau nicht.
-- Vor dem Start ein Mini-Request (`max_tokens=1`): Key, Modell und leeres Kontingent werden klar gemeldet
-  (`CLAU_QWENPLAN_PREFLIGHT=0` schaltet das ab).
-- Prompt-Cache greift auch sessionübergreifend (`CLAUDE_CODE_ATTRIBUTION_HEADER=0`).
-- Laut AGB **nur interaktiv**: Headless, MCP/QuiteQue und Telegram-Hooks sind für diese Harness gesperrt.
 
 ## Custom Compact
 
@@ -293,19 +276,17 @@ Endpoint ist `POST /websearch`.
 
 ## Team-Modus
 
-Ein Teamleiter (Claude Code) zerlegt Aufgaben und verteilt sie an Subagenten. Drei Sets
+Ein Teamleiter (Claude Code) zerlegt Aufgaben und verteilt sie an Subagenten. Zwei Sets
 (Einstellungen → Team-Modus, oder `CLAU_TEAM_SET` in `.clau.conf`):
 
 | Set | Teamleiter | Subagenten |
 |---|---|---|
 | `lokal` (Standard) | owl:120 (Claude Code über owl_proxy) | owl:121 als pi-Prozesse |
-| `qwen` | qwen3.8-max (Claude Code über den Token Plan) | qwen3.8-flash als pi-Prozesse |
 | `claude` | Opus (Claude-Abo) | Sonnet als Claude-Code-Agenten |
 
 ```bash
 CLAU_TEAM="1"
-CLAU_TEAM_SET="qwen"          # lokal | qwen | claude
-CLAU_TEAM_QWEN_LEAD="qwen3.8-max"   CLAU_TEAM_QWEN_EXEC="qwen3.8-flash"
+CLAU_TEAM_SET="claude"        # lokal | claude
 CLAU_TEAM_CLAUDE_LEAD="opus"        CLAU_TEAM_CLAUDE_EXEC="sonnet"
 ```
 
@@ -435,7 +416,7 @@ und führt Aktionen über die nicht-interaktiven Flags aus (Kernlogik bleibt in 
 | Bereich | Funktion |
 |---|---|
 | **Konfiguration** | Ordner + Zusammenfassung (Modell, Harness, Autonomie, Team, Websuche, tmux) aus `.clau.conf` |
-| **Modell** | Presets (haiku/sonnet/opus/fable, `owl:120/121/126/129/free`) + Qwen-Optionen + freies Feld → `clau --set-model` |
+| **Modell** | Presets (haiku/sonnet/opus/fable, `owl:120/121/126/129/free`) + freies Feld → `clau --set-model` |
 | **Sessions** | Tabelle (Hier/Alle) mit Name, Ordner, Modell, Zuletzt, Tokens; Aktionen: Neue, Fortsetzen, Umbenennen, Export `.md`, tmux fixieren, Löschen |
 | **tmux** | `tmux ls` + Anbinden / Beenden |
 
