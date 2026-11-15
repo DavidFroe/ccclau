@@ -4643,7 +4643,8 @@ check_for_updates() {
 _interaction_args() {
   local parts=()
   if [[ "${INTERACTION_LEVEL:-2}" -eq 0 ]] && [[ "$(id -u)" -ne 0 ]]; then
-    parts+=(--dangerously-skip-permissions)
+    # bypassPermissions zusätzlich: überstimmt defaultMode "auto" (Klassifikator, "1 action not run") aus ~/.claude/settings.json
+    parts+=(--dangerously-skip-permissions --permission-mode bypassPermissions)
   fi
   local effort="${EFFORT_LEVEL:-${CLAU_EFFORT:-}}"
   if [[ -n "$effort" && "$effort" != "medium" ]]; then
@@ -5833,7 +5834,7 @@ build_headless_cmd() {
   case "$INTERACTION_LEVEL" in
     0)
       if [[ "$(id -u)" -ne 0 ]]; then
-        CLAUDE_CMD+=(--dangerously-skip-permissions)
+        CLAUDE_CMD+=(--dangerously-skip-permissions --permission-mode bypassPermissions)
       fi
       ;;
     1|2) ;;
