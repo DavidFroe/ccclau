@@ -910,10 +910,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 # Denken hat das ganze Token-Limit aufgebraucht: kurz denken, direkt antworten.
                 pl = dict(oai_payload)
                 pl["reasoning_effort"] = "low"
-                pl["messages"] = list(pl["messages"]) + [{"role": "system", "content": (
-                    "Dein bisheriges Nachdenken hat das gesamte Token-Limit verbraucht, ohne dass eine Antwort entstand. "
-                    "Denke jetzt höchstens kurz nach und liefere SOFORT die Antwort bzw. den nächsten Tool-Aufruf. "
-                    "Große Aufgaben in kleine Schritte zerlegen und nur den ersten Schritt ausführen.")}]
+                hinweis = ("Dein bisheriges Nachdenken hat das gesamte Token-Limit verbraucht, ohne dass eine Antwort entstand. "
+                           "Denke jetzt höchstens kurz nach und liefere SOFORT die Antwort bzw. den nächsten Tool-Aufruf. "
+                           "Große Aufgaben in kleine Schritte zerlegen und nur den ersten Schritt ausführen.")
+                # System-Nachrichten nur am Anfang (Chat-Templates lehnen sie sonst ab: "System message must be at the beginning")
+                # -> Hinweis an die letzte User-Nachricht hängen, sonst an die erste System-Nachricht.
+                msgs = [dict(m) for m in pl["messages"]]
+                for m in reversed(msgs):
+                    if m.get("role") == "user" and isinstance(m.get("content"), str):
+                        m["content"] += "\n\n[Hinweis] " + hinweis
+                        break
+                else:
+                    if msgs and msgs[0].get("role") == "system" and isinstance(msgs[0].get("content"), str):
+                        msgs[0]["content"] += "\n\n" + hinweis
+                pl["messages"] = msgs
                 return requests.post(
                     f"{base}/chat/completions", json=pl, stream=True, timeout=REQUEST_TIMEOUT,
                     headers={
