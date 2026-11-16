@@ -514,6 +514,41 @@ def _cmd_preprompt(args: str, state: AgentState, config: dict) -> bool:
     return True
 
 
+def _blocks(m: dict) -> list[dict]:
+    c = m.get("content", "")
+    if isinstance(c, str):
+        return [{"type": "text", "text": c}]
+    out = []
+    for b in c or []:
+        out.append(b if isinstance(b, dict) else {k: getattr(b, k, None) for k in ("type", "text", "name", "input")})
+    return out
+
+
+def _show_recent_history(state: AgentState, n_user: int = 2) -> None:
+    """Beim Fortsetzen: die letzten n_user Nutzer-Eingaben samt Antworten anzeigen (gekürzt), damit man den Faden sieht."""
+    from nano_claude_code import ui
+    msgs = state.messages
+    starts = [i for i, m in enumerate(msgs) if m.get("role") == "user"
+              and any(b.get("type") == "text" and str(b.get("text") or "").strip() for b in _blocks(m))]
+    if not starts:
+        return
+    first = starts[-n_user] if len(starts) >= n_user else starts[0]
+    print(ui.c(f"  ── letzter Verlauf (ab Nachricht {first} von {len(msgs)}) · /history zeigt alle, /preprompt msgs die Größen ──", ui.GREY))
+    cut = lambda t, n: (t[:n].rstrip() + " …") if len(t) > n else t
+    for m in msgs[first:]:
+        for b in _blocks(m):
+            t = b.get("type")
+            if m.get("role") == "user" and t == "text" and str(b.get("text") or "").strip():
+                print("\n" + ui.c("❯ ", ui.BOLD, ui.ACCENT) + cut(str(b["text"]).strip(), 500))
+            elif m.get("role") == "assistant" and t == "text" and str(b.get("text") or "").strip():
+                print(ui.c("● ", ui.ACCENT) + cut(str(b["text"]).strip(), 900))
+            elif t == "tool_use":
+                inp = b.get("input") or {}
+                arg = next((str(v) for v in inp.values() if isinstance(v, (str, int))), "")
+                print(ui.tool_line(f"{b.get('name')}({cut(arg.splitlines()[0] if arg else '', 80)})"))
+    print()
+
+
 def _cmd_cost(_args: str, state: AgentState, config: dict) -> bool:
     cost = calc_cost(config["model"], state.total_input_tokens, state.total_output_tokens)
     _info(f"Input tokens:  {state.total_input_tokens:,}")
@@ -1060,6 +1095,8 @@ _COMMANDS: dict[str, Any] = {
 def _handle_slash(line: str, state: AgentState, config: dict) -> bool | str:
     """Handle slash commands. Returns True if handled, False if not a command,
     or a string prompt to inject into the conversation."""
+    if line.strip().lower() in ("exit", "quit", ":q"):   # auch ohne Schrägstrich beenden
+        return _cmd_exit("", state, config)
     if not line.startswith("/"):
         return False
     parts = line[1:].split(None, 1)
@@ -1394,6 +1431,11 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
     else:
         ui.print_banner(model, provider, len(tools), skill_count=skill_count,
                         session_title=session_title, resumed=_resumed)
+    if resume_state and state.messages:
+        try:
+            _show_recent_history(state)
+        except Exception:
+            pass
     ui.STATUS.update(model=model, mode=perm_mode, ctx="")
 
     last_ctrl_c = 0.0

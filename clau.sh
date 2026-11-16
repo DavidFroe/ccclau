@@ -5685,18 +5685,24 @@ interactive_start() {
   fi
   team_on && tag+=", Team $(team_set)"
 
-  local recent=() l nhere=0
+  # Sessions, die gerade in tmux laufen, kommen zuerst (alle), danach die neuesten bis insgesamt mindestens 3.
+  local recent=() l nhere=0 intmux=() others=() _sid8
   while IFS= read -r l; do
     ((nhere++)) || true
-    [[ "$nhere" -le 3 ]] && recent+=("$l")
+    IFS=$'\x1f' read -r _ _ _sid8 _ <<< "$l"
+    if _tmux_running "$_sid8"; then intmux+=("$l"); else others+=("$l"); fi
   done < <(_here_sessions_scan)
+  recent=("${intmux[@]}")
+  for l in "${others[@]}"; do [[ "${#recent[@]}" -ge 3 ]] && break; recent+=("$l"); done
+  [[ "${#recent[@]}" -gt 9 ]] && recent=("${recent[@]:0:9}")
 
   echo
   echo "clau — $(basename "$(pwd)")  [$tag, Harness: $(effective_backend), Benutzer: $QQ_USER]"
   if [[ "${#recent[@]}" -gt 0 ]]; then
     echo "  Letzte Sessions hier:"
     _session_table 0 1 "${recent[@]}"
-    [[ "$nhere" -gt 3 ]] && echo "   m) mehr …                       (alle $nhere Sessions in diesem Verzeichnis)"
+    [[ "${#intmux[@]}" -gt 0 ]] && echo "  ⧉ = läuft in tmux: die Nummer hängt sich direkt an (Loslösen: Strg-b d)"
+    [[ "$nhere" -gt "${#recent[@]}" ]] && echo "   m) mehr …                       (alle $nhere Sessions in diesem Verzeichnis)"
   fi
   echo
   echo "   n) Neue Session                 [Enter]"
@@ -5710,11 +5716,19 @@ interactive_start() {
   echo "   f) Fernsteuerung …              (Telegram/Handy, API)"
   echo "   e) Einstellungen …              (Harness, Bot, Team, Update)"
   echo "   q) Beenden"
-  printf "Auswahl [%sn s w u x i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt 3 ]] && echo "m, ")"
+  printf "Auswahl [%sn s w u x i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt ${#recent[@]} ]] && echo "m, ")"
   local c; read -r c
   case "${c:-n}" in
-    [1-3])
-      if [[ "$c" -le "${#recent[@]}" ]]; then session_action_menu "${recent[$((c-1))]}"; fi
+    [1-9])
+      if [[ "$c" -le "${#recent[@]}" ]]; then
+        local _msid _mname
+        IFS=$'\x1f' read -r _ _ _msid _ _mname _ <<< "${recent[$((c-1))]}"
+        # Läuft die Session schon in tmux: direkt anhängen, ohne Aktionsmenü
+        if [[ -z "${TMUX:-}" ]] && _tmux_running "$_msid"; then
+          _tmux_wrap resume "$_msid" "$_mname" || true
+        fi
+        session_action_menu "${recent[$((c-1))]}"
+      fi
       interactive_start ;;
     n|N) run_new_session_named ;;
     s|S) choose_sessions_menu; interactive_start ;;
