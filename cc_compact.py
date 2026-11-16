@@ -213,7 +213,7 @@ def _read_sse_text(resp) -> str:
 
 def call_quiteque(
     qq_url: str, user: str, model: str, system: str, user_msg: str,
-    max_tokens: int, timeout: int = 1200
+    max_tokens: int, timeout: int = 1800
 ) -> str:
     """Sendet einen Chat-Completion-Request an QuiteQue (gestreamt -- laut
     QuiteQue-Betreiber ist ein Request dieser Größe ohne Streaming
@@ -225,7 +225,14 @@ def call_quiteque(
     # X-Owl-Max-Wait: wie lange QuiteQue serverseitig auf diesen Request warten
     # darf (inkl. eines evtl. internen Retries), etwas unter unserem eigenen
     # Socket-Timeout, damit der bei uns nicht zuerst zuschlägt.
-    max_wait = max(60, timeout - 60)
+    # OWL_MAX_WAIT wie in owl_proxy.py: Zahl = fest, 0/aus = Header weglassen.
+    _mw = os.environ.get("OWL_MAX_WAIT", "").strip().lower()
+    if _mw in ("0", "aus", "off", "nein", "no"):
+        max_wait_hdr = {}
+    elif _mw.isdigit():
+        max_wait_hdr = {"X-Owl-Max-Wait": _mw}
+    else:
+        max_wait_hdr = {"X-Owl-Max-Wait": str(max(60, timeout - 60))}
     payload = {
         "model": model,
         "messages": [
@@ -244,7 +251,7 @@ def call_quiteque(
         headers={
             "Content-Type": "application/json",
             "X-OwlTrail-User": user,
-            "X-Owl-Max-Wait": str(max_wait),
+            **max_wait_hdr,
             **_activity_headers(),
         },
         method="POST",
@@ -326,7 +333,7 @@ def build_combine_prompt(chunk_summaries: list[str]) -> str:
 
 def summarize_session(
     msgs: list[dict], qq_url: str, user: str, model: str, target_tokens: int,
-    timeout: int = 600,
+    timeout: int = 1800,
 ) -> str:
     """Fasst die Session zusammen. Chunked falls nötig. Liefert finale Zusammenfassung."""
     model = normalize_model_id(model)
@@ -500,8 +507,8 @@ def main():
     ap.add_argument("--target-tokens", type=int, default=DEFAULTS["target_output_tokens"],
                     help=f"Output-Ziel Tokens (default: {DEFAULTS['target_output_tokens']})")
     ap.add_argument("--session", help="Pfad zur Session-JSONL (default: latest im aktuellen Projekt)")
-    ap.add_argument("--timeout", type=int, default=1200,
-                    help="Timeout pro QuiteQue-Request in Sekunden (default: 1200 = 20 Min -- "
+    ap.add_argument("--timeout", type=int, default=1800,
+                    help="Timeout pro QuiteQue-Request in Sekunden (default: 1800 = 30 Min -- "
                          "lokale Modelle können bei großem Input langsam sein)")
     ap.add_argument("--dry-run", action="store_true", help="Nur parsen + planen, keine API-Calls")
     args = ap.parse_args()

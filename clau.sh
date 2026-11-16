@@ -491,7 +491,7 @@ _compact_session_file() {
   _owl_activity_env "compact"
   OWL_HDR_AGENT_TOOL="$OWL_HDR_AGENT_TOOL" OWL_HDR_REQUEST_CONTEXT="$OWL_HDR_REQUEST_CONTEXT" \
   OWL_HDR_PROJECT="$OWL_HDR_PROJECT" OWL_HDR_USER="$OWL_HDR_USER" \
-    python3 "$CC_COMPACT_SCRIPT" --session "$sf" --model "$target_model" >"$tmpf" 2>&1
+    OWL_MAX_WAIT="${CLAU_OWL_MAX_WAIT:-}" python3 "$CC_COMPACT_SCRIPT" --session "$sf" --model "$target_model" >"$tmpf" 2>&1
   local rc=$?
   cat "$tmpf" >&2
   if [[ "$rc" -ne 0 ]]; then
@@ -616,7 +616,7 @@ _start_owl_proxy() {
   OWL_PROXY_THREADED="$threaded" OWL_SLOT_LIMITS="$slot_limits" OWL_ROUTES="${CLAU_OWL_ROUTES:-}" \
   OWL_USAGE_FILE="${CLAU_USAGE_FILE:-}" \
   OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
-    OWL_PROXY_TIMEOUT="${CLAU_OWL_TIMEOUT:-1800}" OWL_CTX_LIMIT="$(owl_context_window "$owl_id")" \
+    OWL_PROXY_TIMEOUT="${CLAU_OWL_TIMEOUT:-1800}" OWL_MAX_WAIT="${CLAU_OWL_MAX_WAIT:-}" OWL_CTX_LIMIT="$(owl_context_window "$owl_id")" \
     OWL_HDR_AGENT_TOOL="$OWL_HDR_AGENT_TOOL" OWL_HDR_REQUEST_CONTEXT="$OWL_HDR_REQUEST_CONTEXT" \
     OWL_HDR_PROJECT="$OWL_HDR_PROJECT" OWL_HDR_USER="$OWL_HDR_USER" \
     python3 "$OWL_PROXY_SCRIPT" "$port" >>"$OWL_PROXY_LOG_FILE" 2>&1 &
@@ -2208,6 +2208,8 @@ run_nano_session() {
   for tok in $(_interaction_args); do
     [[ "$tok" == "--dangerously-skip-permissions" ]] && nano_perm_args+=("$tok")
   done
+  # nano hat keine Root-Sperre wie Claude Code: Autonomie 0 gilt auch für root
+  [[ "${INTERACTION_LEVEL:-2}" -eq 0 && "${#nano_perm_args[@]}" -eq 0 ]] && nano_perm_args=(--dangerously-skip-permissions)
 
   # --force-context ist internes Flag — nicht an nano weiterleiten
   # --session-id kennt nano nicht (Claude-Code-Option) → samt Wert weglassen
@@ -3076,6 +3078,7 @@ Token-Optimierung (in .clau.conf konfigurierbar):
   CLAU_TIMEOUT_DEFAULT="1800000"     Default Bash-Timeout in ms (30 Min = 1800000)
   CLAU_TIMEOUT_MAX="7200000"         Max Bash-Timeout in ms (120 Min = 7200000)
   CLAU_OWL_TIMEOUT="1800"            owlAPI-Request-Timeout in Sekunden (Default 1800 = 30 Min)
+  CLAU_OWL_MAX_WAIT=""               X-Owl-Max-Wait an QuiteQue: leer = Timeout-60 (1740), Zahl = fest, 0 = nicht senden
   owlAPI-Proxy-Log: ~/.cache/clau/owl_proxy.log (wird bei jedem Start überschrieben)
   CLAU_OWL_MINIMAL_TOOLS="1"         Schlankes Tool-Set + keine MCP-Server für owlAPI (Default an)
   CLAU_OWL_TOOLS="Read,Write,Edit,Bash"  Tool-Allowlist für owl-Modelle (Standard; Hauptmenü x schaltet pro Verzeichnis um)

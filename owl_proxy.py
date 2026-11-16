@@ -178,7 +178,17 @@ def _ctx_overflow_message(body_text, est_input_tokens, ctx_limit=0):
     return f"prompt is too long: {actual} tokens > {limit} maximum (owlAPI: {(body_text or '')[:300]})"
 PORT = int(os.environ.get("OWL_PROXY_PORT", "8325"))
 # Timeout: lang genug für langsame Modelle (PropellerA etc.)
-REQUEST_TIMEOUT = int(os.environ.get("OWL_PROXY_TIMEOUT", "600"))
+REQUEST_TIMEOUT = int(os.environ.get("OWL_PROXY_TIMEOUT", "1800"))
+# X-Owl-Max-Wait an QuiteQue: Standard REQUEST_TIMEOUT - 60 (bei 1800 -> 1740).
+# OWL_MAX_WAIT=<Sekunden> setzt den Wert fest, OWL_MAX_WAIT=0 (oder "aus")
+# sendet den Header gar nicht -> QuiteQue nimmt seinen eigenen Standard.
+_MW = os.environ.get("OWL_MAX_WAIT", "").strip().lower()
+if _MW in ("0", "aus", "off", "nein", "no"):
+    MAX_WAIT_HEADERS = {}
+elif _MW.isdigit():
+    MAX_WAIT_HEADERS = {"X-Owl-Max-Wait": _MW}
+else:
+    MAX_WAIT_HEADERS = {"X-Owl-Max-Wait": str(max(60, REQUEST_TIMEOUT - 60))}
 # Heartbeat: Client-seitige SSE-Verbindung (claude CLI ↔ dieser Proxy) hat ihr
 # eigenes Idle-Timeout, unabhängig von REQUEST_TIMEOUT zum Backend. Langsame
 # Backends liefern oft minutenlang kein einziges Byte, bevor das erste Token
@@ -825,7 +835,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         # Wie lange QuiteQue serverseitig auf diesen Request warten darf
                         # (inkl. eines evtl. internen Retries bei Watchdog-Timeout),
                         # etwas unter unserem eigenen Timeout.
-                        "X-Owl-Max-Wait": str(max(60, REQUEST_TIMEOUT - 60)),
+                        **MAX_WAIT_HEADERS,
                         **ACTIVITY_HEADERS,
                         **({"Authorization": "Bearer " + ROUTE_KEYS[base]} if base in ROUTE_KEYS else {}),
                     },
@@ -902,7 +912,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     headers={
                         "Content-Type": "application/json",
                         "X-OwlTrail-User": OWL_USER,
-                        "X-Owl-Max-Wait": str(max(60, REQUEST_TIMEOUT - 60)),
+                        **MAX_WAIT_HEADERS,
                         **ACTIVITY_HEADERS,
                         **({"Authorization": "Bearer " + ROUTE_KEYS[base]} if base in ROUTE_KEYS else {}),
                     })
@@ -929,7 +939,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     headers={
                         "Content-Type": "application/json",
                         "X-OwlTrail-User": OWL_USER,
-                        "X-Owl-Max-Wait": str(max(60, REQUEST_TIMEOUT - 60)),
+                        **MAX_WAIT_HEADERS,
                         **ACTIVITY_HEADERS,
                         **({"Authorization": "Bearer " + ROUTE_KEYS[base]} if base in ROUTE_KEYS else {}),
                     })

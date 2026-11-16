@@ -201,6 +201,7 @@ def _cmd_help(_args: str, _state: AgentState, _config: dict) -> bool:
     print("    /status                 Version, model, provider, env info")
     print("    /context                Show token usage estimate")
     print("    /cost                   Show API cost for this session")
+    print("    /preprompt [Teil]       Vorspann in Teilen mit Groessen: system|basis|git|memory|agents|skills|tools|tool N|msgs|msg N")
     print("    /todos                  Show current task list")
     print(_clr("\n  System & Config", "bold"))
     print("    /permissions [mode]     Get/set: auto, accept-all, manual")
@@ -405,6 +406,111 @@ def _cmd_context(_args: str, state: AgentState, config: dict) -> bool:
     _info(f"Estimated context: ~{est_tokens:,} tokens")
     _info(f"Model: {config['model']}")
     _info(f"Turns: {state.turn_count}")
+    return True
+
+
+def _msg_text(m: dict) -> str:
+    """Nachricht als Text (Inhaltsbloecke zusammengesetzt) — nur fuer Groessenanzeige in /preprompt."""
+    c = m.get("content", "")
+    if isinstance(c, str):
+        return c
+    out = []
+    for b in c or []:
+        d = b if isinstance(b, dict) else {k: getattr(b, k, None) for k in ("type", "text", "name", "input", "content", "thinking")}
+        t = d.get("type")
+        if t == "text":
+            out.append(str(d.get("text") or ""))
+        elif t == "thinking":
+            out.append(str(d.get("thinking") or ""))
+        elif t == "tool_use":
+            out.append(f"[Tool {d.get('name')}] " + json.dumps(d.get("input"), ensure_ascii=False, default=str))
+        elif t == "tool_result":
+            cc = d.get("content")
+            out.append("[Ergebnis] " + (cc if isinstance(cc, str) else json.dumps(cc, ensure_ascii=False, default=str)))
+        else:
+            out.append(json.dumps(d, ensure_ascii=False, default=str))
+    return "\n".join(out)
+
+
+def _cmd_preprompt(args: str, state: AgentState, config: dict) -> bool:
+    """/preprompt: was vor deiner Frage mitgeschickt wird, in Teilen, mit Groessen (Kontext sparen)."""
+    from nano_claude_code.prompts import prompt_sections
+    cwd = str(Path.cwd())
+    secs = prompt_sections(cwd, bare=config.get("bare", False))
+    tools = anthropic_tool_defs()
+    tjson = {t["name"]: json.dumps(t, ensure_ascii=False) for t in tools}
+    tk = lambda n: n // 4          # grobe Schaetzung: 1 Token ~ 4 Zeichen
+    window = int(os.environ.get("NANO_CONTEXT_WINDOW") or 200_000)
+    parts = args.split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    def show(title: str, text: str) -> None:
+        print(_clr(f"── {title} · {len(text):,} Zeichen · ~{tk(len(text)):,} Tokens ──", "bold"))
+        print(text if text.strip() else "(leer)")
+
+    if sub in ("system", "alles"):
+        show("System-Prompt komplett", "".join(t for _k, _n, t in secs))
+        return True
+    keys = {k: (n, t) for k, n, t in secs}
+    alias = {"claude.md": "memory", "claudemd": "memory", "mem": "memory", "skill": "skills", "agent": "agents"}
+    if sub in alias:
+        sub = alias[sub]
+    if sub in keys:
+        show(keys[sub][0], keys[sub][1])
+        return True
+    if sub == "tools":
+        rows = sorted(tjson.items(), key=lambda kv: -len(kv[1]))
+        tot = sum(len(v) for v in tjson.values())
+        print(_clr(f"── Tool-Schemas: {len(rows)} Tools · ~{tk(tot):,} Tokens (groesste zuerst) ──", "bold"))
+        for n, v in rows:
+            print(f"  {n:<44} ~{tk(len(v)):>6,}")
+        print("  Einzeln ansehen: /preprompt tool <Name>   ·  Beschraenken: NANO_TOOLS=Read,Edit,Bash,Grep in clau/Umgebung")
+        return True
+    if sub == "tool":
+        hit = [n for n in tjson if n.lower() == rest.lower()] or [n for n in tjson if rest.lower() in n.lower()]
+        if not rest or not hit:
+            _err("Verwendung: /preprompt tool <Name>  (Liste: /preprompt tools)")
+            return True
+        for n in hit[:3]:
+            show(f"Tool {n}", json.dumps(next(t for t in tools if t["name"] == n), ensure_ascii=False, indent=1))
+        return True
+    if sub in ("msgs", "messages", "verlauf"):
+        if not state.messages:
+            _info("(noch keine Nachrichten)")
+            return True
+        tot = 0
+        for i, m in enumerate(state.messages):
+            t = _msg_text(m)
+            tot += len(t)
+            print(f"  [{i:>3}] {m.get('role', '?'):<10} ~{tk(len(t)):>6,}  {t[:70].replace(chr(10), ' ')}")
+        print(f"  Summe Verlauf: ~{tk(tot):,} Tokens   ·  Einzeln: /preprompt msg <Nr>")
+        return True
+    if sub == "msg":
+        try:
+            m = state.messages[int(rest)]
+        except (ValueError, IndexError):
+            _err("Verwendung: /preprompt msg <Nr>  (Nummern: /preprompt msgs)")
+            return True
+        show(f"Nachricht {rest} ({m.get('role', '?')})", _msg_text(m))
+        return True
+    if sub:
+        _err("Unbekannter Teil. Moeglich: system, basis, git, memory, agents, skills, extra, tools, tool <Name>, msgs, msg <Nr>")
+        return True
+    # Uebersicht
+    n_sys = sum(len(t) for _k, _n, t in secs)
+    n_tools = sum(len(v) for v in tjson.values())
+    n_msg = sum(len(_msg_text(m)) for m in state.messages)
+    fixed = tk(n_sys + n_tools)
+    print(_clr("── Vorspann, der bei JEDER Anfrage mitgeht ──", "bold"))
+    for k, n, t in secs:
+        print(f"  {k:<8} {n:<44} ~{tk(len(t)):>6,}")
+    print(f"  {'tools':<8} {'Tool-Schemas (' + str(len(tools)) + ' Stueck)':<44} ~{tk(n_tools):>6,}")
+    print(f"  {'':<8} {'Vorspann gesamt':<44} ~{fixed:>6,}  = {100 * fixed // max(window, 1)}% von {window:,}")
+    print(f"  {'msgs':<8} {'Verlauf (' + str(len(state.messages)) + ' Nachrichten)':<44} ~{tk(n_msg):>6,}")
+    print(f"  {'':<8} {'alles zusammen':<44} ~{fixed + tk(n_msg):>6,}  = {100 * (fixed + tk(n_msg)) // max(window, 1)}%")
+    print("  Details: /preprompt system | basis | git | memory | agents | skills | extra | tools | tool <Name> | msgs | msg <Nr>")
+    print("  Sparen: NANO_TOOLS=Read,Edit,Bash,Grep (weniger Tools), CLAUDE.md kuerzen, ungenutzte Skills/Subagenten entfernen, MCP-Server abschalten (clau Menue x)")
     return True
 
 
@@ -928,6 +1034,7 @@ _COMMANDS: dict[str, Any] = {
     "diff": _cmd_diff,
     "status": _cmd_status,
     "context": _cmd_context,
+    "preprompt": _cmd_preprompt,
     "cost": _cmd_cost,
     "todos": _cmd_todos,
     # System
@@ -998,6 +1105,7 @@ _CMD_META: dict[str, tuple[str, str]] = {
     "status":      ("System",     "Version, model, provider info"),
     "context":     ("Navigate",   "Show token usage estimate"),
     "cost":        ("Navigate",   "Show API cost for this session"),
+    "preprompt":   ("Navigate",   "Show what is sent before your message (parts, sizes)"),
     "todos":       ("Navigate",   "Show current task list"),
     "permissions": ("System",     "Get/set permission mode"),
     "allowed-tools": ("System",   "Alias for /permissions"),
@@ -1019,6 +1127,7 @@ _CMD_META: dict[str, tuple[str, str]] = {
 
 _ARG_COMPLETIONS: dict[str, list[str]] = {
     "/model": MODELS,
+    "/preprompt": ["system", "basis", "git", "memory", "agents", "skills", "extra", "tools", "tool ", "msgs", "msg "],
     "/permissions": list(PERMISSION_MODES),
     "/allowed-tools": list(PERMISSION_MODES),
     "/config": ["model=", "permission_mode=", "verbose=", "thinking=", "thinking_budget=", "max_tokens="],

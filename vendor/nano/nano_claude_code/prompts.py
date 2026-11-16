@@ -186,6 +186,28 @@ def build_system_prompt(*, cwd: str, bare: bool = False) -> str:
     return base + agent_listing + skill_listing + extra
 
 
+def prompt_sections(cwd: str, bare: bool = False) -> list[tuple[str, str, str]]:
+    """System-Prompt in seinen Bestandteilen: [(schluessel, anzeigename, text)] — fuer /preprompt."""
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d %A UTC")
+    extra = ""
+    _xf = os.environ.get("NANO_APPEND_SYSTEM_PROMPT_FILE")
+    if _xf:
+        try:
+            extra = "\n\n" + open(_xf, encoding="utf-8").read()
+        except OSError:
+            pass
+    if bare:
+        return [("basis", "Basis-Prompt (bare)", BARE_SYSTEM_PROMPT.format(cwd=cwd, date=date)),
+                ("extra", "Zusatz (NANO_APPEND_SYSTEM_PROMPT_FILE)", extra)]
+    base = FULL_SYSTEM_PROMPT.format(cwd=cwd, date=date, platform=platform.system(), git_info="", claude_md="")
+    return [("basis", "Basis-Prompt (Rolle, Tools-Text, Regeln)", base),
+            ("git", "Git-Info", _get_git_info(cwd)),
+            ("memory", "CLAUDE.md / Memory", _get_claude_md(cwd)),
+            ("agents", "Subagenten-Liste", _get_agent_listing(cwd)),
+            ("skills", "Skill-Liste", _get_skill_listing(cwd)),
+            ("extra", "Zusatz (NANO_APPEND_SYSTEM_PROMPT_FILE)", extra)]
+
+
 def build_subagent_system_prompt(cwd: str, agent: Any) -> str:
     """System prompt for Agent tool sub-loop (AgentDefinition from agents module)."""
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d %A UTC")
