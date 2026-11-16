@@ -476,6 +476,8 @@ class StreamTranslator:
         self.empty_pending = False  # leere Antwort erkannt, Retry steht aus
         self.len_retry_ok = False   # Proxy darf einmal neu anfragen, wenn das Token-Limit im Denken verbraucht wurde
         self.len_pending = False
+        self.err_retries_left = 2   # Abbrüche des Backend-Streams ohne Antwort: bis zu 2 Wiederholungen
+        self.err_pending = False
 
     def _akt_tools(self):
         """Tool-Aufrufe einmal ins Denkprotokoll (Argumente sind erst am Ende vollständig)."""
@@ -698,6 +700,16 @@ class StreamTranslator:
 
 
 # ── HTTP-Handler ───────────────────────────────────────────────────────────────
+
+_TRANSIENT = ("stream abgebrochen", "readerror", "remoteprotocolerror", "connecterror", "incomplete chunked",
+              "peer closed", "connection reset", "connection aborted", "server disconnected")
+
+
+def _transient_stream_error(msg) -> bool:
+    """Verbindungsabrisse zwischen QuiteQue und Backend: eine Wiederholung lohnt (Kontext-/Anfragefehler dagegen nie)."""
+    m = str(msg or "").lower()
+    return any(k in m for k in _TRANSIENT)
+
 
 class ProxyHandler(BaseHTTPRequestHandler):
     _action = False
@@ -1039,6 +1051,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 # Feld hat. Stattdessen sichtbar machen und Stream sauber beenden.
                 err = payload["error"]
                 err_msg = err.get("message") if isinstance(err, dict) else str(err)
+                if (tr.err_retries_left > 0 and _transient_stream_error(err_msg)
+                        and not tr.text_started and not tr.tool_buffers):
+                    # Verbindung zum Backend abgerissen, bevor etwas Brauchbares kam: _stream fragt neu an
+                    log(f"  Backend-Stream abgebrochen nach {time.monotonic()-t0:.1f}s ({err_msg!r}) -- Wiederholung folgt")
+                    tr.err_pending = True
+                    return n_lines
                 log(f"  Backend-Fehler im Stream nach {time.monotonic()-t0:.1f}s: {err_msg!r}")
                 if ESC is not None:
                     ESC.melde("backend_fehler", "Stream: " + str(err_msg)[:60])
@@ -1065,10 +1083,31 @@ class ProxyHandler(BaseHTTPRequestHandler):
             tr.len_retry_ok = len_retry_fn is not None
             n_lines = 0
             while True:
-                r = self._pump(owl_resp, tr, write_lock, n_pings, t0, n_lines)
+                try:
+                    r = self._pump(owl_resp, tr, write_lock, n_pings, t0, n_lines)
+                except requests.exceptions.RequestException as e:
+                    if (retry_fn is not None and tr.err_retries_left > 0 and not tr.text_started and not tr.tool_buffers
+                            and _transient_stream_error(f"{type(e).__name__} {e}")):
+                        log(f"  Verbindung zum Backend riss ab ({e!r}) -- Wiederholung folgt")
+                        tr.err_pending = True
+                        r = n_lines
+                    else:
+                        raise
                 if r is False:
                     return
                 n_lines = r
+                if tr.err_pending and retry_fn is not None:
+                    tr.err_pending = False
+                    tr.err_retries_left -= 1
+                    wait = 4 * (2 - tr.err_retries_left)       # 4 s, dann 8 s
+                    log(f"  Stream-Abbruch (model={tr.target}) -- Wiederholung in {wait}s (noch {tr.err_retries_left})")
+                    try:
+                        owl_resp.close()
+                    except Exception:
+                        pass
+                    time.sleep(wait)
+                    owl_resp = retry_fn()
+                    continue
                 if tr.empty_pending and retry_fn is not None:
                     tr.empty_pending = False
                     tr.retry_ok = False

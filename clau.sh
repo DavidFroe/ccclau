@@ -2041,6 +2041,44 @@ _ensure_nano() {
   return 0
 }
 
+# Kopfzeilen-Info für nano: Name, Start und letzte Nutzer-Nachricht einer Session (3 Zeilen; leer = unbekannt)
+_nano_session_info() {  # $1 = session-id
+  local sid="$1" sf="" title=""
+  [[ "$sid" =~ ^[0-9a-f-]{36}$ ]] && sf="$(_session_file_for_id "$sid" 2>/dev/null)"
+  title="$(_get_session_title "$(_claude_projects_dir)/$(_project_hash_for)" "$sid" 2>/dev/null)"
+  [[ -n "$title" ]] || title="${CLAU_SESSION_NAME:-}"
+  python3 - "${sf:-}" "$title" <<'PY' 2>/dev/null || printf '%s\n\n\n' "$title"
+import json, re, sys
+path, title = sys.argv[1], sys.argv[2]
+first = last = ""
+ai = ""
+def text_of(c):
+    if isinstance(c, str):
+        return c
+    return " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+if path:
+    for line in open(path, encoding="utf-8", errors="replace"):
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        t = o.get("type")
+        if t in ("custom-title",) and o.get("customTitle"):
+            title = title or o["customTitle"]
+        elif t == "ai-title" and o.get("aiTitle"):
+            ai = o["aiTitle"]
+        elif t == "user" and not o.get("isMeta") and not o.get("isSidechain"):
+            tx = re.sub(r"\s+", " ", text_of((o.get("message") or {}).get("content", ""))).strip()
+            if not tx or tx.startswith(("<", "Caveat:", "[Request interrupted")):
+                continue
+            first = first or tx
+            last = tx
+title = title or ai
+cut = lambda x, n: x if len(x) <= n else x[: n - 1].rstrip() + "…"
+print(cut(title, 80)); print(cut(first, 110)); print(cut(last, 110) if last != first else "")
+PY
+}
+
 # claude über owlAPI-Proxy starten (interaktiv)
 run_owl_via_claude() {
   local owl_id="$1"
@@ -2260,6 +2298,12 @@ print((u + "/" + d["repo"]) if d.get("repo") and u else "")
 print((u + "/" + d["fork"]) if d.get("fork") and u else "")' "$_gi" 2>/dev/null)
     fi
   fi
+  # Session-Info für die nano-Kopfzeile: Name, Start, zuletzt
+  local _rid="" _pv="" _a
+  for _a in "$@"; do [[ "$_pv" == "--resume" ]] && { _rid="$_a"; break; }; _pv="$_a"; done
+  local _nsn="" _nss="" _nsl=""
+  { IFS= read -r _nsn; IFS= read -r _nss; IFS= read -r _nsl; } < <(_nano_session_info "$_rid")
+  NANO_SESSION_NAME="$_nsn" NANO_SESSION_START="$_nss" NANO_SESSION_LAST="$_nsl" \
   NANO_GITEA_URL="$gitea_url" NANO_GITEA_FORK_URL="$gitea_fork" \
   NANO_MCP_CONFIG="$mcp_file" \
   NANO_TOOLS="$nano_tools" \

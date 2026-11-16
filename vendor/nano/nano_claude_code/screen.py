@@ -131,7 +131,7 @@ class Screen:
         w = self.cols - 1
         bl = lambda s: c(s, BOLD)  # noqa: E731
         mascot = [c(PROPELLER[0], ACCENT), c(PROPELLER[1], ACCENT, BOLD), c(PROPELLER[2], ACCENT)]
-        sess = i.get("session") or ""
+        sess = os.environ.get("NANO_SESSION_NAME", "").strip() or i.get("session") or ""
         folder = i.get("folder", "")
         l1 = c("nano", BOLD, ACCENT) + c("  ·  PropellerA  ·  Claude-Code-Nachbau", GREY)
         l2 = c("/help", ACCENT) + c(" for help  ·  ", GREY) + c("/tools", ACCENT) + c(" for tools (on/off in clau: menu x)", GREY)
@@ -143,6 +143,11 @@ class Screen:
             rows.extend(" " + r for r in self._tool_rows(tools, w))
             if skills:
                 rows.append(" " + self._list("skills", skills, w))
+            # Worum geht es in dieser Session: Beginn und letzte Nutzer-Nachricht (von clau)
+            for lab, key in (("start  ", "NANO_SESSION_START"), ("zuletzt", "NANO_SESSION_LAST")):
+                v = os.environ.get(key, "").strip()
+                if v:
+                    rows.append(" " + c(lab + " ", GREY) + c(v, DIM))
             gu = os.environ.get("NANO_GITEA_URL", "").strip()
             if gu:
                 gf = os.environ.get("NANO_GITEA_FORK_URL", "").strip()
