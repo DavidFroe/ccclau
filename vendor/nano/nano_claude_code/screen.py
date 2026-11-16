@@ -118,6 +118,8 @@ class Screen:
         self._old_winch = None
         self.queue: list[str] = []     # während der Arbeit eingetippte Nachrichten (Warteschlange)
         self._typed = ""               # angefangener, noch nicht abgeschickter Text
+        self.cmds: list[str] = []      # Befehle (/…, exit), die den Zug beenden und als Nächstes laufen (nicht in der Warteschlange)
+        self.live_cmd = None           # von cli gesetzt: führt einen Schrägstrich-Befehl sofort aus → "done" | "defer" | Prompt-Text
         self.hist: list[str] = [""]   # alles, was in die Scroll-Region geschrieben wurde (für PgUp)
         self._cr = False
 
@@ -278,6 +280,8 @@ class Screen:
             w(f"\033[{top};{bot}r\033[{top if clear else bot};1H")
             self.real.flush()
         self.draw_status()
+        if clear and (len(self.hist) > 1 or self.hist[0]):
+            self._repaint_region()      # nach Resize/Neuzeichnen den Verlauf wiederherstellen (sonst bleibt der Bereich leer)
         if self.queue or self._typed:
             self._draw_typeahead()
 
@@ -325,6 +329,15 @@ class Screen:
                 rows.append(cur + RST); cur, n = sgr, 0
         rows.append(cur + RST if cur else "")
         return rows
+
+    def _repaint_region(self) -> None:
+        off_hint = self._hint
+        self.view_scroll(0)
+        self._hint = off_hint
+        with self.lock:
+            top, bot, *_ = self._geom()
+            self.real.write(f"\033[{bot};1H")      # Ausgabe geht am unteren Rand der Region weiter
+            self.real.flush()
 
     def view_scroll(self, off: int) -> int:
         """Die Scroll-Region aus dem Verlauf neu zeichnen, `off` Zeilen über dem Ende. Gibt das begrenzte off zurück."""
@@ -529,6 +542,8 @@ class Screen:
     def read_line(self, history: list[str], complete=None) -> str:
         """Eine Eingabezeile im festen Eingabefeld lesen. Raises KeyboardInterrupt (Ctrl+C), EOFError (Ctrl+D)."""
         top, bot, r1, rin, r2, rst = self._geom()
+        if self.cmds:        # Befehl, der den Zug beendet hat (z.B. exit, /clear): zuerst ausführen
+            return self.cmds.pop(0)
         if self.queue:       # in der Wartezeit Eingetipptes: alles zusammen als ein Auftrag abarbeiten
             txt = "\n\n".join(self.queue)
             self.queue = []
@@ -755,11 +770,28 @@ class Screen:
                 i = j + 1
                 continue
             text.append(data[i]); i += 1
+        interrupt = False
         for ch in bytes(text).decode("utf-8", "ignore"):
             if ch in "\r\n":
-                if self._typed.strip():
-                    self.queue.append(self._typed.strip())
+                line = self._typed.strip()
                 self._typed = ""; changed = True
+                if line:
+                    low = line.lower()
+                    is_cmd = line.startswith("/") or low in ("exit", "quit", ":q")
+                    if is_cmd and self.live_cmd is not None:
+                        # Befehle nie in die Warteschlange: sofort ausführen, oder (wenn sie den Zug anfassen) Zug beenden und als Nächstes laufen
+                        try:
+                            res = self.live_cmd(line if line.startswith("/") else "/exit")
+                        except Exception as e:      # noqa: BLE001
+                            res = "done"
+                            self.real.write(f"\n  [Befehl fehlgeschlagen: {type(e).__name__}: {e}]\n")
+                        if res == "defer":
+                            self.cmds.append(line)
+                            interrupt = True
+                        elif res != "done":
+                            self.queue.append(str(res))   # z.B. Skill/Review liefert einen Prompt
+                    else:
+                        self.queue.append(line)
             elif ch in "\x7f\x08":
                 self._typed = self._typed[:-1]; changed = True
             elif ch == "\x15":
@@ -768,7 +800,7 @@ class Screen:
                 self._typed += ch; changed = True
         if changed:
             self._draw_typeahead()
-        return False
+        return interrupt
 
     def watch_start(self) -> None:
         if not self.active or getattr(self, "_w", None):

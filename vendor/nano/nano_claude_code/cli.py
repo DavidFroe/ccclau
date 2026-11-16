@@ -1474,9 +1474,23 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
     if resume_state and state.messages:
         try:
             _show_recent_history(state)
-        except Exception:
-            pass
+        except Exception as _e:
+            print(ui.c(f"  (letzter Verlauf nicht darstellbar: {type(_e).__name__}: {_e})", ui.GREY))
     ui.STATUS.update(model=model, mode=perm_mode, ctx="")
+
+    # Befehle während der Arbeit: sofort ausführen statt einzureihen. Was den Gesprächsverlauf oder das laufende
+    # Geschehen anfasst (exit, /clear, /compact, …), beendet den Zug und läuft danach als Erstes.
+    _DEFER = {"exit", "quit", "clear", "new", "reset", "compact", "load", "btw", "review", "init", "bug", "feedback"}
+
+    def _live_command(line: str):
+        cmd = line[1:].split(None, 1)[0].lower() if len(line) > 1 else ""
+        if cmd in _DEFER:
+            return "defer"
+        res = _handle_slash(line, state, config)
+        return res if isinstance(res, str) else "done"
+
+    if _screen_on:
+        SCREEN.live_cmd = _live_command
 
     last_ctrl_c = 0.0
     while True:
