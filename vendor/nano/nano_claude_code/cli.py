@@ -1439,6 +1439,11 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
         return os.environ.get("NANO_MODEL_LABEL", "").strip() or m
 
     def _effort_label() -> str:
+        # clau kennt die tatsächliche Denktiefe (Proxy-Einstellung OWL_REASONING_EFFORT, sonst Voreinstellung des Modells);
+        # nanos eigener /thinking-Schalter wirkt über den Proxy nicht und wäre eine falsche Anzeige
+        lab = os.environ.get("NANO_EFFORT_LABEL", "").strip()
+        if lab:
+            return lab
         if config.get("thinking"):
             return f"thinking {int(config.get('thinking_budget', 10_000)) // 1000}k"
         return "off"

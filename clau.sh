@@ -2266,6 +2266,7 @@ print((u + "/" + d["fork"]) if d.get("fork") and u else "")' "$_gi" 2>/dev/null)
   NANO_CONTEXT_WINDOW="${cw:-200000}" \
   NANO_API_LABEL="QuiteQue ${OWL_BASE_URL#http://}" \
   NANO_MODEL_LABEL="owl:${owl_id}" \
+  NANO_EFFORT_LABEL="${OWL_REASONING_EFFORT:-auto}" \
   NANO_APPEND_SYSTEM_PROMPT_FILE="$hint" \
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
   ANTHROPIC_API_KEY="sk-owl" \
