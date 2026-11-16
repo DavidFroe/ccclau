@@ -116,6 +116,8 @@ class Screen:
         self._tick_stop = threading.Event()
         self._hint = ""          # Vorschlagsleiste (ersetzt kurz die Statusleiste)
         self._old_winch = None
+        self.queue: list[str] = []     # während der Arbeit eingetippte Nachrichten (Warteschlange)
+        self._typed = ""               # angefangener, noch nicht abgeschickter Text
         self.hist: list[str] = [""]   # alles, was in die Scroll-Region geschrieben wurde (für PgUp)
         self._cr = False
 
@@ -271,6 +273,8 @@ class Screen:
             w(f"\033[{top};{bot}r\033[{top if clear else bot};1H")
             self.real.flush()
         self.draw_status()
+        if self.queue or self._typed:
+            self._draw_typeahead()
 
     def _resize(self) -> None:
         if not self.active:
@@ -520,8 +524,14 @@ class Screen:
     def read_line(self, history: list[str], complete=None) -> str:
         """Eine Eingabezeile im festen Eingabefeld lesen. Raises KeyboardInterrupt (Ctrl+C), EOFError (Ctrl+D)."""
         top, bot, r1, rin, r2, rst = self._geom()
+        if self.queue:       # in der Wartezeit Eingetipptes: alles zusammen als ein Auftrag abarbeiten
+            txt = "\n\n".join(self.queue)
+            self.queue = []
+            self._draw_typeahead()
+            return txt
         fd, old = self._raw()
-        buf, pos = "", 0
+        buf, pos = self._typed, len(self._typed)
+        self._typed = ""
         hist_i = len(history)
         draft = ""
         sugg: list[tuple[str, str]] = []   # (neuer Text, Meta)
@@ -705,7 +715,56 @@ class Screen:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
         return ""
 
-    # ── Esc unterbricht den laufenden Zug ────────────────────────────
+    # ── Während der Arbeit: Esc unterbricht, Tippen füllt die Warteschlange ────
+    def _draw_typeahead(self) -> None:
+        """Eingabezeile mit dem angefangenen Text und die Warteschlange (grau) auf der Linie darüber zeichnen."""
+        if not self.active:
+            return
+        with self.lock:
+            top, bot, r1, rin, r2, rst = self._geom()
+            avail = self.cols - 4
+            if self.queue:
+                items = "  ·  ".join(f"{k + 1}) {q.splitlines()[0] if q else ''}" for k, q in enumerate(self.queue))
+                head = f"─ ⏎ in der Warteschlange ({len(self.queue)}): "
+                line = clip(c(head + items + " ", GREY), self.cols - 2)
+                line += c("─" * max(0, self.cols - 1 - vlen(line)), GREY)
+            else:
+                line = c("─" * (self.cols - 1), GREY)
+            vis = self._typed.replace("\n", "↵")[-avail:]
+            self.real.write(f"\033[?25l\0337\033[{r1};1H\033[2K{line}\033[{rin};1H\033[2K{c('❯ ', BOLD, ACCENT)}{vis}\0338\033[?25h")
+            self.real.flush()
+
+    def _ta_feed(self, data: bytes) -> bool:
+        """Tasten aus der Wartezeit verarbeiten. True = Esc (Abbruch) erkannt."""
+        if data == b"\x1b":
+            return True
+        data = data.replace(b"\x1b[200~", b"").replace(b"\x1b[201~", b"")
+        changed = False
+        text = []
+        i = 0
+        while i < len(data):                      # Escape-Folgen (Pfeile, PgUp, …) überspringen
+            if data[i] == 0x1b:
+                j = i + 2
+                while j < len(data) and not (0x40 <= data[j] <= 0x7e):
+                    j += 1
+                i = j + 1
+                continue
+            text.append(data[i]); i += 1
+        for ch in bytes(text).decode("utf-8", "ignore"):
+            if ch in "\r\n":
+                if self._typed.strip():
+                    self.queue.append(self._typed.strip())
+                self._typed = ""; changed = True
+            elif ch in "\x7f\x08":
+                self._typed = self._typed[:-1]; changed = True
+            elif ch == "\x15":
+                self._typed = ""; changed = True
+            elif ch >= " ":
+                self._typed += ch; changed = True
+        if changed:
+            self._draw_typeahead()
+        return False
+
     def watch_start(self) -> None:
         if not self.active or getattr(self, "_w", None):
             return
@@ -722,8 +781,8 @@ class Screen:
             while not stop.is_set():
                 try:
                     if select.select([fd], [], [], 0.1)[0] and not stop.is_set():
-                        d = os.read(fd, 64)
-                        if d == b"\x1b":
+                        d = os.read(fd, 1024)
+                        if self._ta_feed(d):
                             os.kill(os.getpid(), signal.SIGINT)
                 except (OSError, ValueError):
                     return
@@ -739,11 +798,15 @@ class Screen:
         fd, old, stop, t = w
         stop.set()
         t.join(timeout=0.5)
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        try:
-            termios.tcflush(fd, termios.TCIFLUSH)
-        except Exception:
+        try:                                           # noch ungelesene Tasten nicht verlieren
+            while select.select([fd], [], [], 0)[0]:
+                d = os.read(fd, 1024)
+                if not d:
+                    break
+                self._ta_feed(d if d != b"\x1b" else b"")
+        except (OSError, ValueError):
             pass
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
         self._w = None
 
 
