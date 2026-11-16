@@ -597,6 +597,8 @@ _start_owl_proxy() {
   # sonst kappen sie sich gegenseitig die gemeinsame Datei.
   [[ -n "${CLAU_API_ROLE:-}" ]] && OWL_PROXY_LOG_FILE="${OWL_PROXY_LOG_DIR}/owl_proxy-${CLAU_API_ROLE}.log"
   # Log-Datei bei jedem Start kappen statt endlos wachsen zu lassen
+  # Das Log der vorigen Sitzung bleibt als .1 erhalten (sonst ist nach einem Neustart weg, was zum Abbruch geführt hat)
+  [[ -s "$OWL_PROXY_LOG_FILE" ]] && mv -f "$OWL_PROXY_LOG_FILE" "$OWL_PROXY_LOG_FILE.1" 2>/dev/null || true
   : > "$OWL_PROXY_LOG_FILE" 2>/dev/null || true
   _owl_activity_env "chat"
   # Team-Modus: parallele Agent-Requests durchlassen, aber höchstens
@@ -2156,6 +2158,8 @@ run_owl_via_claude() {
   # API-Timeout hochsetzen, mehr Wiederholungen bei Abbrüchen (Standardwerte sind für die Anthropic-API gedacht).
   if [[ "${CLAU_DURCHARBEITEN:-1}" == "1" ]]; then
     export CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS="${CLAU_STREAM_IDLE_MS:-1800000}"
+    export CLAUDE_STREAM_IDLE_TIMEOUT_MS="${CLAU_STREAM_IDLE_MS:-1800000}"
+    export CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS="${CLAU_STREAM_FIRST_BYTE_MS:-1800000}"
     export API_TIMEOUT_MS="${CLAU_API_TIMEOUT_MS:-3600000}"
     export CLAUDE_CODE_MAX_RETRIES="${CLAU_MAX_RETRIES:-10}"
   fi
@@ -2581,6 +2585,8 @@ run_owl_headless_via_claude() {
   # API-Timeout hochsetzen, mehr Wiederholungen bei Abbrüchen (Standardwerte sind für die Anthropic-API gedacht).
   if [[ "${CLAU_DURCHARBEITEN:-1}" == "1" ]]; then
     export CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS="${CLAU_STREAM_IDLE_MS:-1800000}"
+    export CLAUDE_STREAM_IDLE_TIMEOUT_MS="${CLAU_STREAM_IDLE_MS:-1800000}"
+    export CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS="${CLAU_STREAM_FIRST_BYTE_MS:-1800000}"
     export API_TIMEOUT_MS="${CLAU_API_TIMEOUT_MS:-3600000}"
     export CLAUDE_CODE_MAX_RETRIES="${CLAU_MAX_RETRIES:-10}"
   fi
