@@ -426,6 +426,9 @@ class Spinner:
     def start(self, label: str | None = None) -> None:
         if not _TTY or (self._t and self._t.is_alive()):
             return
+        from nano_claude_code.screen import SCREEN
+        if SCREEN.active:       # festes Layout: Zustand und Zähler zeigt die Statusleiste, kein zweiter Spinner (flackerte, Zähler sprang auf 0)
+            return
         if label:
             self.label = label
         self._stop.clear()

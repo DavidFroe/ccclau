@@ -197,6 +197,12 @@ pro Projekt abschalten (`x` → MCP-Server → 7, `CLAU_GITEA_PROJECT=0` in `.cl
 
 nano enthält dafür einen eigenen MCP-Client (stdio); die Konfiguration übergibt clau per `NANO_MCP_CONFIG`.
 
+## Tools/MCP nur für eine Session
+
+Im Aktionsmenü einer Session (Nummer wählen → Punkt **7**) lassen sich Tools, MCP-Server (Websuche, pi-Subagenten, Gitea, …) und Skills
+nur für diese Session einstellen. Die Auswahl steht in `.clau-session-meta.json` und gilt beim nächsten Fortsetzen (Menü, tmux, `--resume`);
+die Verzeichnis-Einstellung (`x`) bleibt unverändert. Punkt **8** setzt die Session zurück.
+
 ## Assistent bei „Neue Session“
 
 Nach dem Session-Namen fragt clau kurz (Enter = Vorgabe, nur offene Fragen): **tmux** (überlebt Terminal-Abstürze) und **Gitea** –

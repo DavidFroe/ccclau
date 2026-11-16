@@ -2447,7 +2447,8 @@ choose_tools_menu() {
   while true; do
     local ntools; ntools="$(echo "${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}" | tr ',' '\n' | grep -vc '^Skill$')"
     echo
-    echo "Fähigkeiten für dieses Verzeichnis ($(basename "$PWD")):"
+    if [[ -n "${SESSION_TOOLS_SCOPE:-}" ]]; then echo "Fähigkeiten NUR für diese Session (${SESSION_TOOLS_SCOPE:0:8}…) — das Verzeichnis bleibt unverändert:"
+    else echo "Fähigkeiten für dieses Verzeichnis ($(basename "$PWD")):"; fi
     echo "  1) Tools        eingebaute Werkzeuge (Read, Bash, …)         $ntools aktiv"
     echo "  2) MCP-Server   externe Programme mit eigenen Tools         Websuche $([[ "${CLAU_WEBSEARCH:-1}" == "1" ]] && echo an || echo aus), pi-Subagenten $([[ "${CLAU_PI_SUB:-0}" == "1" ]] && echo an || echo aus)"
     echo "  3) Skills       Anleitungen, die das Modell bei Bedarf lädt  $([[ ",${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}," == *",Skill,"* ]] && echo an || echo aus)"
@@ -2729,6 +2730,8 @@ _note_config_fallback() {
 }
 
 save_config() {
+  # Im Session-Tools-Menü gilt die Änderung nur für diese Session, nicht für das Verzeichnis
+  if [[ -n "${SESSION_TOOLS_SCOPE:-}" ]]; then _session_tools_save "$SESSION_TOOLS_SCOPE"; return 0; fi
   # Ziel: normalerweise ./.clau.conf. Ist der Ordner nicht beschreibbar
   # (z.B. clau in fremdem Home), weichen wir auf eine Datei im eigenen Home aus,
   # damit die Einstellungen trotzdem erhalten bleiben.
@@ -4643,8 +4646,10 @@ session_action_menu() {
   echo "  4) Als Markdown exportieren"
   echo "  5) Löschen (unwiderruflich!)"
   echo "  6) In tmux fixieren          : $(_session_tmux_get "$sid" && echo an || echo aus)$(_tmux_running "$sid" && echo "   (läuft gerade in tmux → Fortsetzen hängt sich an)")"
+  echo "  7) Tools/MCP nur für diese Session : $(_session_tools_has "$sid" && echo "angepasst" || echo "wie Verzeichnis")"
+  _session_tools_has "$sid" && echo "  8) Session-Tools zurücksetzen (Verzeichnis-Einstellung gilt wieder)"
   echo "  0) Zurück"
-  printf "Auswahl [0-6, Enter=1]: "
+  printf "Auswahl [0-7, Enter=1]: "
   local action; read -r action
   if [[ "$sid" == *.json && "${action:-1}" != "1" ]]; then
     echo "Für nano-Sessions geht nur Fortsetzen (Dateien liegen in ~/.nano_claude/sessions)."
@@ -4721,6 +4726,22 @@ session_action_menu() {
       else
         _session_tmux_set "$sid" 1; echo "✓ Fixiert: startet ab jetzt immer in tmux ($(_tmux_name "$sid"))."
       fi
+      ;;
+    7)
+      # Verzeichnis-Werte merken, Überschreibungen der Session laden, Menü bearbeiten, danach Verzeichnis-Werte zurück
+      local -A _snap=(); local _v
+      for _v in "${SESSION_TOOL_VARS[@]}"; do _snap[$_v]="${!_v-}"; done
+      _session_tools_apply "$sid"
+      SESSION_TOOLS_SCOPE="$sid"
+      choose_tools_menu
+      SESSION_TOOLS_SCOPE=""
+      for _v in "${SESSION_TOOL_VARS[@]}"; do printf -v "$_v" '%s' "${_snap[$_v]}"; done
+      echo "✓ Gilt ab dem nächsten Fortsetzen dieser Session."
+      session_action_menu "$1"
+      ;;
+    8)
+      _session_tools_clear "$sid"; echo "✓ Zurückgesetzt: es gilt wieder die Verzeichnis-Einstellung."
+      session_action_menu "$1"
       ;;
     *) return 0 ;;
   esac
@@ -4967,6 +4988,64 @@ _session_tmux_get() {
   [[ -f "$bdir/.clau-session-meta.json" ]] || return 1
   python3 -c 'import json,sys; sys.exit(0 if (json.load(open(sys.argv[1])).get(sys.argv[2]) or {}).get("tmux") else 1)' \
     "$bdir/.clau-session-meta.json" "$1" 2>/dev/null
+}
+
+# ── Tools/MCP nur für EINE Session ───────────────────────────────────────────
+# Überschreibt die Verzeichnis-Einstellung (.clau.conf) für diese Session; gespeichert in .clau-session-meta.json.
+SESSION_TOOL_VARS=(CLAU_OWL_TOOLS CLAU_WEBSEARCH CLAU_PAPERLESS CLAU_MATLAB CLAU_SOLIDCRAFT CLAU_PICOGK
+  CLAU_PI_SUB CLAU_PI_SUB_MODEL CLAU_PI_SUB_MAX CLAU_GITEA_PROJECT)
+SESSION_TOOLS_SCOPE=""
+
+_session_tools_has() {  # $1 = sid
+  local bdir; bdir="$(_claude_projects_dir)/$(_project_hash_for)"
+  [[ -f "$bdir/.clau-session-meta.json" ]] || return 1
+  python3 -c 'import json,sys; sys.exit(0 if (json.load(open(sys.argv[1])).get(sys.argv[2]) or {}).get("tools") else 1)' \
+    "$bdir/.clau-session-meta.json" "$1" 2>/dev/null
+}
+
+# Überschreibungen der Session in die aktuellen Variablen übernehmen (kein Eintrag = Verzeichnis-Einstellung bleibt)
+_session_tools_apply() {  # $1 = sid
+  _session_tools_has "$1" || return 0
+  local bdir line; bdir="$(_claude_projects_dir)/$(_project_hash_for)"
+  while IFS= read -r line; do
+    [[ "$line" == CLAU_*=* ]] || continue
+    local k="${line%%=*}" v="${line#*=}" ok=0 x
+    for x in "${SESSION_TOOL_VARS[@]}"; do [[ "$x" == "$k" ]] && ok=1; done
+    [[ "$ok" -eq 1 ]] && printf -v "$k" '%s' "$v"
+  done < <(python3 -c '
+import json, sys
+t = (json.load(open(sys.argv[1])).get(sys.argv[2]) or {}).get("tools") or {}
+for k, v in t.items():
+    print(k + "=" + " ".join(str(v).splitlines()))' "$bdir/.clau-session-meta.json" "$1" 2>/dev/null)
+}
+
+_session_tools_save() {  # $1 = sid; speichert die aktuellen Werte als Überschreibung
+  local bdir; bdir="$(_claude_projects_dir)/$(_project_hash_for)"
+  mkdir -p "$bdir" 2>/dev/null || return 0
+  local pairs=() v
+  for v in "${SESSION_TOOL_VARS[@]}"; do pairs+=("$v=${!v-}"); done
+  python3 - "$bdir/.clau-session-meta.json" "$1" "${pairs[@]}" <<'PY' 2>/dev/null || true
+import json, sys
+path, sid, pairs = sys.argv[1], sys.argv[2], sys.argv[3:]
+try:
+    d = json.load(open(path))
+except Exception:
+    d = {}
+d.setdefault(sid, {})["tools"] = dict(p.split("=", 1) for p in pairs)
+json.dump(d, open(path, "w"), indent=1)
+PY
+}
+
+_session_tools_clear() {  # $1 = sid
+  local bdir; bdir="$(_claude_projects_dir)/$(_project_hash_for)"
+  [[ -f "$bdir/.clau-session-meta.json" ]] || return 0
+  python3 - "$bdir/.clau-session-meta.json" "$1" <<'PY' 2>/dev/null || true
+import json, sys
+path, sid = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+d.get(sid, {}).pop("tools", None)
+json.dump(d, open(path, "w"), indent=1)
+PY
 }
 
 _session_tmux_set() {  # $1 = sid, $2 = 1|0
@@ -5392,6 +5471,7 @@ run_new_session() {
 # Setzt eine konkrete Session-ID fort (z.B. nach custom-compact)
 run_resume_id() {
   local rid="$1"
+  _session_tools_apply "$rid"      # Tools/MCP nur für diese Session (falls eingestellt)
   local mdl; mdl="$(effective_model)"
   if [[ -z "$mdl" ]]; then
     ensure_model

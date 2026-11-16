@@ -108,6 +108,7 @@ class Screen:
         self.info: dict = {}
         self.state = "idle"
         self.state_t0 = time.monotonic()
+        self.turn_t0: float | None = None    # Beginn des ganzen Zugs (Prefill, Denken, Tools, Antwort): der Zähler läuft durch
         self.out_chars = 0
         self.ctx_used = lambda: 0
         self.ctx_max = 200_000
@@ -339,7 +340,10 @@ class Screen:
         if state != self.state:
             self.state = state
             self.state_t0 = time.monotonic()
-            if state == "prefill":
+            if state == "idle":
+                self.turn_t0 = None
+            elif self.turn_t0 is None:           # erster Nicht-Leerlauf-Zustand = Zugbeginn
+                self.turn_t0 = self.state_t0
                 self.out_chars = 0
         if self.active:
             self.draw_status()
@@ -354,7 +358,7 @@ class Screen:
 
     def _state_label(self) -> str:
         s = self.state
-        el = int(time.monotonic() - self.state_t0)
+        el = int(time.monotonic() - (self.turn_t0 or self.state_t0))
         if s == "idle":
             return c("● idle", GREEN) + c(" · waiting for input", GREY)
         lab = {
@@ -365,7 +369,7 @@ class Screen:
         }.get(s)
         if lab is None:  # tool:<Name>
             lab = (f"▪ {s.replace('tool:', 'running ')}", AMBER)
-        extra = f" {el}s"
+        extra = f" {el // 60}:{el % 60:02d}" if el >= 60 else f" {el}s"
         if s in ("reasoning", "streaming") and self.out_chars:
             extra += f" · ↓{_fmt_k(self.out_chars // 4)} tok"
         return c(lab[0], lab[1]) + c(extra, GREY)
@@ -408,7 +412,9 @@ class Screen:
             if line == getattr(self, "_last_status", None) and restore:
                 return          # unverändert: nichts neu zeichnen
             self._last_status = line
-            self.real.write(f"\0337{body}\0338" if restore else body)
+            # Cursor während des Zeichnens verbergen und als eine Einheit ausgeben (Synchronized Output, falls unterstützt):
+            # sonst springt der Cursor sichtbar zwischen Eingabe/Verlauf und Statusleiste
+            self.real.write(f"\033[?2026h\033[?25l\0337{body}\0338\033[?25h\033[?2026l" if restore else body)
             self.real.flush()
 
     def start_ticker(self) -> None:
