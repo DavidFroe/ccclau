@@ -131,7 +131,7 @@ class Screen:
         sess = i.get("session") or ""
         folder = i.get("folder", "")
         l1 = c("nano", BOLD, ACCENT) + c("  ·  PropellerA  ·  Claude-Code-Nachbau", GREY)
-        l2 = bl(i.get("model", "")) + c("  via  ", GREY) + i.get("api", "")
+        l2 = c("/help", ACCENT) + c(" for help  ·  ", GREY) + c("/tools", ACCENT) + c(" for tools (on/off in clau: menu x)", GREY)
         l3 = c(folder, GREY) + (c("  ·  ", GREY) + sess if sess else "")
         rows = [" " + mascot[0] + "  " + l1, " " + mascot[1] + "  " + l2, " " + mascot[2] + "  " + l3]
         tools = i.get("tools") or []
@@ -140,6 +140,11 @@ class Screen:
             rows.extend(" " + r for r in self._tool_rows(tools, w))
             if skills:
                 rows.append(" " + self._list("skills", skills, w))
+            gu = os.environ.get("NANO_GITEA_URL", "").strip()
+            if gu:
+                gf = os.environ.get("NANO_GITEA_FORK_URL", "").strip()
+                rows.append(" " + c("gitea  ", GREY) + c(gu, ACCENT)
+                            + ((c("  ·  fork ", GREY) + c(gf, ACCENT)) if gf else ""))
             if i.get("resumed"):
                 rows.append(" " + c("resumed ", GREY) + c(i["resumed"], AMBER))
         else:
@@ -261,6 +266,7 @@ class Screen:
             w(f"\033[{r1};1H\033[2K{c('─' * (self.cols - 1), GREY)}")
             w(f"\033[{rin};1H\033[2K{c('❯ ', BOLD, ACCENT)}")
             w(f"\033[{r2};1H\033[2K{c('─' * (self.cols - 1), GREY)}")
+            self._last_status = None
             w(f"\033[{top};{bot}r\033[{top if clear else bot};1H")
             self.real.flush()
         self.draw_status()
@@ -397,7 +403,11 @@ class Screen:
                 left = clip(left, max(10, room))
                 gap = max(2, w - vlen(left) - vlen(right))
                 line = left + " " * gap + right
-            body = f"\033[{rst};1H\033[2K{clip(line, w + 1)}"
+            # überschreiben statt erst die Zeile zu löschen (sonst flackert die Leiste); Rest danach leeren
+            body = f"\033[{rst};1H{clip(line, w + 1)}\033[K"
+            if line == getattr(self, "_last_status", None) and restore:
+                return          # unverändert: nichts neu zeichnen
+            self._last_status = line
             self.real.write(f"\0337{body}\0338" if restore else body)
             self.real.flush()
 
@@ -671,7 +681,8 @@ class Screen:
         # Vorschlagsleiste in der Statusleiste anzeigen (oder Status zurück)
         top, bot, r1, rin, r2, rst = self._geom()
         if self._hint:
-            self.real.write(f"\033[{rst};1H\033[2K {clip(self._hint, self.cols - 2)}")
+            self._last_status = None
+            self.real.write(f"\033[{rst};1H {clip(self._hint, self.cols - 2)}\033[K")
         else:
             self.draw_status(restore=False)
 

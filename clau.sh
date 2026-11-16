@@ -2247,10 +2247,25 @@ run_nano_session() {
       printf '%s\n' "$mcp_json" > "$mcp_file"
     fi
   fi
+  # Gitea-Anbindung für die nano-Kopfzeile: Weboberfläche des Projekt-Repos (und Fork des Harness)
+  local gitea_url="" gitea_fork=""
+  if [[ "${CLAU_GITEA_PROJECT:-1}" == "1" ]]; then
+    local _gi; _gi="$(_gitea_info 2>/dev/null || true)"
+    if [[ "$_gi" == "{"* ]]; then
+      { read -r gitea_url; read -r gitea_fork; } < <(python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+u = d.get("url", "").rstrip("/")
+print((u + "/" + d["repo"]) if d.get("repo") and u else "")
+print((u + "/" + d["fork"]) if d.get("fork") and u else "")' "$_gi" 2>/dev/null)
+    fi
+  fi
+  NANO_GITEA_URL="$gitea_url" NANO_GITEA_FORK_URL="$gitea_fork" \
   NANO_MCP_CONFIG="$mcp_file" \
   NANO_TOOLS="$nano_tools" \
   NANO_CONTEXT_WINDOW="${cw:-200000}" \
   NANO_API_LABEL="QuiteQue ${OWL_BASE_URL#http://}" \
+  NANO_MODEL_LABEL="owl:${owl_id}" \
   NANO_APPEND_SYSTEM_PROMPT_FILE="$hint" \
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
   ANTHROPIC_API_KEY="sk-owl" \

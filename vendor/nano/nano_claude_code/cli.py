@@ -1434,6 +1434,10 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
         host = re.sub(r"^https?://", "", base).rstrip("/")
         return {"anthropic": "Anthropic API", "openrouter": "OpenRouter"}.get(provider, host or provider)
 
+    def _model_label(m: str) -> str:
+        # clau meldet das echte Backend-Modell (z.B. "owl:121"); der API-Name ist hier nur ein Platzhalter (claude-sonnet-4-6)
+        return os.environ.get("NANO_MODEL_LABEL", "").strip() or m
+
     def _effort_label() -> str:
         if config.get("thinking"):
             return f"thinking {int(config.get('thinking_budget', 10_000)) // 1000}k"
@@ -1451,7 +1455,7 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
     except Exception:
         _skill_names = []
     _screen_on = SCREEN.start(
-        {"model": model, "api": _api_label(), "effort": _effort_label(), "mode": perm_mode,
+        {"model": _model_label(model), "api": _api_label(), "effort": _effort_label(), "mode": perm_mode,
          "folder": ui._home_short(Path.cwd()), "tools": _tool_names, "skills": _skill_names,
          "session": session_title, "resumed": _resumed},
         ctx_used=_ctx_used, ctx_max=_agent_mod.CONTEXT_WINDOW_TOKENS)
@@ -1474,7 +1478,7 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
         try:
             cwd_short = Path.cwd().name
             if _screen_on:
-                SCREEN.update_info(model=config.get("model", model), mode=config.get("permission_mode", perm_mode),
+                SCREEN.update_info(model=_model_label(config.get("model", model)), mode=config.get("permission_mode", perm_mode),
                                    effort=_effort_label(), session=config.get("_session_title", ""))
                 SCREEN.set_state("idle")
                 user_input = SCREEN.read_line(hist, _slash_complete).strip()

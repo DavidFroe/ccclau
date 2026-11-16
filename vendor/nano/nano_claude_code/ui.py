@@ -437,8 +437,9 @@ class Spinner:
         i = 0
         while not self._stop.wait(0.1):
             el = int(time.monotonic() - self.t0)
-            sys.stdout.write(f"\r\033[2K  {c(_FRAMES[i % len(_FRAMES)], ACCENT)} "
-                             f"{c(self.label + '…', GREY)} {c(f'({el}s · Ctrl+C to interrupt)', DIM)}")
+            # überschreiben statt vorher löschen (Löschen + Neuzeichnen flackert); Rest der Zeile erst danach leeren
+            sys.stdout.write(f"\r  {c(_FRAMES[i % len(_FRAMES)], ACCENT)} "
+                             f"{c(self.label + '…', GREY)} {c(f'({el}s · Ctrl+C to interrupt)', DIM)}\033[K")
             sys.stdout.flush()
             i += 1
 
