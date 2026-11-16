@@ -36,6 +36,7 @@ AMBER = "\033[38;5;222m"
 RST = "\033[0m"
 
 _ANSI = re.compile(r"\033\[[0-9;?]*[A-Za-z]|\033[78]")
+_TOK = re.compile(r"\033\[[0-9;?<>]*[A-Za-z~]|\033[()][A-Za-z0-9]|\033[78=>]|\033|\r|\n|\t|[^\033\r\n\t]+")
 
 
 def vlen(s: str) -> int:
@@ -73,13 +74,20 @@ def _fmt_k(n: int) -> str:
 class _Out:
     """stdout-Ersatz: serialisiert alle Schreibzugriffe (Hauptthread, Spinner, Statusleiste)."""
 
-    def __init__(self, real, lock):
+    def __init__(self, real, lock, record=None):
         self._real = real
         self._lock = lock
+        self._record = record
 
     def write(self, s):
         with self._lock:
-            return self._real.write(s)
+            r = self._real.write(s)
+            if self._record is not None:
+                try:
+                    self._record(s)
+                except Exception:
+                    pass
+            return r
 
     def flush(self):
         with self._lock:
@@ -107,6 +115,8 @@ class Screen:
         self._tick_stop = threading.Event()
         self._hint = ""          # Vorschlagsleiste (ersetzt kurz die Statusleiste)
         self._old_winch = None
+        self.hist: list[str] = [""]   # alles, was in die Scroll-Region geschrieben wurde (für PgUp)
+        self._cr = False
 
     # ── Aufbau ───────────────────────────────────────────────────────
     def _size(self) -> None:
@@ -127,7 +137,7 @@ class Screen:
         tools = i.get("tools") or []
         skills = i.get("skills") or []
         if self.rows >= 26:
-            rows.append(" " + self._list("tools ", tools, w))
+            rows.extend(" " + r for r in self._tool_rows(tools, w))
             if skills:
                 rows.append(" " + self._list("skills", skills, w))
             if i.get("resumed"):
@@ -136,6 +146,51 @@ class Screen:
             rows.append(" " + c(f"tools {len(tools)}" + (f" · skills {len(skills)}" if skills else ""), GREY))
         rows.append(c("─" * w, GREY))
         return [clip(r, w) for r in rows]
+
+    def _tool_rows(self, tools: list[str], width: int, max_rows: int = 3) -> list[str]:
+        """Tools in höchstens max_rows Zeilen: erst die eingebauten, dann je MCP-Server 'name(Anzahl)'; Rest als '+N · /tools'."""
+        builtin = [t for t in tools if not t.startswith("mcp__")]
+        servers: dict[str, int] = {}
+        for t in tools:
+            if t.startswith("mcp__"):
+                parts = t.split("__")
+                srv = parts[1] if len(parts) >= 3 else t[5:]
+                servers[srv] = servers.get(srv, 0) + 1
+        room = width - 2
+
+        def pack(label, cnt, items, rows_allowed):
+            """items = [(text, sichtbare Länge)] → (zeilen, übrig)"""
+            head = c(label + " ", GREY) + c(cnt + " ", DIM)
+            hl = len(label) + len(cnt) + 2
+            rows, cur, used, first = [], head, hl, True
+            for k, (txt, ln) in enumerate(items):
+                if used + ln + 3 > room and not first:
+                    if len(rows) + 1 >= rows_allowed:
+                        rows.append(cur)
+                        return rows, len(items) - k
+                    rows.append(cur)
+                    cur, used, first = c(" " * 7, GREY), 7, True
+                cur += ("" if first else c(" · ", GREY)) + txt
+                used += ln + (0 if first else 3)
+                first = False
+            rows.append(cur)
+            return rows, 0
+
+        b_items = [(c(n, ACCENT), len(n)) for n in builtin]
+        out: list[str] = []
+        left = 0
+        b_rows, b_left = pack("tools", f"({len(builtin)})", b_items, max_rows - (1 if servers else 0))
+        out += b_rows
+        left += b_left
+        if servers:
+            m_items = [(c(k, ACCENT) + c(f"({v})", GREY), len(k) + len(str(v)) + 2) for k, v in servers.items()]
+            m_rows, m_left = pack("mcp  ", f"({len(servers)} Server, {sum(servers.values())} Tools)", m_items,
+                                  max_rows - len(out))
+            out += m_rows
+            left += m_left
+        if left:
+            out[-1] += c(f"  +{left} · /tools", AMBER)
+        return out[:max_rows]
 
     def _list(self, label: str, names: list[str], width: int) -> str:
         head = c(label + " ", GREY) + c(f"({len(names)}) ", DIM)
@@ -161,7 +216,7 @@ class Screen:
             self.ctx_used = ctx_used
         self.ctx_max = ctx_max
         self.real = sys.stdout
-        sys.stdout = _Out(self.real, self.lock)
+        sys.stdout = _Out(self.real, self.lock, self._record)
         self.active = True
         self._layout(clear=True)
         try:
@@ -214,6 +269,64 @@ class Screen:
         if not self.active:
             return
         self._layout(clear=True)
+
+    # ── Verlauf zum Zurückblättern (tmux/Terminal behalten bei fester Eingabezeile keinen Scrollback) ──
+    def _record(self, s: str) -> None:
+        h = self.hist
+        for m in _TOK.finditer(s):
+            t = m.group(0)
+            if t == "\n":
+                h.append(""); self._cr = False
+            elif t == "\r":
+                self._cr = True
+            elif t == "\t":
+                h[-1] += "    "
+            elif t[0] == "\033":
+                if len(t) > 2 and t.endswith("m") and t[1] == "[":
+                    h[-1] += t
+                elif len(t) > 2 and t.endswith("K") and self._cr:
+                    h[-1] = ""
+            else:
+                if self._cr:
+                    h[-1] = ""; self._cr = False
+                h[-1] += t
+        if len(h) > 6000:
+            del h[:1000]
+
+    @staticmethod
+    def _wrap(line: str, width: int) -> list[str]:
+        rows, cur, n, sgr, i = [], "", 0, "", 0
+        while i < len(line):
+            m = _ANSI.match(line, i)
+            if m:
+                code = m.group(0)
+                cur += code
+                if code.endswith("m"):
+                    sgr = "" if code in ("\033[0m", "\033[m") else sgr + code
+                i = m.end(); continue
+            cur += line[i]; n += 1; i += 1
+            if n >= width:
+                rows.append(cur + RST); cur, n = sgr, 0
+        rows.append(cur + RST if cur else "")
+        return rows
+
+    def view_scroll(self, off: int) -> int:
+        """Die Scroll-Region aus dem Verlauf neu zeichnen, `off` Zeilen über dem Ende. Gibt das begrenzte off zurück."""
+        with self.lock:
+            top, bot, *_ = self._geom()
+            height = bot - top + 1
+            rows: list[str] = []
+            for ln in self.hist[-1500:]:
+                rows.extend(self._wrap(ln, self.cols - 1))
+            off = max(0, min(off, max(0, len(rows) - height)))
+            start = max(0, len(rows) - height - off)
+            chunk = rows[start:start + height]
+            w = self.real.write
+            for k in range(height):
+                w(f"\033[{top + k};1H\033[2K{chunk[k] if k < len(chunk) else ''}")
+            self._hint = (c(f"↑ Verlauf: noch {off} Zeilen darunter", AMBER) + c("  ·  PgUp/PgDn blättern · Home Anfang · End/Enter/Esc zurück", GREY)) if off else ""
+            self.real.flush()
+        return off
 
     # ── Statusleiste ─────────────────────────────────────────────────
     def set_state(self, state: str) -> None:
@@ -352,7 +465,7 @@ class Screen:
                         txt, _, data = data.partition(end)
                         yield ("paste", txt.decode("utf-8", "replace")); continue
                     name = {"A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end",
-                            "1~": "home", "4~": "end", "7~": "home", "8~": "end", "3~": "delete",
+                            "1~": "home", "4~": "end", "7~": "home", "8~": "end", "3~": "delete", "5~": "pgup", "6~": "pgdn",
                             "1;5C": "wright", "1;5D": "wleft", "1;3C": "wright", "1;3D": "wleft"}.get(seq)
                     if name:
                         yield ("key", name)
@@ -399,6 +512,7 @@ class Screen:
         sel = -1
         base = ""
         pt = []                            # Zwischenspeicher für Tastenfolge
+        vo = 0                             # Blätter-Offset (0 = live)
         self.real.write("\0337")
 
         def draw():
@@ -440,6 +554,23 @@ class Screen:
         draw()
         try:
             for kind, val in self._read_keys(fd):
+                if vo or val in ("pgup", "pgdn"):
+                    # Blättermodus: PgUp/PgDn/Home/End; jede andere Taste kehrt zum Live-Verlauf zurück
+                    top_, bot_, *_r = self._geom()
+                    step = max(3, (bot_ - top_) // 2)
+                    if val == "pgup":
+                        vo += step
+                    elif val == "pgdn":
+                        vo -= step
+                    elif val == "home":
+                        vo = 10 ** 6
+                    elif vo:
+                        vo = 0
+                        self._hint = ""; self.view_scroll(0); draw()
+                        continue
+                    vo = self.view_scroll(max(0, vo))
+                    draw()
+                    continue
                 if kind == "text" or kind == "paste":
                     txt = val.replace("\r\n", "\n").replace("\r", "\n") if kind == "paste" else val
                     buf = buf[:pos] + txt + buf[pos:]

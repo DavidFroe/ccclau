@@ -201,6 +201,7 @@ def _cmd_help(_args: str, _state: AgentState, _config: dict) -> bool:
     print("    /status                 Version, model, provider, env info")
     print("    /context                Show token usage estimate")
     print("    /cost                   Show API cost for this session")
+    print("    /tools                  Aktive Tools und MCP-Server (an/aus: clau Menü x)")
     print("    /preprompt [Teil]       Vorspann in Teilen mit Groessen: system|basis|git|memory|agents|skills|tools|tool N|msgs|msg N")
     print("    /todos                  Show current task list")
     print(_clr("\n  System & Config", "bold"))
@@ -547,6 +548,34 @@ def _show_recent_history(state: AgentState, n_user: int = 2) -> None:
                 arg = next((str(v) for v in inp.values() if isinstance(v, (str, int))), "")
                 print(ui.tool_line(f"{b.get('name')}({cut(arg.splitlines()[0] if arg else '', 80)})"))
     print()
+
+
+def _cmd_tools(_args: str, _state: AgentState, _config: dict) -> bool:
+    """/tools: alle aktiven Tools, eingebaute und je MCP-Server, mit Token-Größe der Schemas."""
+    defs = anthropic_tool_defs()
+    size = lambda t: len(json.dumps(t, ensure_ascii=False)) // 4
+    builtin = [t for t in defs if not t["name"].startswith("mcp__")]
+    print(_clr(f"── Eingebaute Tools ({len(builtin)}) ──", "bold"))
+    for t in builtin:
+        first = (t.get("description") or "").strip().splitlines()[0][:60] if t.get("description") else ""
+        print(f"  {t['name']:<14} ~{size(t):>5,}  {first}")
+    srv: dict[str, list[dict]] = {}
+    for t in defs:
+        if t["name"].startswith("mcp__"):
+            p = t["name"].split("__")
+            srv.setdefault(p[1] if len(p) >= 3 else t["name"], []).append(t)
+    for name, ts in srv.items():
+        print(_clr(f"── MCP-Server {name} ({len(ts)} Tools, ~{sum(size(t) for t in ts):,} Tokens) ──", "bold"))
+        for t in ts:
+            short = t["name"].split("__", 2)[-1]
+            print(f"  {short:<28} ~{size(t):>5,}")
+    if not srv:
+        print(_clr("── MCP: keine Server aktiv ──", "bold"))
+    allow = os.environ.get("NANO_TOOLS")
+    print(f"  Summe: {len(defs)} Tools, ~{sum(size(t) for t in defs):,} Tokens bei jeder Anfrage"
+          + (f"  (NANO_TOOLS={allow})" if allow else ""))
+    print("  Ein-/Ausschalten: außerhalb von nano in clau, Menü x (Tools, MCP, Skills). Wirkt ab der nächsten Session. Details: /preprompt tools")
+    return True
 
 
 def _cmd_cost(_args: str, state: AgentState, config: dict) -> bool:
@@ -1070,6 +1099,7 @@ _COMMANDS: dict[str, Any] = {
     "status": _cmd_status,
     "context": _cmd_context,
     "preprompt": _cmd_preprompt,
+    "tools": _cmd_tools,
     "cost": _cmd_cost,
     "todos": _cmd_todos,
     # System
@@ -1142,6 +1172,7 @@ _CMD_META: dict[str, tuple[str, str]] = {
     "status":      ("System",     "Version, model, provider info"),
     "context":     ("Navigate",   "Show token usage estimate"),
     "cost":        ("Navigate",   "Show API cost for this session"),
+    "tools":       ("Navigate",   "List active tools and MCP servers"),
     "preprompt":   ("Navigate",   "Show what is sent before your message (parts, sizes)"),
     "todos":       ("Navigate",   "Show current task list"),
     "permissions": ("System",     "Get/set permission mode"),
@@ -1426,7 +1457,7 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
         ctx_used=_ctx_used, ctx_max=_agent_mod.CONTEXT_WINDOW_TOKENS)
     if _screen_on:
         SCREEN.start_ticker()
-        print(ui.c("  /help for commands · Tab completes · Esc interrupts · Ctrl+C twice exits", ui.GREY))
+        print(ui.c("  /help for commands · Tab completes · PgUp scrolls back · Esc interrupts · Ctrl+C twice exits", ui.GREY))
         hist = _load_history()
     else:
         ui.print_banner(model, provider, len(tools), skill_count=skill_count,
