@@ -2028,7 +2028,14 @@ _ensure_nano() {
     echo "⚠️  nano-Installation fehlgeschlagen (pip) — Rückfall auf Claude Code." >&2
     return 1
   fi
+  # Die Paketversion bleibt bei Patches gleich (0.2.0): pip/uv würden "bereits installiert" überspringen.
+  # Deshalb das nano-Paket selbst (ohne Abhängigkeiten) erzwungen neu einspielen.
+  local _force=(--force-reinstall --no-deps)
+  [[ "${pip_cmd[*]}" == *uv* ]] && _force=(--reinstall --no-deps)
+  "${pip_cmd[@]}" install -q "${_force[@]}" "$CLAU_DIR/vendor/nano" 2>/dev/null \
+    || { echo "⚠️  nano-Neuinstallation fehlgeschlagen — Rückfall auf Claude Code." >&2; return 1; }
   [[ -x "$bin" ]] || { echo "⚠️  nano-Binary fehlt nach Installation — Rückfall auf Claude Code." >&2; return 1; }
+  rm -f "$venv"/.installed-* 2>/dev/null
   touch "$marker"
   NANO_BIN="$bin"
   return 0
@@ -4997,6 +5004,8 @@ while true; do
   bash "$self" --tmux-inner "$action" "$sid" "$name"
   rc=$?
   action=resume
+  # Sauber beendet (exit/quit, Exit 0): Fenster direkt schließen. Nur bei Absturz fragen, ob fortgesetzt werden soll.
+  [[ "$rc" -eq 0 ]] && break
   echo
   echo "── Claude Code beendet (Exit $rc). Enter = Session "${name:-$sid}" wieder fortsetzen, q = Fenster schließen"
   read -r a || break
