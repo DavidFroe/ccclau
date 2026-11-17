@@ -5324,13 +5324,16 @@ txt = subprocess.run(["tmux", "capture-pane", "-p", "-t", "=" + sn + ":"],
                      capture_output=True, text=True).stdout
 txt = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", txt)
 lines = [l.rstrip() for l in txt.split("\n") if l.strip()]
-busy = any("esc to interrupt" in l or "to interrupt" in l for l in lines[-8:])
+busy = any("esc to interrupt" in l or "to interrupt" in l or "Esc unterbricht" in l
+           or re.search(r"[◐◑◉◒▪] (prefill|reasoning|streaming|komprimiere|running)", l) for l in lines[-8:])
+approval = any("awaiting approval" in l for l in lines[-8:])
 skip = re.compile(r"^[\s─━│╭╮╰╯┌┐└┘├┤╌-]*$|^\s*[│>❯]?\s*>?\s*$|shortcuts|⏵⏵|bypass permissions|accept edits|auto-compact|esc to interrupt|^\s*[│|]\s*[>❯]")
 cand = [l.strip(" │") for l in lines if not skip.search(l)]
 last = cand[-1] if cand else ""
 if len(last) > 90:
     last = last[:89] + "…"
-print(f"{model}|{'arbeitet' if busy else 'wartet'}|{last.replace('|', '/')}")
+zst = "arbeitet" if busy else ("wartet auf Freigabe" if approval else "wartet")
+print(f"{model}|{zst}|{last.replace('|', '/')}")
 PY
 }
 
@@ -5365,7 +5368,12 @@ PY
       local i=1 sn att cre path cmd what info
       for l in "${rows[@]}"; do
         IFS='|' read -r sn att cre path cmd <<< "$l"
-        what="${tnames[$sn]:-}"; [[ -z "$what" ]] && what="$cmd"
+        what="${tnames[$sn]:-}"
+        if [[ -z "$what" && -r "${XDG_CACHE_HOME:-$HOME/.cache}/clau/tmux/$sn.sh" ]]; then
+          # nano-Sessions stehen nicht in den Titel-Dateien: Name aus dem tmux-Startskript lesen
+          what="$( eval "$(sed -n '3p' "${XDG_CACHE_HOME:-$HOME/.cache}/clau/tmux/$sn.sh")" 2>/dev/null; printf '%s' "${name:-}" )"
+        fi
+        [[ -z "$what" ]] && what="$cmd"
         # Modell, Arbeitszustand und letzte Ausgabe (eine Zeile) der Session
         info="$(_tmux_info "$sn" "$(_claude_projects_dir)")"
         local mdl="${info%%|*}"; info="${info#*|}"
