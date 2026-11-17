@@ -1592,8 +1592,8 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
             for event in ui.with_spinner(event_iter, spinner, _lab):
                 if isinstance(event, CompactionNotice):
                     print(_clr(
-                        f"\n  [context compacted: {event.old_count} → {event.new_count} messages]",
-                        "yellow",
+                        f"\n  ✔ Verlauf komprimiert: {event.old_count} → {event.new_count} Nachrichten",
+                        "green",
                     ))
                 elif isinstance(event, TextChunk):
                     if _screen_on:
