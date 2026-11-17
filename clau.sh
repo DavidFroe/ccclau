@@ -616,7 +616,7 @@ _start_owl_proxy() {
   OWL_ESC_FILE="$(_usage_dir)/${CLAU_USAGE_SID:-run-$$}.esc.jsonl" OWL_REG_CWD="$PWD" \
   OWL_TRACE="${CLAU_TRACE:-0}" OWL_TRACE_FILE="$(_usage_dir)/${CLAU_USAGE_SID:-run-$$}.trace.jsonl" \
   OWL_PROXY_THREADED="$threaded" OWL_SLOT_LIMITS="$slot_limits" OWL_ROUTES="${CLAU_OWL_ROUTES:-}" \
-  OWL_CLAW_COMPACT="${CLAU_CLAW_COMPACT:-0}" \
+  OWL_CLAW_COMPACT="$([[ "${CLAU_COMPACT_MODE:-harness}" == "harness" ]] && echo 0 || echo 1)" \
   OWL_USAGE_FILE="${CLAU_USAGE_FILE:-}" \
   OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
     OWL_PROXY_TIMEOUT="${CLAU_OWL_TIMEOUT:-1800}" OWL_MAX_WAIT="${CLAU_OWL_MAX_WAIT:-}" OWL_CTX_LIMIT="$(owl_context_window "$owl_id")" \
@@ -2314,6 +2314,7 @@ print((u + "/" + d["fork"]) if d.get("fork") and u else "")' "$_gi" 2>/dev/null)
   NANO_TOOLS="$nano_tools" \
   NANO_CONTEXT_WINDOW="${cw:-200000}" \
   NANO_COMPACT_LLM="${CLAU_COMPACT_LLM:-1}" \
+  NANO_COMPACT_PCT="$(compact_pct_effektiv)" \
   NANO_COMPACT_MODEL="${CLAU_COMPACT_MODEL:-}" \
   NANO_API_LABEL="QuiteQue ${OWL_BASE_URL#http://}" \
   NANO_MODEL_LABEL="owl:${owl_id}" \
@@ -2696,7 +2697,7 @@ load_config() {
   : "${CLAU_AUTO_COMPACT_PCT:=80}"
   : "${CLAU_COMPACT_LLM:=1}"
   : "${CLAU_COMPACT_MODEL:=}"
-  : "${CLAU_CLAW_COMPACT:=0}"
+  : "${CLAU_COMPACT_MODE:=harness}"
   : "${CLAU_DISABLE_TOOLS:=}"
   : "${CLAU_DISABLE_ARTIFACT:=0}"
   : "${CLAU_DISABLE_AGENT_VIEW:=0}"
@@ -2815,7 +2816,7 @@ CLAU_AUTO_COMPACT_WINDOW="${CLAU_AUTO_COMPACT_WINDOW:-}"
 CLAU_AUTO_COMPACT_PCT="${CLAU_AUTO_COMPACT_PCT:-80}"
 CLAU_COMPACT_LLM="${CLAU_COMPACT_LLM:-1}"
 CLAU_COMPACT_MODEL="${CLAU_COMPACT_MODEL:-}"
-CLAU_CLAW_COMPACT="${CLAU_CLAW_COMPACT:-0}"
+CLAU_COMPACT_MODE="${CLAU_COMPACT_MODE:-harness}"
 CLAU_DISABLE_TOOLS="${CLAU_DISABLE_TOOLS:-}"
 CLAU_DISABLE_ARTIFACT="${CLAU_DISABLE_ARTIFACT:-0}"
 CLAU_DISABLE_AGENT_VIEW="${CLAU_DISABLE_AGENT_VIEW:-0}"
@@ -2859,6 +2860,15 @@ CONF_EOF
 # ── Auto-Compact-Logik (konfigurierbar) ──────────────────────────────────────
 # Gibt das Auto-Compact-Token-Limit zurück.
 # Priorität: 1) CLAU_AUTO_COMPACT_WINDOW (fester Wert)  2) CLAU_AUTO_COMPACT_PCT % von CW  3) 80% Fallback
+# Wer komprimiert? harness = das integrierte Auto-Compact des Harness (Standard);
+# claw = QuiteQue-claw-compactor kürzt jede Anfrage, das Harness komprimiert nur noch als Notbremse bei 95 %;
+# beide = beides. Rückgabe: Prozent des Context-Windows, ab dem das Harness selbst komprimiert (0 = nie).
+compact_pct_effektiv() {
+  if [[ "${CLAU_AUTO_COMPACT_ENABLED:-1}" == "0" ]]; then echo 0; return; fi
+  if [[ "${CLAU_COMPACT_MODE:-harness}" == "claw" ]]; then echo 95; return; fi
+  echo "${CLAU_AUTO_COMPACT_PCT:-80}"
+}
+
 compute_auto_compact_window() {
   local cw="$1"  # context window des Modells
   if [[ -z "$cw" || "$cw" -le 0 ]]; then
@@ -2869,7 +2879,8 @@ compute_auto_compact_window() {
   if [[ -n "${CLAU_AUTO_COMPACT_WINDOW:-}" && "${CLAU_AUTO_COMPACT_WINDOW:-}" -gt 0 ]]; then
     echo "$CLAU_AUTO_COMPACT_WINDOW"
   else
-    local pct="${CLAU_AUTO_COMPACT_PCT:-80}"
+    local pct; pct="$(compact_pct_effektiv)"
+    [[ "$pct" -le 0 ]] && pct="${CLAU_AUTO_COMPACT_PCT:-80}"
     echo $(( cw * pct / 100 ))
   fi
 }
@@ -3600,7 +3611,7 @@ choose_auto_compact_settings() {
     echo "  3) Prozent             : ${CLAU_AUTO_COMPACT_PCT:-80}%"
     echo "  4) nano: Verlauf per Modell zusammenfassen : $([[ "${CLAU_COMPACT_LLM:-1}" == "1" ]] && echo AN || echo "AUS (nur Auszüge, sofort)")"
     echo "  5) nano: Modell fürs Komprimieren          : ${CLAU_COMPACT_MODEL:-<das normale Modell>}   (QuiteQue-ID, z. B. ein schnelleres)"
-    echo "  6) QuiteQue-Kompressor (claw-compactor) auf jeder Anfrage : $([[ "${CLAU_CLAW_COMPACT:-0}" == "1" ]] && echo "AN  (kürzt den Prompt vor dem Backend, spart Prefill; Claude Code und nano)" || echo "AUS")"
+    echo "  6) Wer komprimiert?   : $(case "${CLAU_COMPACT_MODE:-harness}" in harness) echo "das Harness selbst (integriertes Auto-Compact)";; claw) echo "QuiteQue claw-compactor (Harness nur als Notbremse bei 95 %)";; *) echo "beide (claw-compactor + integriertes Auto-Compact)";; esac)"
     echo "  0) Zurück"
     printf "Auswahl [0-6]: "
     read -r choice
@@ -3660,9 +3671,14 @@ choose_auto_compact_settings() {
         fi
         ;;
       6)
-        if [[ "${CLAU_CLAW_COMPACT:-0}" == "1" ]]; then CLAU_CLAW_COMPACT="0"; else CLAU_CLAW_COMPACT="1"; fi
+        echo "  1) Harness   das integrierte Auto-Compact des Harness (Standard)"
+        echo "  2) claw      QuiteQue-claw-compactor kürzt jede Anfrage; Harness nur als Notbremse bei 95 %"
+        echo "  3) beide     claw-compactor und integriertes Auto-Compact"
+        printf "Auswahl [1-3, Enter=unverändert]: "
+        read -r val
+        case "$val" in 1) CLAU_COMPACT_MODE=harness ;; 2) CLAU_COMPACT_MODE=claw ;; 3) CLAU_COMPACT_MODE=beide ;; *) continue ;; esac
         save_config
-        echo "claw-compactor: $([[ "$CLAU_CLAW_COMPACT" == "1" ]] && echo "AN (gilt für neu gestartete Sessions)" || echo AUS)"
+        echo "Komprimierung: ${CLAU_COMPACT_MODE} (gilt für neu gestartete Sessions)"
         ;;
       0|"") break ;;
       *) echo "Ungültige Auswahl." ;;
@@ -5898,14 +5914,14 @@ interactive_start() {
   echo "   w) Modell wechseln"
   echo "   u) Benutzer wechseln            ($QQ_USER; gilt für alle Harnesses)"
   echo "   x) Tools, MCP, Skills …         (Freigaben für dieses Verzeichnis)"
-  echo "   k) Komprimieren …               (Auto-Compact, Modell fürs Komprimieren, claw-compactor)"
+  echo "   h) Harness wechseln             ($(effective_backend): Claude Code / nano / opencode / atomic / pi)"
   echo "   i) Markdown importieren         (neue Session aus Datei)"
   local ntm=0; _have tmux && ntm="$( { tmux ls 2>/dev/null || true; } | wc -l)"
   echo "   t) tmux-Sitzungen …             ($ntm laufen auf diesem Rechner)"
   echo "   f) Fernsteuerung …              (Telegram/Handy, API)"
   echo "   e) Einstellungen …              (Harness, Bot, Team, Update)"
   echo "   q) Beenden"
-  printf "Auswahl [%sn s w u x k i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt ${#recent[@]} ]] && echo "m, ")"
+  printf "Auswahl [%sn s w u x h i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt ${#recent[@]} ]] && echo "m, ")"
   local c; read -r c
   case "${c:-n}" in
     [1-9])
@@ -5925,7 +5941,7 @@ interactive_start() {
     w|W) choose_model_interactive; interactive_start ;;
     u|U) choose_user_interactive; interactive_start ;;
     x|X) choose_tools_menu; interactive_start ;;
-    k|K) choose_auto_compact_settings; interactive_start ;;
+    h|H) choose_backend_interactive; interactive_start ;;
     i|I) choose_import_md_interactive || interactive_start ;;
     t|T) choose_tmux_menu; interactive_start ;;
     f|F) choose_remote_menu; interactive_start ;;

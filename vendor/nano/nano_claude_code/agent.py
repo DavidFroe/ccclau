@@ -106,7 +106,11 @@ def _retry_delay(attempt: int, exc: Exception) -> float:
 # ── Context window / compaction ───────────────────────────────────────────
 
 CONTEXT_WINDOW_TOKENS = int(os.environ.get("NANO_CONTEXT_WINDOW") or 200_000)
-COMPACTION_THRESHOLD = 0.75
+try:
+    _pct = float(os.environ.get("NANO_COMPACT_PCT") or 75)     # von clau gesetzt; 0 = nie selbst komprimieren
+except ValueError:
+    _pct = 75.0
+COMPACTION_THRESHOLD = _pct / 100 if _pct > 0 else 1e9
 COMPACTION_KEEP_RECENT = 6
 
 _COMPACTION_PROMPT = (
