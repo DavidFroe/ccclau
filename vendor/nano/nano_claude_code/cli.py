@@ -1161,6 +1161,9 @@ def _handle_slash(line: str, state: AgentState, config: dict) -> bool | str:
         _info(f"[skill: /{cmd}]")
         return prompt
 
+    # Eingefügter Text/Pfad (/home/x, lange Hashes, mehrzeilig) ist kein Befehl: ganz normal ans Modell
+    if "\n" in line.strip() or not re.fullmatch(r"[a-z][\w:.-]{0,31}", cmd):
+        return False
     _err(f"Unknown command: /{cmd}. Type /help for commands or /skills to list skills.")
     return True
 
