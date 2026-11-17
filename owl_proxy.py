@@ -485,6 +485,8 @@ class StreamTranslator:
         self.err_retries_left = 3   # Abbrüche des Backend-Streams ohne Antwort: bis zu 3 Wiederholungen
         self.err_content = False    # Fehlertext kam als normaler Antworttext (QuiteQue)
         self.err_pending = False
+        self.fin_seen = False       # finish_reason vom Backend gesehen
+        self.noend_retried = False  # Stream ohne Antwort und ohne finish_reason: nur einmal neu anfragen
 
     def _akt_tools(self):
         """Tool-Aufrufe einmal ins Denkprotokoll (Argumente sind erst am Ende vollständig)."""
@@ -608,6 +610,7 @@ class StreamTranslator:
 
         # Finish
         if finish_reason in ("stop", "tool_calls", "length"):
+            self.fin_seen = True
             if (self.retry_ok and finish_reason == "stop" and not self.text_started
                     and not self.tool_buffers and not self.thinking_started):
                 # Komplett leer (kein Text, kein Denken, kein Tool): nichts ausgeben,
@@ -685,6 +688,21 @@ class StreamTranslator:
             self.thinking_closed = True
             out.append(self._evt("content_block_stop", {
                 "type": "content_block_stop", "index": self.thinking_index
+            }))
+        if not self.text_started and not self.tool_buffers:
+            # Stream endete ohne Antwort (nur Denken, kein finish_reason): sichtbar machen statt stumm zu enden
+            self.text_started = True
+            self.text_index = self.next_index
+            self.next_index += 1
+            out.append(self._evt("content_block_start", {
+                "type": "content_block_start", "index": self.text_index,
+                "content_block": {"type": "text", "text": ""}
+            }))
+            out.append(self._evt("content_block_delta", {
+                "type": "content_block_delta", "index": self.text_index,
+                "delta": {"type": "text_delta", "text": (
+                    f"[Modell {self.target}: Der Stream endete nach dem Nachdenken ohne Antwort. "
+                    f"Bitte die Anfrage wiederholen oder kürzer fassen.]")}
             }))
         if self.text_started and not self.text_closed:
             self.text_closed = True
@@ -1165,6 +1183,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     tr.len_pending = False
                     tr.len_retry_ok = False
                     log(f"  Token-Limit im Denken verbraucht (model={tr.target}) -- einmaliger Retry mit reasoning_effort=low")
+                    try:
+                        owl_resp.close()
+                    except Exception:
+                        pass
+                    owl_resp = len_retry_fn()
+                    continue
+                if (len_retry_fn is not None and not tr.fin_seen and not tr.noend_retried and tr.thinking_started
+                        and not tr.text_started and not tr.tool_buffers):
+                    tr.noend_retried = True
+                    log(f"  Stream ohne Antwort und ohne Ende (model={tr.target}, nur Denken) -- einmaliger Retry mit reasoning_effort=low")
                     try:
                         owl_resp.close()
                     except Exception:

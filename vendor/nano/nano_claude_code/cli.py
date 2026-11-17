@@ -30,6 +30,7 @@ from nano_claude_code.agent import (
     TurnDone,
     run_agent_loop,
     run_streaming,
+    shrink_old_tool_results,
 )
 from nano_claude_code.config import (
     HISTORY_FILE,
@@ -1401,7 +1402,7 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
         )
     else:
         state = AgentState()
-    state.messages = _agent_mod.shrink_old_tool_results(state.messages)
+    state.messages = shrink_old_tool_results(state.messages)
     tools = anthropic_tool_defs()
 
     # Try prompt_toolkit for rich dropdown, fallback to readline
