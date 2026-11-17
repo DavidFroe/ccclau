@@ -4,6 +4,7 @@ Laufzeit, Rückfrage mit nummerierten Optionen), damit Umsteiger nichts neu lern
 """
 from __future__ import annotations
 
+from nano_claude_code import DISPLAY_NAME, DISPLAY_VERSION
 import os
 import shutil
 import sys
@@ -51,7 +52,7 @@ def rule() -> str:
 def print_banner(model: str, provider: str, tools_count: int, skill_count: int = 0,
                  session_title: str = "", resumed: str = "") -> None:
     rows = [
-        (c("nano", BOLD, ACCENT) + c("  ·  " + _("nano.banner.tagline"), GREY)),
+        (c(DISPLAY_NAME, BOLD, ACCENT) + c(" " + DISPLAY_VERSION, GREY)),
         c(_("nano.banner.model") + "  ", GREY) + c(model, BOLD),
         c(_("nano.banner.folder") + " ", GREY) + _home_short(Path.cwd()),
     ]

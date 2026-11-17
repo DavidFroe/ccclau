@@ -53,6 +53,10 @@ def generate_session_title(messages: list[dict[str, Any]]) -> str:
     return _derive_title_from_message(text)
 
 
+# Zähler pro Sitzung (werden mit der Sitzung gespeichert): wie oft komprimiert, wie oft mit diesem Harness gestartet
+META: dict[str, int] = {"compactions": 0, "starts": 0}
+
+
 def save_session(
     messages: list[dict[str, Any]],
     *,
@@ -81,6 +85,8 @@ def save_session(
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
         "model": model,
+        "compactions": META["compactions"],
+        "starts": META["starts"],
         "saved_at": datetime.now().isoformat(),
     }
     path.write_text(json.dumps(data, indent=2, default=str))

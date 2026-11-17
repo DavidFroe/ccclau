@@ -664,6 +664,8 @@ def _cmd_compact(args: str, state: AgentState, _config: dict) -> bool:
         return True
     old_len = len(state.messages)
     state.messages = state.messages[-keep:]
+    from nano_claude_code.session import META as _META
+    _META["compactions"] += 1
     _ok(f"Compacted: {old_len} → {len(state.messages)} messages (kept last {keep})")
     return True
 
@@ -1441,7 +1443,11 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
 
     from nano_claude_code import ui
 
-    _resumed = f"{len(state.messages)} messages, {state.turn_count} turns" if (resume_state and state.messages) else ""
+    from nano_claude_code.session import META as _META
+    _META["compactions"] = int((resume_state or {}).get("compactions", 0) or 0)
+    _META["starts"] = int((resume_state or {}).get("starts", 0) or 0) + 1
+    _resumed = (_("nano.banner.resumed_info", len(state.messages), state.turn_count, _META["compactions"], _META["starts"])
+                if (resume_state and state.messages) else "")
     from nano_claude_code.screen import SCREEN
     from nano_claude_code import agent as _agent_mod
 

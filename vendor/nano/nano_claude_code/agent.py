@@ -578,6 +578,9 @@ def run_streaming(
     if _needs_compaction(state.messages, state.last_input_tokens):
         old_count = len(state.messages)
         state.messages = compact_messages(state.messages, client, model, system_prompt)
+        if len(state.messages) < old_count:
+            from nano_claude_code.session import META as _META
+            _META["compactions"] += 1
         yield CompactionNotice(old_count, len(state.messages))
 
     state.messages.append({"role": "user", "content": user_message})

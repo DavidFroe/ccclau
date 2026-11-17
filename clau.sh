@@ -30,6 +30,11 @@ toggle_sudo() {
 # owlAPI-Proxy: claude CLI spricht Anthropic-Format, Proxy übersetzt → QuiteQue
 # QuiteQue hier auf 11.0.0.13 (diese Stack) — User "ccclau" für vLLM/Claude-Backends
 CLAU_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+# Anzeigename und Version des eingebauten Harness (intern bleibt er "nano"). Hier ändern, wenn der Name wechselt;
+# überschreibbar per Umgebung (CLAU_NANO_NAME / CLAU_NANO_VERSION).
+CLAU_NANO_NAME="${CLAU_NANO_NAME:-Qode}"
+CLAU_NANO_VERSION="${CLAU_NANO_VERSION:-0.0.1a}"
+export CLAU_NANO_NAME CLAU_NANO_VERSION
 OWL_PROXY_SCRIPT="$CLAU_DIR/owl_proxy.py"
 CC_COMPACT_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc_compact.py"
 WEBSEARCH_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/websearch_mcp.py"
@@ -2000,14 +2005,14 @@ _ensure_nano() {
     NANO_BIN="$bin"; return 0
   fi
   if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
-    echo "⚠️  nano braucht Python >= 3.10, gefunden: $(python3 --version 2>&1) — Rückfall auf Claude Code." >&2
+    echo "⚠️  ${CLAU_NANO_NAME} braucht Python >= 3.10, gefunden: $(python3 --version 2>&1) — Rückfall auf Claude Code." >&2
     return 1
   fi
   if [[ "${CLAU_OFFLINE:-0}" == "1" ]]; then
-    echo "⚠️  CLAU_OFFLINE=1 — nano wird nicht installiert, Rückfall auf Claude Code." >&2
+    echo "⚠️  CLAU_OFFLINE=1 — ${CLAU_NANO_NAME} wird nicht installiert, Rückfall auf Claude Code." >&2
     return 1
   fi
-  echo "Installiere nano-claude-code (eigene venv) ..." >&2
+  echo "Installiere ${CLAU_NANO_NAME} (eigene venv) ..." >&2
   mkdir -p "$venv" 2>/dev/null || { echo "⚠️  venv-Ordner nicht anlegbar: $venv — Rückfall auf Claude Code." >&2; return 1; }
   if [[ ! -x "$venv/bin/python" ]]; then
     # --without-pip: ensurepip fehlt auf manchen Systemen (Debian ohne python3-venv).
@@ -2028,7 +2033,7 @@ _ensure_nano() {
     return 1
   fi
   if ! "${pip_cmd[@]}" install -q "$CLAU_DIR/vendor/nano" 2>/dev/null; then
-    echo "⚠️  nano-Installation fehlgeschlagen (pip) — Rückfall auf Claude Code." >&2
+    echo "⚠️  ${CLAU_NANO_NAME}-Installation fehlgeschlagen (pip) — Rückfall auf Claude Code." >&2
     return 1
   fi
   # Die Paketversion bleibt bei Patches gleich (0.2.0): pip/uv würden "bereits installiert" überspringen.
@@ -2036,7 +2041,7 @@ _ensure_nano() {
   local _force=(--force-reinstall --no-deps)
   [[ "${pip_cmd[*]}" == *uv* ]] && _force=(--reinstall --no-deps)
   "${pip_cmd[@]}" install -q "${_force[@]}" "$CLAU_DIR/vendor/nano" 2>/dev/null \
-    || { echo "⚠️  nano-Neuinstallation fehlgeschlagen — Rückfall auf Claude Code." >&2; return 1; }
+    || { echo "⚠️  ${CLAU_NANO_NAME}-Neuinstallation fehlgeschlagen — Rückfall auf Claude Code." >&2; return 1; }
   [[ -x "$bin" ]] || { echo "⚠️  nano-Binary fehlt nach Installation — Rückfall auf Claude Code." >&2; return 1; }
   rm -f "$venv"/.installed-* 2>/dev/null
   touch "$marker"
@@ -2254,7 +2259,7 @@ run_nano_session() {
   trap '_kill_owl_proxy' EXIT INT TERM
   sleep 0.6
 
-  echo "nano → Proxy :${port} → QuiteQue (Modell $owl_id${cw:+, ctx=$cw})"
+  echo "${CLAU_NANO_NAME} → Proxy :${port} → QuiteQue (Modell $owl_id${cw:+, ctx=$cw})"
   if [[ -n "$cw" && "$cw" -lt 200000 ]]; then
     echo "Hinweis: Modell $owl_id hat nur $cw Token Kontext."
     echo "         Bei langen Sessions regelmäßig /compact aufrufen,"
@@ -2376,7 +2381,7 @@ choose_builtin_tools_menu() {
   while true; do
     local cur=",${CLAU_OWL_TOOLS:-$CLAU_OWL_TOOLS_DEFAULT}," i=0 e key tools label on n_on=0
     echo
-    echo "Eingebaute Tools für dieses Verzeichnis ($(basename "$PWD")) — gilt für owl-Modelle, nano und Claude Code"
+    echo "Eingebaute Tools für dieses Verzeichnis ($(basename "$PWD")) — gilt für owl-Modelle, ${CLAU_NANO_NAME} und Claude Code"
     echo "Je weniger Tools, desto kürzer der Prompt und desto schneller das Modell. Gespeichert in .clau.conf."
     for e in "${catalog[@]}"; do
       ((i++)) || true
@@ -2420,7 +2425,7 @@ choose_mcp_menu() {
   while true; do
     local tok="fehlt"; [[ -s "$(_paperless_token_file)" ]] && tok="gesetzt"
     echo
-    echo "MCP-Server für dieses Verzeichnis ($(basename "$PWD")) — Claude Code und nano"
+    echo "MCP-Server für dieses Verzeichnis ($(basename "$PWD")) — Claude Code und ${CLAU_NANO_NAME}"
     echo "Jeder aktive Server fügt seine Tool-Schemas zu jeder Anfrage hinzu."
     echo "   1) [$([[ "${CLAU_WEBSEARCH:-1}" == "1" ]] && echo x || echo " ")] Websuche (QuiteQue, lokal)"
     echo "   2) [$([[ "${CLAU_PAPERLESS:-0}" == "1" ]] && echo x || echo " ")] Paperless (Dokumente suchen/lesen: ${CLAU_PAPERLESS_URL:-http://11.0.0.12:8010}, Token $tok)"
@@ -2555,6 +2560,7 @@ t() {
     text="$key"
   fi
 
+  text="${text//\{NANO\}/$CLAU_NANO_NAME}"
   # Platzhalter ersetzen
   if [[ $# -gt 0 ]]; then
     printf "$text" "$@"
@@ -3599,7 +3605,7 @@ choose_backend_interactive() {
   echo
   echo "Harness wählen:"
   echo "  1) claude              Claude Code   Standard  (nötig für Claude-Abo-Modelle und Team-Modus)  [Enter]"
-  echo "  2) nano                (Claude-Code-Nachbau, Python), nur für owl-Modelle"
+  echo "  2) ${CLAU_NANO_NAME}                (Python), nur für owl-Modelle"
   echo "  3) opencode            opencode.ai   alternatives Harness"
   echo "  4) atomic              bastani-inc/atomic (MIT) – Workflows/Prüfstufen, nur owl-Modelle, wird von GitHub geholt"
   echo "  5) pi                  earendil-works/pi (MIT) – minimaler Coding-Agent, nur owl-Modelle, wird von GitHub geholt"
@@ -3712,8 +3718,8 @@ choose_auto_compact_settings() {
     echo "  1) Auto-Compact        : $enabled_label"
     echo "  2) Festes Token-Limit  : ${CLAU_AUTO_COMPACT_WINDOW:-<prozent-basiert>}"
     echo "  3) Prozent             : ${CLAU_AUTO_COMPACT_PCT:-80}%"
-    echo "  4) nano: Verlauf per Modell zusammenfassen : $([[ "${CLAU_COMPACT_LLM:-1}" == "1" ]] && echo AN || echo "AUS (nur Auszüge, sofort)")"
-    echo "  5) nano: Modell fürs Komprimieren          : ${CLAU_COMPACT_MODEL:-<das normale Modell>}   (QuiteQue-ID, z. B. ein schnelleres)"
+    echo "  4) ${CLAU_NANO_NAME}: Verlauf per Modell zusammenfassen : $([[ "${CLAU_COMPACT_LLM:-1}" == "1" ]] && echo AN || echo "AUS (nur Auszüge, sofort)")"
+    echo "  5) ${CLAU_NANO_NAME}: Modell fürs Komprimieren          : ${CLAU_COMPACT_MODEL:-<das normale Modell>}   (QuiteQue-ID, z. B. ein schnelleres)"
     echo "  6) Wer komprimiert?   : $(case "${CLAU_COMPACT_MODE:-harness}" in harness) echo "das Harness selbst (integriertes Auto-Compact)";; claw) echo "QuiteQue claw-compactor (Harness nur als Notbremse bei 95 %)";; *) echo "beide (claw-compactor + integriertes Auto-Compact)";; esac)"
     echo "  0) Zurück"
     printf "Auswahl [0-6]: "
@@ -4857,7 +4863,7 @@ session_action_menu() {
   printf "Auswahl [0-8, h, w, Enter=1]: "
   local action; read -r action
   if [[ "$sid" == *.json && ! "${action:-1}" =~ ^([1hHwW])$ ]]; then
-    echo "Für nano-Sessions geht nur Fortsetzen (Dateien liegen in ~/.nano_claude/sessions)."
+    echo "Für ${CLAU_NANO_NAME}-Sessions geht nur Fortsetzen (Dateien liegen in ~/.nano_claude/sessions)."
     return 0
   fi
   case "${action:-1}" in
@@ -4882,7 +4888,7 @@ session_action_menu() {
         echo "  Diese Session lief zuletzt mit dem Harness $old_eng, eingestellt ist $cur_eng."
         case "$cur_eng" in
           opencode|atomic|pi) echo "    a) mit $cur_eng — der Verlauf wird als Text übernommen (Tool-Ausgaben gekürzt)   [Enter]" ;;
-          nano) echo "    a) mit nano — liest den Verlauf der Claude-Code-Session direkt   [Enter]" ;;
+          nano) echo "    a) mit ${CLAU_NANO_NAME} — liest den Verlauf der Claude-Code-Session direkt   [Enter]" ;;
           *) echo "    a) mit $cur_eng   [Enter]" ;;
         esac
         echo "    b) mit dem alten Harness $old_eng"
@@ -5175,7 +5181,7 @@ if not only and os.path.isdir(ndir):
                     preview = t[:80]
                     break
         tokens = int(len(json.dumps(msgs, ensure_ascii=False)) / CHARS_PER_TOKEN) + OVERHEAD_TOKENS
-        name = "[nano] " + clean(data.get("title") or preview[:40] or fn)
+        name = "[" + os.environ.get("CLAU_NANO_NAME", "nano") + "] " + clean(data.get("title") or preview[:40] or fn)
         try:
             nm = os.path.getmtime(npath)
         except Exception:

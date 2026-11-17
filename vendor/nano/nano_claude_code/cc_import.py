@@ -38,6 +38,7 @@ def load_cc_session(arg: str) -> dict[str, Any] | None:
         return None
     messages: list[dict[str, Any]] = []
     title = ""
+    compactions = 0
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             obj = json.loads(line)
@@ -54,6 +55,8 @@ def load_cc_session(arg: str) -> dict[str, Any] | None:
         blocks = _blocks(msg.get("content"))
         if not blocks:
             continue
+        if role == "user" and any(b.get("type") == "text" and str(b.get("text", "")).lstrip().startswith("This session is being continued") for b in blocks):
+            compactions += 1
         if messages and messages[-1]["role"] == role:
             messages[-1]["content"].extend(blocks)
         else:
@@ -74,4 +77,4 @@ def load_cc_session(arg: str) -> dict[str, Any] | None:
             else:
                 cleaned.append({"role": m["role"], "content": keep})
     return {"title": title or f"[cc] {path.stem[:8]}", "messages": cleaned,
-            "turn_count": 0, "total_input_tokens": 0, "total_output_tokens": 0, "model": ""}
+            "turn_count": 0, "total_input_tokens": 0, "total_output_tokens": 0, "model": "", "compactions": compactions}
