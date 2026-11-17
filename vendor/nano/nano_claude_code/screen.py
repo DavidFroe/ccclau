@@ -64,6 +64,8 @@ PROPELLER = [
 
 
 def _fmt_k(n: int) -> str:
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.1f}G"
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
     if n >= 1000:
@@ -110,6 +112,8 @@ class Screen:
         self.state_t0 = time.monotonic()
         self.turn_t0: float | None = None    # Beginn des ganzen Zugs (Prefill, Denken, Tools, Antwort): der Zähler läuft durch
         self.out_chars = 0
+        self.live_chars = 0         # Zeichen des laufenden API-Aufrufs, noch nicht in den Summen
+        self.tok_total = None       # Funktion: bisherige Tokens (rein + raus) der Session
         self.ctx_used = lambda: 0
         self.ctx_max = 200_000
         self._ticker: threading.Thread | None = None
@@ -408,6 +412,20 @@ class Screen:
 
     def add_out(self, n: int) -> None:
         self.out_chars += n
+        self.live_chars += n
+
+    def call_done(self) -> None:
+        self.live_chars = 0
+        if self.active:
+            self.draw_status()
+
+    def _tok_label(self) -> str:
+        try:
+            n = int(self.tok_total()) if self.tok_total else 0
+        except Exception:
+            n = 0
+        n += self.live_chars // 4
+        return f" ({_fmt_k(n)})" if n else ""
 
     def update_info(self, **kw) -> None:
         self.info.update(kw)
@@ -493,7 +511,7 @@ class Screen:
                 left = ""
                 for with_api, with_mode in ((1, 1), (1, 0), (2, 0), (0, 0)):
                     a = api if with_api == 1 else (api.split()[0] if with_api == 2 and api else "")
-                    parts = [c(i.get("model", ""), BOLD), c(a, GREY) if a else "", eff,
+                    parts = [c(i.get("model", ""), BOLD) + c(self._tok_label(), GREY), c(a, GREY) if a else "", eff,
                              c(i.get("mode", ""), GREY) if with_mode else ""]
                     left = " " + c(" · ", GREY).join(p for p in parts if p)
                     if vlen(left) <= room:

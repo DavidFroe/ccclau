@@ -76,6 +76,10 @@ def _should_retry(exc: Exception) -> bool:
     if isinstance(exc, anthropic.InternalServerError):
         return True
     if isinstance(exc, anthropic.APIStatusError):
+        body = getattr(exc, "body", None)
+        err = body.get("error", body) if isinstance(body, dict) else {}
+        if isinstance(err, dict) and err.get("type") in ("api_error", "overloaded_error"):
+            return True      # Fehler-Event mitten im Stream (Proxy: Backend hing/riss ab)
         return getattr(exc, "status_code", 0) in _RETRYABLE_STATUS_CODES
     if isinstance(exc, anthropic.APIConnectionError):
         return True
@@ -157,6 +161,7 @@ def _needs_compaction(messages: list[dict], last_input_tokens: int) -> bool:
 
 _CC_CONT_MARK = "This session is being continued"
 PROGRESS_HOOK = None   # optional: Funktion (erledigt, gesamt) für einen Ladebalken beim Komprimieren
+USAGE_HOOK = None    # wird nach jedem API-Aufruf gerufen (Summen aktualisiert)
 STATUS_HOOK = None   # optional: Aufrufer (cli) setzt eine Funktion, die den Zustand "compact" in der Statusleiste anzeigt
 
 
@@ -580,6 +585,8 @@ def run_streaming(
                 state.total_input_tokens += in_tokens
                 state.total_output_tokens += out_tokens
                 state.last_input_tokens = in_tokens
+                if USAGE_HOOK:
+                    USAGE_HOOK()
 
                 for block in final.content:
                     if block.type == "tool_use":
@@ -592,12 +599,12 @@ def run_streaming(
         except (anthropic.APIError, httpx.TransportError) as e:
             # Fehler beim Lesen des Streams (503 'Loading model', abgerissene Verbindung):
             # der Retry in _api_call_streaming greift hier nie, weil stream() erst beim Lesen verbindet.
-            if (stream_retries < 3 and not out_started
-                    and (isinstance(e, httpx.TransportError) or _should_retry(e))):
+            if (stream_retries < 3 and (isinstance(e, httpx.TransportError) or _should_retry(e))):
                 stream_retries += 1
                 state.turn_count -= 1
                 wait = 5 * stream_retries  # 5 s, 10 s, 15 s
-                yield TextChunk(f"\n[Verbindung zum Modell gestört ({type(e).__name__}) – Wiederholung {stream_retries}/3 in {wait}s]\n")
+                teil = " – Teilantwort verworfen" if out_started else ""
+                yield TextChunk(f"\n[Verbindung zum Modell gestört ({type(e).__name__}){teil} – Wiederholung {stream_retries}/3 in {wait}s]\n")
                 time.sleep(wait)
                 continue
             yield TextChunk(f"\n[API Error: {e}]\n")

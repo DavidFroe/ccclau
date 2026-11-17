@@ -182,6 +182,12 @@ REQUEST_TIMEOUT = int(os.environ.get("OWL_PROXY_TIMEOUT", "1800"))
 # X-Owl-Max-Wait an QuiteQue: Standard REQUEST_TIMEOUT - 60 (bei 1800 -> 1740).
 # OWL_MAX_WAIT=<Sekunden> setzt den Wert fest, OWL_MAX_WAIT=0 (oder "aus")
 # sendet den Header gar nicht -> QuiteQue nimmt seinen eigenen Standard.
+# Leerlauf im laufenden Stream: so lange darf das Backend nach der ersten Zeile schweigen, bevor die Verbindung
+# als hängend gilt (Fehler-Event an den Client -> der fragt neu an). 0 = aus (dann gilt nur REQUEST_TIMEOUT).
+try:
+    STREAM_IDLE = int(os.environ.get("OWL_STREAM_IDLE", "300"))
+except ValueError:
+    STREAM_IDLE = 300
 _MW = os.environ.get("OWL_MAX_WAIT", "").strip().lower()
 if _MW in ("0", "aus", "off", "nein", "no"):
     MAX_WAIT_HEADERS = {}
@@ -708,13 +714,26 @@ class StreamTranslator:
 # ── HTTP-Handler ───────────────────────────────────────────────────────────────
 
 _TRANSIENT = ("stream abgebrochen", "readerror", "remoteprotocolerror", "connecterror", "incomplete chunked",
-              "peer closed", "connection reset", "connection aborted", "server disconnected")
+              "peer closed", "read timed out", "connection reset", "connection aborted", "server disconnected")
 
 
 def _transient_stream_error(msg) -> bool:
     """Verbindungsabrisse zwischen QuiteQue und Backend: eine Wiederholung lohnt (Kontext-/Anfragefehler dagegen nie)."""
     m = str(msg or "").lower()
     return any(k in m for k in _TRANSIENT)
+
+
+def _set_read_timeout(resp, secs) -> bool:
+    """Lese-Timeout der schon offenen Backend-Verbindung neu setzen (urllib3 1.x und 2.x)."""
+    for get in (lambda: resp.raw._fp.fp.raw._sock, lambda: resp.raw._connection.sock, lambda: resp.raw.connection.sock):
+        try:
+            sk = get()
+            if sk is not None:
+                sk.settimeout(secs)
+                return True
+        except Exception:
+            continue
+    return False
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -1051,6 +1070,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         for line in owl_resp.iter_lines():
             if n_lines == 0:
                 log(f"  erste Zeile vom Backend nach {time.monotonic()-t0:.1f}s ({n_pings[0]} Pings gesendet)")
+                if STREAM_IDLE > 0 and not _set_read_timeout(owl_resp, STREAM_IDLE):
+                    log("  Leerlauf-Timeout konnte nicht gesetzt werden (Socket nicht erreichbar)")
             n_lines += 1
             if not line or not line.startswith(b"data: "):
                 continue
@@ -1173,7 +1194,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if ESC is not None:
                 ESC.melde("backend_fehler", "Verbindung abgerissen")
             if sse is not None:
-                self._stream_abort(sse["tr"], f"[owlAPI-Verbindung abgebrochen: {e}]", sse["lock"])
+                self._stream_error_event(sse["tr"], f"owlAPI-Verbindung abgebrochen: {e}", sse["lock"])
         finally:
             if sse is not None:
                 sse["stop"].set()
@@ -1181,6 +1202,19 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 owl_resp.close()
             except Exception:
                 pass
+
+    def _stream_error_event(self, tr, message, write_lock):
+        """Stream mit SSE-Fehler-Event beenden (statt Fehlertext als Antwort): der Client behandelt es als API-Fehler und fragt neu an."""
+        try:
+            tr.ended = True
+            if tr.akt is not None:
+                tr.akt.ende(tr.h, "fehler/abbruch", tr.input_tokens, tr.output_tokens)
+            evt = tr._evt("error", {"type": "error", "error": {"type": "api_error", "message": message}})
+            with write_lock:
+                self.wfile.write(evt.encode())
+                self.wfile.flush()
+        except BrokenPipeError:
+            pass
 
     def _stream_abort(self, tr, message, write_lock):
         try:

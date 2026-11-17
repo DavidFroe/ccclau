@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from nano_claude_code.i18n import _
 from nano_claude_code.agent import (
     AgentState,
     CompactionNotice,
@@ -182,43 +183,43 @@ def _flush_response() -> None:
 #   Misc       : /copy /bug /help /exit /quit
 
 def _cmd_help(_args: str, _state: AgentState, _config: dict) -> bool:
-    print(_clr("\n  Session", "bold"))
-    print("    /clear, /new, /reset    Clear conversation history")
-    print("    /compact [n]            Keep last n messages (default 4)")
-    print("    /save [file]            Save session to file")
-    print("    /load [query|file]      Load or search sessions by title")
-    print("    /export [file]          Export conversation as markdown")
-    print("    /history                Print conversation summary")
-    print("    /rename <title>         Set display title for this session")
-    print(_clr("\n  Model & Inference", "bold"))
-    print("    /model [name]           Show or set model")
-    print("    /thinking               Toggle extended thinking mode")
-    print("    /verbose                Toggle verbose output")
-    print(_clr("\n  Navigation & Context", "bold"))
-    print("    /cwd [path]             Show or change working directory")
-    print("    /files                  List files mentioned in conversation")
-    print("    /diff                   Show uncommitted git changes")
-    print("    /status                 Version, model, provider, env info")
-    print("    /context                Show token usage estimate")
-    print("    /cost                   Show API cost for this session")
-    print("    /tools                  Aktive Tools und MCP-Server (an/aus: clau Menü x)")
-    print("    /preprompt [Teil]       Vorspann in Teilen mit Groessen: system|basis|git|memory|agents|skills|tools|tool N|msgs|msg N")
-    print("    /todos                  Show current task list")
-    print(_clr("\n  System & Config", "bold"))
-    print("    /permissions [mode]     Get/set: auto, accept-all, manual")
-    print("    /config [key=value]     Show/set config")
-    print("    /init                   Create CLAUDE.md in current directory")
-    print("    /doctor                 Diagnose installation and config")
-    print(_clr("\n  Agent & Skills", "bold"))
-    print("    /btw <question>         Side question (runs in sub-agent)")
-    print("    /review [pr]            Review PR or uncommitted changes")
-    print("    /skills                 List available skills")
-    print("    /agents                 List sub-agent profiles (Agent tool)")
-    print(_clr("\n  Misc", "bold"))
-    print("    /copy                   Copy last response to clipboard")
-    print("    /bug [text]             Report a bug / feedback")
-    print("    /help                   Show this help")
-    print("    /exit, /quit            Exit")
+    print(_clr("\n  " + _("nano.cmd.session"), "bold"))
+    print("    " + _("nano.cmd.session.clear"))
+    print("    " + _("nano.cmd.session.compact"))
+    print("    " + _("nano.cmd.session.save"))
+    print("    " + _("nano.cmd.session.load"))
+    print("    " + _("nano.cmd.session.export"))
+    print("    " + _("nano.cmd.session.history"))
+    print("    " + _("nano.cmd.session.rename"))
+    print(_clr("\n  " + _("nano.cmd.model"), "bold"))
+    print("    " + _("nano.cmd.model.model"))
+    print("    " + _("nano.cmd.model.thinking"))
+    print("    " + _("nano.cmd.model.verbose"))
+    print(_clr("\n  " + _("nano.cmd.nav"), "bold"))
+    print("    " + _("nano.cmd.nav.cwd"))
+    print("    " + _("nano.cmd.nav.files"))
+    print("    " + _("nano.cmd.nav.diff"))
+    print("    " + _("nano.cmd.nav.status"))
+    print("    " + _("nano.cmd.nav.context"))
+    print("    " + _("nano.cmd.nav.cost"))
+    print("    " + _("nano.cmd.nav.tools"))
+    print("    " + _("nano.cmd.nav.preprompt"))
+    print("    " + _("nano.cmd.nav.todos"))
+    print(_clr("\n  " + _("nano.cmd.sys"), "bold"))
+    print("    " + _("nano.cmd.sys.permissions"))
+    print("    " + _("nano.cmd.sys.config"))
+    print("    " + _("nano.cmd.sys.init"))
+    print("    " + _("nano.cmd.sys.doctor"))
+    print(_clr("\n  " + _("nano.cmd.agent"), "bold"))
+    print("    " + _("nano.cmd.agent.btw"))
+    print("    " + _("nano.cmd.agent.review"))
+    print("    " + _("nano.cmd.agent.skills"))
+    print("    " + _("nano.cmd.agent.agents"))
+    print(_clr("\n  " + _("nano.cmd.misc"), "bold"))
+    print("    " + _("nano.cmd.misc.copy"))
+    print("    " + _("nano.cmd.misc.bug"))
+    print("    " + _("nano.cmd.misc.help"))
+    print("    " + _("nano.cmd.misc.exit"))
     print()
     return True
 
@@ -226,18 +227,18 @@ def _cmd_help(_args: str, _state: AgentState, _config: dict) -> bool:
 def _cmd_clear(_args: str, state: AgentState, _config: dict) -> bool:
     state.messages.clear()
     state.turn_count = 0
-    _ok("Conversation cleared.")
+    _ok(_("nano.msg.cleared"))
     return True
 
 
 def _cmd_model(args: str, _state: AgentState, config: dict) -> bool:
     if not args.strip():
-        _info(f"Current model: {config['model']}")
-        _info("Available models:\n" + "\n".join(f"  {m}" for m in MODELS))
+        _info(_("nano.msg.model_current", config['model']))
+        _info(_("nano.msg.model_available") + "\n" + "\n".join(f"  {m}" for m in MODELS))
     else:
         config["model"] = args.strip()
         save_config(config)
-        _ok(f"Model set to {config['model']}")
+        _ok(_("nano.msg.model_set", config['model']))
     return True
 
 
@@ -257,7 +258,7 @@ def _cmd_config(args: str, _state: AgentState, config: dict) -> bool:
             parsed_val = val_str
         config[key] = parsed_val
         save_config(config)
-        _ok(f"Set {key} = {parsed_val}")
+        _ok(_("nano.msg.config_set", key, parsed_val))
     else:
         k = args.strip()
         v = config.get(k, "(not set)")
@@ -277,9 +278,9 @@ def _cmd_save(args: str, state: AgentState, config: dict) -> bool:
             model=config.get("model", ""),
             title=title,
         )
-        _ok(f"Session saved to {path}")
+        _ok(_("nano.msg.session_saved", path))
         if title:
-            _info(f"  Title: {title}")
+            _info(_("nano.msg.session_title", title))
     except Exception as e:
         _err(str(e))
     return True
@@ -290,9 +291,9 @@ def _cmd_load(args: str, state: AgentState, config: dict) -> bool:
     if not query:
         infos = list_sessions_with_info()
         if not infos:
-            _info("No saved sessions found.")
+            _info(_("nano.msg.no_sessions"))
             return True
-        _info("Saved sessions:")
+        _info(_("nano.msg.saved_sessions"))
         for info in infos[:20]:
             title = info.get("title", "")
             fname = info.get("filename", "?")
@@ -301,7 +302,7 @@ def _cmd_load(args: str, state: AgentState, config: dict) -> bool:
             saved = info.get("saved_at", "")[:16]
             title_str = f"  {_clr(title, 'bold')}" if title else ""
             print(f"  {_clr(fname, 'cyan')}  {msgs}msg {turns}t  {_clr(saved, 'dim')}{title_str}")
-        _info(f"\n  Use /load <filename> or /load <search query> to load a session.")
+        _info("\n" + _("nano.msg.load_hint"))
         return True
 
     if query.endswith(".json"):
@@ -313,9 +314,9 @@ def _cmd_load(args: str, state: AgentState, config: dict) -> bool:
             state.total_output_tokens = data.get("total_output_tokens", 0)
             config["_session_title"] = data.get("title", "")
             title = data.get("title", "")
-            _ok(f"Session loaded ({len(state.messages)} messages, {state.turn_count} turns)")
+            _ok(_("nano.msg.session_loaded", len(state.messages), state.turn_count))
             if title:
-                _info(f"  Title: {title}")
+                _info(_("nano.msg.session_title", title))
             return True
         except Exception as e:
             _err(str(e))
@@ -323,7 +324,7 @@ def _cmd_load(args: str, state: AgentState, config: dict) -> bool:
 
     results = search_sessions(query)
     if not results:
-        _info(f"No sessions matching '{query}'.")
+        _info(_("nano.msg.no_match_query", query))
         return True
 
     if len(results) == 1:
@@ -335,25 +336,25 @@ def _cmd_load(args: str, state: AgentState, config: dict) -> bool:
             state.total_input_tokens = data.get("total_input_tokens", 0)
             state.total_output_tokens = data.get("total_output_tokens", 0)
             config["_session_title"] = data.get("title", "")
-            _ok(f"Session loaded: {info.get('title', info['filename'])}")
+            _ok(_("nano.msg.session_loaded_name", info.get('title', info['filename'])))
             return True
         except Exception as e:
             _err(str(e))
             return True
 
-    _info(f"Multiple sessions match '{query}':")
+    _info(_("nano.msg.multi_match", query))
     for info in results[:15]:
         title = info.get("title", "")
         fname = info.get("filename", "?")
         print(f"  {_clr(fname, 'cyan')}  {_clr(title, 'bold')}")
-    _info("  Use /load <filename> to load a specific session.")
+    _info("  " + _("nano.msg.load_specific"))
     return True
 
 
 def _cmd_export(args: str, state: AgentState, _config: dict) -> bool:
     """Export conversation as a markdown file."""
     if not state.messages:
-        _info("Nothing to export (empty conversation).")
+        _info(_("nano.msg.export_empty"))
         return True
     filename = args.strip() or f"conversation_{int(__import__('time').time())}.md"
     lines: list[str] = ["# Nano Claude Code — Conversation Export\n"]
@@ -466,7 +467,7 @@ def _cmd_preprompt(args: str, state: AgentState, config: dict) -> bool:
         print(_clr(f"── Tool-Schemas: {len(rows)} Tools · ~{tk(tot):,} Tokens (groesste zuerst) ──", "bold"))
         for n, v in rows:
             print(f"  {n:<44} ~{tk(len(v)):>6,}")
-        print("  Einzeln ansehen: /preprompt tool <Name>   ·  Beschraenken: NANO_TOOLS=Read,Edit,Bash,Grep in clau/Umgebung")
+        print("  " + _("nano.msg.view_tool"))
         return True
     if sub == "tool":
         hit = [n for n in tjson if n.lower() == rest.lower()] or [n for n in tjson if rest.lower() in n.lower()]
@@ -897,7 +898,7 @@ def _cmd_btw(args: str, state: AgentState, config: dict) -> bool:
     import anthropic as anth
     api_env = resolve_api_env(config.get("api_key"))
     if not api_env.get("api_key"):
-        _err("No API key configured.")
+        _err(_("nano.msg.no_api_key"))
         return True
     api_env.pop("provider", None)
     client = anth.Anthropic(**api_env)
@@ -1350,7 +1351,7 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
 
     api_env = resolve_api_env(config.get("api_key"))
     if not api_env.get("api_key"):
-        _err("No API key found. Create a .env file in the project directory:")
+        _err(_("nano.msg.no_api_key_create"))
         _err("")
         _err("  # OpenAI-compatible (Azure AI / Kimi / MiniMax, etc.)")
         _err("  OPENAI_COMPAT_BASE_URL=https://....../openai/v1/")
@@ -1466,6 +1467,8 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
         ctx_used=_ctx_used, ctx_max=_agent_mod.CONTEXT_WINDOW_TOKENS)
     if _screen_on:
         _agent_mod.STATUS_HOOK = SCREEN.set_state
+        _agent_mod.USAGE_HOOK = SCREEN.call_done
+        SCREEN.tok_total = lambda: state.total_input_tokens + state.total_output_tokens
         _agent_mod.PROGRESS_HOOK = SCREEN.set_progress
         SCREEN.start_ticker()
         print(ui.c("  /help for commands · Tab completes · PgUp scrolls back · Esc interrupts · Ctrl+C twice exits", ui.GREY))
@@ -1693,7 +1696,7 @@ def _run_print_text(prompt: str, config: dict, max_turns: int = 50) -> int:
 
     api_env = resolve_api_env(config.get("api_key"))
     if not api_env.get("api_key"):
-        _err("No API key found. Create a .env file or export ANTHROPIC_API_KEY.")
+        _err(_("nano.msg.no_api_key_export"))
         return 1
 
     provider = api_env.get("provider", "anthropic")
