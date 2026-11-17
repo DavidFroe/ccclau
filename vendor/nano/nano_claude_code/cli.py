@@ -1484,8 +1484,20 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
         _skill_names = sorted(get_skills().keys())
     except Exception:
         _skill_names = []
+    def _preprompt_info() -> str:
+        # Fester Anteil vor jeder Frage: System-Prompt (inkl. CLAUDE.md, Skills …) + Tool-Schemas, grob 1 Token ~ 4 Zeichen
+        try:
+            from nano_claude_code.prompts import prompt_sections
+            from nano_claude_code.screen import _fmt_k
+            sy = sum(len(t) for _k, _n, t in prompt_sections(str(Path.cwd()), bare=config.get("bare", False))) // 4
+            tl = sum(len(json.dumps(t, ensure_ascii=False)) for t in anthropic_tool_defs()) // 4
+            win = max(1, int(os.environ.get("NANO_CONTEXT_WINDOW") or 200_000))
+            return f"~{_fmt_k(sy + tl)} tok ({(sy + tl) * 100 // win}%) · system {_fmt_k(sy)} · tools {_fmt_k(tl)}"
+        except Exception:
+            return ""
+
     _screen_on = SCREEN.start(
-        {"model": _model_label(model), "api": _api_label(), "effort": _effort_label(), "mode": perm_mode,
+        {"preprompt": _preprompt_info(), "model": _model_label(model), "api": _api_label(), "effort": _effort_label(), "mode": perm_mode,
          "folder": ui._home_short(Path.cwd()), "tools": _tool_names, "skills": _skill_names,
          "session": session_title, "resumed": _resumed},
         ctx_used=_ctx_used, ctx_max=_agent_mod.CONTEXT_WINDOW_TOKENS)

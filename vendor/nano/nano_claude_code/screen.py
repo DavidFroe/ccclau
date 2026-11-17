@@ -145,7 +145,8 @@ class Screen:
         mascot = [c(PROPELLER[0], ACCENT), c(PROPELLER[1], ACCENT, BOLD), c(PROPELLER[2], ACCENT)]
         sess = os.environ.get("NANO_SESSION_NAME", "").strip() or i.get("session") or ""
         folder = i.get("folder", "")
-        l1 = c("nano", BOLD, ACCENT) + c("  ·  PropellerA  ·  Claude-Code-Nachbau", GREY)
+        from nano_claude_code import DISPLAY_NAME, DISPLAY_VERSION
+        l1 = c(DISPLAY_NAME, BOLD, ACCENT) + c(" " + DISPLAY_VERSION + "  ·  PropellerA", GREY)
         l2 = c("/help", ACCENT) + c(" for help  ·  ", GREY) + c("/tools", ACCENT) + c(" for tools (on/off in clau: menu x)", GREY)
         l3 = c(folder, GREY) + (c("  ·  ", GREY) + sess if sess else "")
         rows = [" " + mascot[0] + "  " + l1, " " + mascot[1] + "  " + l2, " " + mascot[2] + "  " + l3]
@@ -165,6 +166,8 @@ class Screen:
                 gf = os.environ.get("NANO_GITEA_FORK_URL", "").strip()
                 rows.append(" " + c("gitea  ", GREY) + c(gu, ACCENT)
                             + ((c("  ·  fork ", GREY) + c(gf, ACCENT)) if gf else ""))
+            if i.get("preprompt"):
+                rows.append(" " + c("preprompt ", GREY) + c(i["preprompt"], DIM))
             if i.get("resumed"):
                 rows.append(" " + c("resumed ", GREY) + c(i["resumed"], AMBER))
         else:
@@ -515,7 +518,12 @@ class Screen:
                     a = api if with_api == 1 else (api.split()[0] if with_api == 2 and api else "")
                     parts = [c(i.get("model", ""), BOLD) + c(self._tok_label(), GREY), c(a, GREY) if a else "", eff if with_eff else "",
                              c(i.get("mode", ""), GREY) if with_mode else ""]
-                    left = " " + c(" · ", GREY).join(p for p in parts if p)
+                    dot = c(" · ", GREY)
+                    left = " " + parts[0] + (dot + parts[1] if parts[1] else "")
+                    if parts[2]:
+                        left += " " + parts[2]       # vor effort kein Punkt
+                    if parts[3]:
+                        left += dot + parts[3]
                     if vlen(left) <= room:
                         break
                 left = clip(left, max(10, room))
