@@ -425,7 +425,7 @@ class Screen:
         except Exception:
             n = 0
         n += self.live_chars // 4
-        return f" ({_fmt_k(n)})" if n else ""
+        return f" ({_fmt_k(n)})"
 
     def update_info(self, **kw) -> None:
         self.info.update(kw)
@@ -503,15 +503,15 @@ class Screen:
                 fill = min(bar_n, (pct * bar_n + 99) // 100) if used else 0
                 bar = c("▓" * fill, col) + c("░" * (bar_n - fill), GREY)
                 right = (self._state_label() + c("  │  ", GREY) + c("ctx ", GREY)
-                         + c(f"{_fmt_k(used)}/{_fmt_k(mx)}", col, BOLD) + c(f" {pct}% ", GREY) + bar + " ")
+                         + c(f"{_fmt_k(used)}/{_fmt_k(mx)}", col, BOLD) + " " + bar + " ")
                 i = self.info
                 eff = c("effort ", GREY) + c(i.get("effort", "-"), ACCENT)
                 api = i.get("api", "")
                 room = w - vlen(right) - 3
                 left = ""
-                for with_api, with_mode in ((1, 1), (1, 0), (2, 0), (0, 0)):
+                for with_api, with_mode, with_eff in ((1, 1, 1), (1, 0, 1), (2, 0, 1), (0, 0, 1), (0, 0, 0)):
                     a = api if with_api == 1 else (api.split()[0] if with_api == 2 and api else "")
-                    parts = [c(i.get("model", ""), BOLD) + c(self._tok_label(), GREY), c(a, GREY) if a else "", eff,
+                    parts = [c(i.get("model", ""), BOLD) + c(self._tok_label(), GREY), c(a, GREY) if a else "", eff if with_eff else "",
                              c(i.get("mode", ""), GREY) if with_mode else ""]
                     left = " " + c(" · ", GREY).join(p for p in parts if p)
                     if vlen(left) <= room:
