@@ -263,10 +263,10 @@ class Screen:
             except (ValueError, OSError):
                 pass
 
-    # Zeilen: Kopf 1..H | Region H+1..rows-5 | Linie rows-3 | Eingabe rows-2 | Linie rows-1 | Status rows
+    # Zeilen: Kopf 1..H | Region H+1..rows-5 | Arbeitsanzeige rows-4 | Linie rows-3 | Eingabe rows-2 | Linie rows-1 | Status rows
     def _geom(self):
         h = len(self.header)
-        return h + 1, self.rows - 4, self.rows - 3, self.rows - 2, self.rows - 1, self.rows
+        return h + 1, self.rows - 5, self.rows - 3, self.rows - 2, self.rows - 1, self.rows
 
     def _layout(self, clear: bool) -> None:
         with self.lock:
@@ -283,6 +283,7 @@ class Screen:
             w(f"\033[{rin};1H\033[2K{c('❯ ', BOLD, ACCENT)}")
             w(f"\033[{r2};1H\033[2K{c('─' * (self.cols - 1), GREY)}")
             self._last_status = None
+            self._last_spin = None
             w(f"\033[{top};{bot}r\033[{top if clear else bot};1H")
             self.real.flush()
         self.draw_status()
@@ -420,21 +421,13 @@ class Screen:
             return c("● idle", GREEN) + c(" · waiting for input", GREY)
         lab = {
             "prefill": ("◐ prefill", AMBER),
-            "compact": ("◒ komprimiere Verlauf", AMBER),
+            "compact": ("◒ komprimiere", AMBER),
             "reasoning": ("◑ reasoning", ACCENT),
             "streaming": ("◉ streaming", ACCENT),
             "approval": ("? awaiting approval", AMBER),
         }.get(s)
         if lab is None:  # tool:<Name>
             lab = (f"▪ {s.replace('tool:', 'running ')}", AMBER)
-        try:
-            from nano_claude_code import verben
-            w = verben.wort(s, el)
-            if w:
-                sym = lab[0].split(" ")[0]
-                lab = (f"{sym} {w}" + ("…" if not w.endswith("…") else "") + (f" ({s.split(':')[-1]})" if verben.mit_zustand() else ""), lab[1])
-        except Exception:
-            pass
         extra = f" {el // 60}:{el % 60:02d}" if el >= 60 else f" {el}s"
         if s == "compact" and self._prog:
             d, t = self._prog
@@ -445,10 +438,40 @@ class Screen:
             extra += f" · ↓{_fmt_k(self.out_chars // 4)} tok"
         return c(lab[0], lab[1]) + c(extra, GREY)
 
+    def _spin_text(self) -> str:
+        """Arbeitszeile wie in Claude Code: „✻ Grübelt… (12s · ↓1.2k tok · Esc unterbricht)“, leer im Leerlauf."""
+        s = self.state
+        if s == "idle":
+            return ""
+        try:
+            from nano_claude_code import verben
+            el = int(time.monotonic() - (self.turn_t0 or self.state_t0))
+            w = verben.wort(s, el) or "Arbeitet"
+            t = f"{el // 60}m {el % 60:02d}s" if el >= 60 else f"{el}s"
+            if s in ("reasoning", "streaming") and self.out_chars:
+                t += f" · ↓{_fmt_k(self.out_chars // 4)} tok"
+            if s.startswith("tool:"):
+                w += " (" + s.split(":", 1)[1] + ")"
+            return "  " + c("✻ ", ACCENT) + c(w + "…", ACCENT) + c(f" ({t} · Esc unterbricht)", GREY)
+        except Exception:
+            return ""
+
+    def _draw_spin(self) -> None:
+        if not self.active:
+            return
+        txt = self._spin_text()
+        if txt == getattr(self, "_last_spin", None):
+            return
+        self._last_spin = txt
+        row = self.rows - 4
+        self.real.write(f"\033[?25l\0337\033[{row};1H{clip(txt, self.cols - 1)}\033[K\0338\033[?25h")
+        self.real.flush()
+
     def draw_status(self, restore: bool = True) -> None:
         if not self.active:
             return
         with self.lock:
+            self._draw_spin()
             top, bot, r1, rin, r2, rst = self._geom()
             w = self.cols - 1
             if self._hint:
