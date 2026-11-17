@@ -555,7 +555,7 @@ def _show_recent_history(state: AgentState, n_user: int = 2) -> None:
             if m.get("role") == "user" and t == "text" and _is_cc_noise(b.get("text")):
                 continue
             if m.get("role") == "user" and t == "text" and str(b.get("text") or "").strip():
-                print("\n" + ui.c("❯ ", ui.BOLD, ui.ACCENT) + cut(str(b["text"]).strip(), 500))
+                print("\n" + ui.c("❯ ", ui.BOLD, ui.ACCENT) + ui.c(cut(str(b["text"]).strip(), 500), ui.GREY))
             elif m.get("role") == "assistant" and t == "text" and str(b.get("text") or "").strip():
                 print(ui.c("● ", ui.ACCENT) + cut(str(b["text"]).strip(), 900))
             elif t == "tool_use":
@@ -1544,7 +1544,7 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
                 if user_input:
                     hist.append(user_input)
                     _save_history(user_input)
-                    print("\n" + ui.c("❯ ", ui.BOLD, ui.ACCENT) + user_input)
+                    print("\n" + ui.c("❯ ", ui.BOLD, ui.ACCENT) + ui.c(user_input, ui.GREY))
             elif pt_session:
                 from prompt_toolkit.formatted_text import HTML
                 from prompt_toolkit.formatted_text import ANSI
