@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Generator
 
 import anthropic
+import httpx
 
 from nano_claude_code.config import calc_cost, resolve_api_env
 from nano_claude_code.permissions import describe_permission, needs_permission
@@ -150,60 +151,133 @@ def _needs_compaction(messages: list[dict], last_input_tokens: int) -> bool:
     return _estimate_message_tokens(messages) > int(CONTEXT_WINDOW_TOKENS * COMPACTION_THRESHOLD)
 
 
+_CC_CONT_MARK = "This session is being continued"
+
+
+def _blocks(content) -> list[dict]:
+    """Inhalt einer Nachricht als Liste von dict-Blöcken (Strings und SDK-Objekte normalisiert)."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    out: list[dict] = []
+    for b in content or []:
+        if isinstance(b, dict):
+            out.append(b)
+        elif hasattr(b, "model_dump"):
+            try:
+                out.append(b.model_dump())
+            except Exception:
+                pass
+    return out
+
+
+def _msg_text(m: dict) -> str:
+    return " ".join(b.get("text", "") for b in _blocks(m.get("content")) if b.get("type") == "text")
+
+
+def _msg_digest(m: dict) -> str:
+    """Eine Nachricht als kompakter Text für die Zusammenfassung (Nutzerworte großzügig, Tool-Ausgaben knapp)."""
+    role = m.get("role", "?")
+    parts: list[str] = []
+    for b in _blocks(m.get("content")):
+        t = b.get("type")
+        if t == "text":
+            parts.append(b.get("text", "")[: (1500 if role == "user" else 700)])
+        elif t == "tool_use":
+            inp = json.dumps(b.get("input", {}), ensure_ascii=False)
+            parts.append(f"[tool {b.get('name', '?')}: {inp[:300]}]")
+        elif t == "tool_result":
+            c = b.get("content", "")
+            c = c if isinstance(c, str) else str(c)
+            parts.append(f"[result: {c[:200]}]")
+    return f"[{role}] " + " ".join(parts)
+
+
+def _is_plain_user(m: dict) -> bool:
+    return m.get("role") == "user" and not any(b.get("type") == "tool_result" for b in _blocks(m.get("content")))
+
+
+def _summarize(client, model: str, prompt: str) -> str | None:
+    try:
+        resp = client.messages.create(
+            model=model, max_tokens=3000,
+            system="You are a precise assistant that summarizes coding-agent sessions without losing concrete facts "
+                   "(file paths, commands, decisions, open problems, the user's wishes).",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        txt = "".join(getattr(b, "text", "") for b in (resp.content or []))
+        return txt.strip() or None
+    except Exception:
+        return None
+
+
 def compact_messages(
     messages: list[dict],
     client: anthropic.Anthropic,
     model: str,
     system_prompt: str,
 ) -> list[dict]:
-    """Summarize old messages to reduce context size, keeping recent ones intact."""
+    """Alte Nachrichten verdichten, neuere unverändert lassen.
+
+    Behält eine importierte Claude-Code-Fortsetzungszusammenfassung (erste Nachricht) wörtlich, fasst den Rest
+    in Blöcken fortlaufend zusammen (rollierende Zusammenfassung) und lässt den Schwanz (~12 Nachrichten)
+    unangetastet, beginnend bei einer echten Nutzernachricht (kein verwaister tool_result)."""
     if len(messages) <= COMPACTION_KEEP_RECENT + 2:
         return messages
 
-    recent = messages[-COMPACTION_KEEP_RECENT:]
-    old = messages[:-COMPACTION_KEEP_RECENT]
+    # Schwanz: mindestens 12 Nachrichten, Start bei einer Nutzernachricht ohne tool_result
+    start = max(1, len(messages) - 12)
+    while start < len(messages) and not _is_plain_user(messages[start]):
+        start += 1
+    if start >= len(messages):
+        # kein Nutzertext im Schwanz: rückwärts die nächste echte Nutzernachricht suchen
+        start = max(1, len(messages) - 12)
+        while start > 1 and not _is_plain_user(messages[start]):
+            start -= 1
+        if not _is_plain_user(messages[start]):
+            return messages
+    recent, old = messages[start:], messages[:start]
+    if not old:
+        return messages
 
-    old_text_parts: list[str] = []
-    for m in old:
-        role = m.get("role", "?")
-        content = m.get("content", "")
-        if isinstance(content, str):
-            old_text_parts.append(f"[{role}] {content[:500]}")
-        elif isinstance(content, list):
-            summary_parts = []
-            for b in content:
-                if isinstance(b, dict):
-                    if b.get("type") == "text":
-                        summary_parts.append(b.get("text", "")[:300])
-                    elif b.get("type") == "tool_use":
-                        summary_parts.append(f"[tool: {b.get('name', '?')}]")
-                    elif b.get("type") == "tool_result":
-                        c = b.get("content", "")
-                        preview = c[:200] if isinstance(c, str) else "[rich content]"
-                        summary_parts.append(f"[result: {preview}]")
-            old_text_parts.append(f"[{role}] {' '.join(summary_parts)[:500]}")
+    pinned = ""
+    if _CC_CONT_MARK in _msg_text(old[0])[:200]:
+        pinned = _msg_text(old[0])[:8000]
+        old = old[1:]
 
-    conversation_so_far = "\n".join(old_text_parts[-20:])
+    digests = [_msg_digest(m) for m in old]
+    # in Blöcke von ~60k Zeichen packen; höchstens 4 Blöcke (die jüngsten), die Fortsetzungszusammenfassung deckt den Anfang ab
+    chunks: list[str] = []
+    cur = ""
+    for d in digests:
+        if cur and len(cur) + len(d) > 60_000:
+            chunks.append(cur)
+            cur = ""
+        cur += d + "\n"
+    if cur:
+        chunks.append(cur)
+    chunks = chunks[-4:]
 
-    try:
-        resp = client.messages.create(
-            model=model,
-            max_tokens=1024,
-            system="You are a helpful assistant that summarizes conversations concisely.",
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Summarize this conversation history in 2-3 paragraphs. Focus on: "
-                    f"files modified, key decisions, current task state.\n\n{conversation_so_far}"
-                ),
-            }],
+    summary = ""
+    for i, ch in enumerate(chunks):
+        prompt = (
+            "Summarize this part of a coding-agent session. Keep concrete facts: files created/changed (paths), "
+            "commands run and their outcome, decisions made, open problems, the user's requests and the current task.\n\n"
+            + (f"Summary of the session so far (update and extend it, do not drop facts):\n{summary}\n\n" if summary else "")
+            + (f"Background from the earlier continuation note:\n{pinned[:3000]}\n\n" if pinned and i == 0 else "")
+            + f"New part of the conversation:\n{ch}\n\nWrite the updated summary (max ~900 words)."
         )
-        summary = resp.content[0].text if resp.content else "Previous conversation context."
-    except Exception:
+        got = _summarize(client, model, prompt)
+        if got:
+            summary = got
+    if not summary:
         summary = f"[Compacted {len(old)} earlier messages]"
 
+    ctx = ""
+    if pinned:
+        ctx += f"[Continuation note from the earlier session]\n{pinned}\n\n"
+    ctx += f"[Summary of the work since then]\n{summary}"
     compacted = [
-        {"role": "user", "content": f"[Context from earlier in our conversation]\n{summary}"},
+        {"role": "user", "content": f"[Context from earlier in our conversation]\n{ctx}"},
         {"role": "assistant", "content": "Understood. I have the context from our earlier conversation. Let me continue from where we left off."},
     ]
     return compacted + recent
@@ -406,9 +480,11 @@ def run_streaming(
     continuations = 0
 
     cached_system = _build_cached_system(system_prompt) if enable_cache else system_prompt
+    stream_retries = 0
 
     while True:
         state.turn_count += 1
+        out_started = False  # Text/Tool schon an die UI gegeben? Dann kein stilles Neuanfragen mehr
 
         msgs_for_api = _add_cache_breakpoints(state.messages) if enable_cache else state.messages
 
@@ -436,6 +512,7 @@ def run_streaming(
                         delta = event.delta
                         dtype = getattr(delta, "type", None)
                         if dtype == "text_delta":
+                            out_started = True
                             yield TextChunk(delta.text)
                         elif dtype == "thinking_delta":
                             yield ThinkingChunk(delta.thinking)
@@ -458,9 +535,20 @@ def run_streaming(
         except KeyboardInterrupt:
             yield TextChunk("\n[interrupted by user]\n")
             break
-        except anthropic.APIError as e:
+        except (anthropic.APIError, httpx.TransportError) as e:
+            # Fehler beim Lesen des Streams (503 'Loading model', abgerissene Verbindung):
+            # der Retry in _api_call_streaming greift hier nie, weil stream() erst beim Lesen verbindet.
+            if (stream_retries < 3 and not out_started
+                    and (isinstance(e, httpx.TransportError) or _should_retry(e))):
+                stream_retries += 1
+                state.turn_count -= 1
+                wait = 5 * stream_retries  # 5 s, 10 s, 15 s
+                yield TextChunk(f"\n[Verbindung zum Modell gestört ({type(e).__name__}) – Wiederholung {stream_retries}/3 in {wait}s]\n")
+                time.sleep(wait)
+                continue
             yield TextChunk(f"\n[API Error: {e}]\n")
             break
+        stream_retries = 0
 
         yield TurnDone(in_tokens, out_tokens, cache_creation, cache_read)
 

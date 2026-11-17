@@ -476,7 +476,8 @@ class StreamTranslator:
         self.empty_pending = False  # leere Antwort erkannt, Retry steht aus
         self.len_retry_ok = False   # Proxy darf einmal neu anfragen, wenn das Token-Limit im Denken verbraucht wurde
         self.len_pending = False
-        self.err_retries_left = 2   # Abbrüche des Backend-Streams ohne Antwort: bis zu 2 Wiederholungen
+        self.err_retries_left = 3   # Abbrüche des Backend-Streams ohne Antwort: bis zu 3 Wiederholungen
+        self.err_content = False    # Fehlertext kam als normaler Antworttext (QuiteQue)
         self.err_pending = False
 
     def _akt_tools(self):
@@ -544,6 +545,11 @@ class StreamTranslator:
                 self.akt.delta(self.h, "denken", reasoning)
 
         text = delta.get("content") or ""
+        if (text and not self.text_started and not self.tool_buffers and self.err_retries_left > 0
+                and text.lstrip().startswith("[Fehler") and _transient_stream_error(text)):
+            # QuiteQue schickt den Verbindungsabriss zum Backend als Antworttext -- nicht anzeigen, neu anfragen
+            self.err_content = True
+            return "".join(out)
         if text:
             if self.thinking_started and not self.thinking_closed:
                 self.thinking_closed = True
@@ -837,7 +843,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # bereits laufenden Stream noch an dessen Timeout. Jeder andere
             # Fehler (auch ein zweites 429/503) geht unverändert durch.
             resp = None
-            for attempt in range(2):
+            for attempt in range(4):
                 resp = requests.post(
                     f"{base}/chat/completions",
                     json=oai_payload,
@@ -854,14 +860,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     stream=stream,
                     timeout=REQUEST_TIMEOUT
                 )
-                if attempt == 0 and resp.status_code in (429, 503):
+                _ueberlast = resp.status_code in (429, 503)
+                if not _ueberlast and resp.status_code == 502:
+                    try:
+                        _b = (resp.text or "")[:2000].lower()
+                    except Exception:
+                        _b = ""
+                    _ueberlast = any(k in _b for k in ("ausgelastet", "pool-timeout", "stream-fehler", "alle kandidaten"))
+                if attempt < 3 and _ueberlast:
                     retry_after = resp.headers.get("Retry-After")
                     try:
-                        backoff = min(float(retry_after), 30.0) if retry_after else 5.0
+                        backoff = min(float(retry_after), 30.0) if retry_after else 5.0 * (attempt + 1)
                     except ValueError:
-                        backoff = 5.0
+                        backoff = 5.0 * (attempt + 1)
                     log(f"✗ Backend {resp.status_code} nach {time.monotonic()-t0:.1f}s "
-                        f"-- einmaliger Retry in {backoff:.0f}s")
+                        f"-- Retry {attempt+1}/3 in {backoff:.0f}s")
                     resp.close()
                     time.sleep(backoff)
                     continue
@@ -1064,6 +1077,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 return False
             try:
                 out = tr.chunk(payload)
+                if tr.err_content:
+                    tr.err_content = False
+                    log(f"  Backend-Stream als Fehlertext abgebrochen nach {time.monotonic()-t0:.1f}s -- Wiederholung folgt")
+                    tr.err_pending = True
+                    return n_lines
                 if out:
                     with write_lock:
                         self.wfile.write(out.encode())
@@ -1099,7 +1117,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if tr.err_pending and retry_fn is not None:
                     tr.err_pending = False
                     tr.err_retries_left -= 1
-                    wait = 4 * (2 - tr.err_retries_left)       # 4 s, dann 8 s
+                    wait = 4 * (3 - tr.err_retries_left)       # 4 s, 8 s, 12 s
                     log(f"  Stream-Abbruch (model={tr.target}) -- Wiederholung in {wait}s (noch {tr.err_retries_left})")
                     try:
                         owl_resp.close()

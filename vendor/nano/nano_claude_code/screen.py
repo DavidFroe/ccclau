@@ -446,6 +446,14 @@ class Screen:
 
         def run():
             while not self._tick_stop.wait(0.4):
+                # Terminalgröße ändert sich oft ohne (rechtzeitiges) SIGWINCH, z.B. tmux beim Anhängen:
+                # dann sitzt die Eingabezeile eine Zeile zu hoch/tief, bis das Layout neu berechnet wird
+                sz = shutil.get_terminal_size((100, 30))
+                if (max(40, sz.columns), sz.lines) != (self.cols, self.rows):
+                    try:
+                        self._resize()
+                    except Exception:
+                        pass
                 if self.state != "idle":
                     self.draw_status()
         self._ticker = threading.Thread(target=run, daemon=True)
@@ -571,6 +579,7 @@ class Screen:
             else:
                 vis_c = vis
             with self.lock:
+                rin = self._geom()[3]      # frisch: nach einem Resize hat sich die Zeile verschoben
                 self.real.write(f"\033[{rin};1H\033[2K{c('❯ ', BOLD, ACCENT)}{vis_c}")
                 self._draw_hint()
                 self.real.write(f"\033[{rin};{3 + pos - start}H")
@@ -687,7 +696,7 @@ class Screen:
             self._hint = ""
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
             with self.lock:
-                self.real.write(f"\033[{rin};1H\033[2K{c('❯ ', BOLD, ACCENT)}\0338")
+                self.real.write(f"\033[{self._geom()[3]};1H\033[2K{c('❯ ', BOLD, ACCENT)}\0338")
                 self.real.flush()
             self.draw_status()
         return buf
