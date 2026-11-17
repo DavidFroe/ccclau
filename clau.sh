@@ -5898,13 +5898,14 @@ interactive_start() {
   echo "   w) Modell wechseln"
   echo "   u) Benutzer wechseln            ($QQ_USER; gilt für alle Harnesses)"
   echo "   x) Tools, MCP, Skills …         (Freigaben für dieses Verzeichnis)"
+  echo "   k) Komprimieren …               (Auto-Compact, Modell fürs Komprimieren, claw-compactor)"
   echo "   i) Markdown importieren         (neue Session aus Datei)"
   local ntm=0; _have tmux && ntm="$( { tmux ls 2>/dev/null || true; } | wc -l)"
   echo "   t) tmux-Sitzungen …             ($ntm laufen auf diesem Rechner)"
   echo "   f) Fernsteuerung …              (Telegram/Handy, API)"
   echo "   e) Einstellungen …              (Harness, Bot, Team, Update)"
   echo "   q) Beenden"
-  printf "Auswahl [%sn s w u x i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt ${#recent[@]} ]] && echo "m, ")"
+  printf "Auswahl [%sn s w u x k i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt ${#recent[@]} ]] && echo "m, ")"
   local c; read -r c
   case "${c:-n}" in
     [1-9])
@@ -5924,6 +5925,7 @@ interactive_start() {
     w|W) choose_model_interactive; interactive_start ;;
     u|U) choose_user_interactive; interactive_start ;;
     x|X) choose_tools_menu; interactive_start ;;
+    k|K) choose_auto_compact_settings; interactive_start ;;
     i|I) choose_import_md_interactive || interactive_start ;;
     t|T) choose_tmux_menu; interactive_start ;;
     f|F) choose_remote_menu; interactive_start ;;
