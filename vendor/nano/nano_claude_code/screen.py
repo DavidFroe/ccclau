@@ -456,8 +456,6 @@ class Screen:
             n = 10
             f = min(n, d * n // t)
             extra += " " + c("█" * f, GREEN) + c("░" * (n - f), GREY) + c(f" {d}/{t}", GREY)
-        if s in ("reasoning", "streaming") and self.out_chars:
-            extra += f" · ↓{_fmt_k(self.out_chars // 4)} tok"
         return c(lab[0], lab[1]) + c(extra, GREY)
 
     def _spin_text(self) -> str:
@@ -506,14 +504,14 @@ class Screen:
                 bar_n = 8
                 fill = min(bar_n, (pct * bar_n + 99) // 100) if used else 0
                 bar = c("▓" * fill, col) + c("░" * (bar_n - fill), GREY)
-                right = (self._state_label() + c("  │  ", GREY) + c("ctx ", GREY)
+                right = (self._state_label() + c(" │ ", GREY) + c("ctx ", GREY)
                          + c(f"{_fmt_k(used)}/{_fmt_k(mx)}", col, BOLD) + " " + bar + " ")
                 i = self.info
                 eff = c("effort ", GREY) + c(i.get("effort", "-"), ACCENT)
                 api = i.get("api", "")
                 room = w - vlen(right) - 3
                 left = ""
-                for with_api, with_mode, with_eff in ((1, 1, 1), (1, 0, 1), (2, 0, 1), (0, 0, 1), (0, 0, 0)):
+                for with_api, with_mode, with_eff in ((1, 1, 1), (1, 0, 1), (2, 0, 1), (0, 0, 1)):
                     a = api if with_api == 1 else (api.split()[0] if with_api == 2 and api else "")
                     parts = [c(i.get("model", ""), BOLD) + c(self._tok_label(), GREY), c(a, GREY) if a else "", eff if with_eff else "",
                              c(i.get("mode", ""), GREY) if with_mode else ""]

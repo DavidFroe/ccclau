@@ -2059,6 +2059,13 @@ def text_of(c):
     if isinstance(c, str):
         return c
     return " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+def intent(raw):
+    """Kernaussage einer Fortsetzungs-Zusammenfassung (Abschnitt "Primary Request and Intent" bzw. "Summary")."""
+    m = re.search(r"Primary Request and Intent:?\s*(.+?)(?:\n\s*\d+\.\s+[A-Z]|\Z)", raw, re.S)
+    if not m:
+        m = re.search(r"Summary:\s*(.+)", raw, re.S)
+    body = m.group(1) if m else ""
+    return re.sub(r"\s+", " ", re.sub(r"\*\*|^\s*[-*•]\s*", " ", body, flags=re.M)).strip()
 if path:
     for line in open(path, encoding="utf-8", errors="replace"):
         try:
@@ -2071,8 +2078,13 @@ if path:
         elif t == "ai-title" and o.get("aiTitle"):
             ai = o["aiTitle"]
         elif t == "user" and not o.get("isMeta") and not o.get("isSidechain"):
-            tx = re.sub(r"\s+", " ", text_of((o.get("message") or {}).get("content", ""))).strip()
+            raw = text_of((o.get("message") or {}).get("content", ""))
+            tx = re.sub(r"\s+", " ", raw).strip()
             if not tx or tx.startswith(("<", "Caveat:", "[Request interrupted")):
+                continue
+            if tx.startswith("This session is being continued"):
+                if not first:
+                    first = "↻ " + (intent(raw) or "Fortsetzung einer früheren Sitzung")
                 continue
             first = first or tx
             last = tx
