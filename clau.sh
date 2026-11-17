@@ -4839,19 +4839,34 @@ session_action_menu() {
   echo "  6) In tmux fixieren          : $(_session_tmux_get "$sid" && echo an || echo aus)$(_tmux_running "$sid" && echo "   (läuft gerade in tmux → Fortsetzen hängt sich an)")"
   echo "  7) Tools/MCP nur für diese Session : $(_session_tools_has "$sid" && echo "angepasst" || echo "wie Verzeichnis")"
   _session_tools_has "$sid" && echo "  8) Session-Tools zurücksetzen (Verzeichnis-Einstellung gilt wieder)"
+  echo "  h) Harness nur für diesen Start wählen   (jetzt: $(effective_backend))"
+  echo "  w) Modell nur für diesen Start wählen    (jetzt: $(_model_label "$(_current_model_spec)"))"
   echo "  0) Zurück"
-  printf "Auswahl [0-7, Enter=1]: "
+  printf "Auswahl [0-8, h, w, Enter=1]: "
   local action; read -r action
-  if [[ "$sid" == *.json && "${action:-1}" != "1" ]]; then
+  if [[ "$sid" == *.json && ! "${action:-1}" =~ ^([1hHwW])$ ]]; then
     echo "Für nano-Sessions geht nur Fortsetzen (Dateien liegen in ~/.nano_claude/sessions)."
     return 0
   fi
   case "${action:-1}" in
+    h|H)
+      local _ob="$CLAU_BACKEND"; choose_backend_interactive
+      CLI_BACKEND_OVERRIDE="$CLAU_BACKEND"; CLAU_BACKEND="$_ob"; save_config
+      SA_PICKED_H=1
+      session_action_menu "$1"
+      ;;
+    w|W)
+      local _om="$CLAU_MODEL"; choose_model_interactive
+      CLI_MODEL_OVERRIDE="$CLAU_MODEL"; CLAU_MODEL="$_om"; save_config
+      SA_PICKED_M=1
+      session_action_menu "$1"
+      ;;
     1)
+      local _ob0="$CLI_BACKEND_OVERRIDE" _om0="$CLI_MODEL_OVERRIDE"
       # Engine weicht ab → fragen (wie beim Modell), womit fortgesetzt wird
       local old_eng; old_eng="$(_session_engine_get "$sid")"
       local cur_eng; cur_eng="$(effective_backend)"
-      if [[ "$old_eng" != "$cur_eng" ]]; then
+      if [[ "$old_eng" != "$cur_eng" && -z "${SA_PICKED_H:-}" ]]; then
         echo "  Diese Session lief zuletzt mit dem Harness $old_eng, eingestellt ist $cur_eng."
         case "$cur_eng" in
           opencode|atomic|pi) echo "    a) mit $cur_eng — der Verlauf wird als Text übernommen (Tool-Ausgaben gekürzt)   [Enter]" ;;
@@ -4859,19 +4874,24 @@ session_action_menu() {
           *) echo "    a) mit $cur_eng   [Enter]" ;;
         esac
         echo "    b) mit dem alten Harness $old_eng"
-        printf "  Auswahl [a/b]: "
+        echo "    0) Zurück"
+        printf "  Auswahl [a/b/0]: "
         local ee; read -r ee
+        if [[ "$ee" == "0" ]]; then CLI_BACKEND_OVERRIDE="$_ob0"; CLI_MODEL_OVERRIDE="$_om0"; session_action_menu "$1"; return; fi
         if [[ "$ee" =~ ^[bB] ]]; then CLI_BACKEND_OVERRIDE="$old_eng"; cur="$(_current_model_spec)"; fi
       fi
       # Modell weicht von der Voreinstellung ab → fragen, womit fortgesetzt wird
-      if [[ -n "$model" && "$model" != "owl:?" && "$model" != "$cur" ]]; then
+      if [[ -n "$model" && "$model" != "owl:?" && "$model" != "$cur" && -z "${SA_PICKED_M:-}" ]]; then
         echo "  Diese Session lief zuletzt mit $(_model_label "$model"), eingestellt ist $(_model_label "$cur")."
         echo "    a) mit der Voreinstellung $(_model_label "$cur")   [Enter]"
         echo "    b) mit dem alten Modell $(_model_label "$model")"
-        printf "  Auswahl [a/b]: "
+        echo "    0) Zurück"
+        printf "  Auswahl [a/b/0]: "
         local mm; read -r mm
+        if [[ "$mm" == "0" ]]; then CLI_BACKEND_OVERRIDE="$_ob0"; CLI_MODEL_OVERRIDE="$_om0"; session_action_menu "$1"; return; fi
         [[ "$mm" =~ ^[bB] ]] && _apply_model_spec "$model"
       fi
+      SA_PICKED_H=""; SA_PICKED_M=""
       run_resume_id "$sid"
       ;;
     2)
