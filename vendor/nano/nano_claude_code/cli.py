@@ -1465,6 +1465,7 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
          "session": session_title, "resumed": _resumed},
         ctx_used=_ctx_used, ctx_max=_agent_mod.CONTEXT_WINDOW_TOKENS)
     if _screen_on:
+        _agent_mod.STATUS_HOOK = SCREEN.set_state
         SCREEN.start_ticker()
         print(ui.c("  /help for commands · Tab completes · PgUp scrolls back · Esc interrupts · Ctrl+C twice exits", ui.GREY))
         hist = _load_history()
@@ -1578,6 +1579,11 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
                     return "Thinking"
                 return None
             spinner.label = "Thinking"
+            try:
+                from nano_claude_code import verben as _vb0
+                _vb0.neuer_zug()
+            except Exception:
+                pass
             _cur_inputs: dict = {}
             _cur_name = ""
             if _screen_on:
@@ -1652,7 +1658,13 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
             SCREEN.watch_stop()
             SCREEN.set_state("idle")
         textout.end_block()
-        print(ui.c(f"  ({int(time.monotonic() - turn_t0)}s)", ui.GREY))
+        try:
+            from nano_claude_code import verben as _vb
+            _sec = int(time.monotonic() - turn_t0)
+            _dauer = f"{_sec // 60}m {_sec % 60:02d}s" if _sec >= 60 else f"{_sec}s"
+            print(ui.c(f"  ✻ {_vb.fertig_wort()} · {_dauer}", ui.GREY))
+        except Exception:
+            print(ui.c(f"  ({int(time.monotonic() - turn_t0)}s)", ui.GREY))
 
         # Auto-generate session title on first real interaction
         if not config.get("_session_title") and state.messages:

@@ -152,6 +152,7 @@ def _needs_compaction(messages: list[dict], last_input_tokens: int) -> bool:
 
 
 _CC_CONT_MARK = "This session is being continued"
+STATUS_HOOK = None   # optional: Aufrufer (cli) setzt eine Funktion, die den Zustand "compact" in der Statusleiste anzeigt
 
 
 def _blocks(content) -> list[dict]:
@@ -199,7 +200,7 @@ def _is_plain_user(m: dict) -> bool:
 def _summarize(client, model: str, prompt: str) -> str | None:
     try:
         resp = client.messages.create(
-            model=model, max_tokens=3000,
+            model=model, max_tokens=1800,
             system="You are a precise assistant that summarizes coding-agent sessions without losing concrete facts "
                    "(file paths, commands, decisions, open problems, the user's wishes).",
             messages=[{"role": "user", "content": prompt}],
@@ -223,6 +224,11 @@ def compact_messages(
     unangetastet, beginnend bei einer echten Nutzernachricht (kein verwaister tool_result)."""
     if len(messages) <= COMPACTION_KEEP_RECENT + 2:
         return messages
+    if STATUS_HOOK:
+        try:
+            STATUS_HOOK("compact")
+        except Exception:
+            pass
 
     # Schwanz: mindestens 12 Nachrichten, Start bei einer Nutzernachricht ohne tool_result
     start = max(1, len(messages) - 12)
@@ -245,6 +251,24 @@ def compact_messages(
         old = old[1:]
 
     digests = [_msg_digest(m) for m in old]
+    if os.environ.get("NANO_COMPACT_LLM") != "1":
+        # Standard: ohne Modellaufruf. Neueste Auszüge bis ~35k Zeichen (≈ 10k Token) behalten, Ältere weglassen.
+        budget, kept = 35_000, []
+        for d in reversed(digests):
+            if budget - len(d) < 0 and kept:
+                break
+            kept.append(d[:budget] if budget - len(d) < 0 else d)
+            budget -= len(d)
+        kept.reverse()
+        omitted = len(digests) - len(kept)
+        ctx = ""
+        if pinned:
+            ctx += f"[Continuation note from the earlier session]\n{pinned}\n\n"
+        ctx += (f"[Earlier messages, shortened; {omitted} older ones omitted]\n" if omitted else "[Earlier messages, shortened]\n") + "\n".join(kept)
+        return [
+            {"role": "user", "content": f"[Context from earlier in our conversation]\n{ctx}"},
+            {"role": "assistant", "content": "Understood. I have the context from our earlier conversation. Let me continue from where we left off."},
+        ] + recent
     # in Blöcke von ~60k Zeichen packen; höchstens 4 Blöcke (die jüngsten), die Fortsetzungszusammenfassung deckt den Anfang ab
     chunks: list[str] = []
     cur = ""
@@ -255,7 +279,7 @@ def compact_messages(
         cur += d + "\n"
     if cur:
         chunks.append(cur)
-    chunks = chunks[-4:]
+    chunks = chunks[-3:]
 
     summary = ""
     for i, ch in enumerate(chunks):
@@ -266,6 +290,7 @@ def compact_messages(
             + (f"Background from the earlier continuation note:\n{pinned[:3000]}\n\n" if pinned and i == 0 else "")
             + f"New part of the conversation:\n{ch}\n\nWrite the updated summary (max ~900 words)."
         )
+        print(f"  [Verlauf wird komprimiert: Block {i + 1}/{len(chunks)} – das dauert einige Minuten]", flush=True)
         got = _summarize(client, model, prompt)
         if got:
             summary = got

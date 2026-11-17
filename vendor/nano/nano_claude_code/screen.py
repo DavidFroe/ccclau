@@ -411,12 +411,21 @@ class Screen:
             return c("● idle", GREEN) + c(" · waiting for input", GREY)
         lab = {
             "prefill": ("◐ prefill", AMBER),
+            "compact": ("◒ komprimiere Verlauf", AMBER),
             "reasoning": ("◑ reasoning", ACCENT),
             "streaming": ("◉ streaming", ACCENT),
             "approval": ("? awaiting approval", AMBER),
         }.get(s)
         if lab is None:  # tool:<Name>
             lab = (f"▪ {s.replace('tool:', 'running ')}", AMBER)
+        try:
+            from nano_claude_code import verben
+            w = verben.wort(s, el)
+            if w:
+                sym = lab[0].split(" ")[0]
+                lab = (f"{sym} {w}" + ("…" if not w.endswith("…") else "") + (f" ({s.split(':')[-1]})" if verben.mit_zustand() else ""), lab[1])
+        except Exception:
+            pass
         extra = f" {el // 60}:{el % 60:02d}" if el >= 60 else f" {el}s"
         if s in ("reasoning", "streaming") and self.out_chars:
             extra += f" · ↓{_fmt_k(self.out_chars // 4)} tok"
