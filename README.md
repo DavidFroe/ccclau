@@ -751,3 +751,11 @@ CLAU_UPDATE_CHECK_INTERVAL="86400" # Prüf-Intervall in Sekunden (Default 1 Tag)
 ```
 
 Zeitstempel des letzten Checks: `${XDG_CACHE_HOME:-~/.cache}/clau/last_update_check`.
+
+## Sprachen / Languages
+
+Menüs und Meldungen von clau und nano gibt es in 16 Sprachen (en, de, es, fr, pt, it, nl, pl, tr, ru, uk, ja, ko, zh, ar, hi). Standard ist Englisch; gewählt wird nach `CLAU_LANG`, dann `~/.config/clau/lang`, dann `LC_ALL`/`LC_MESSAGES`/`LANG`/`LANGUAGE`.
+
+- Umschalten: Einstellungen → `l`, oder einmalig `clau --lang de`.
+- Kataloge: `locales/<sprache>.json` (Quelle). Danach `python3 tools/i18n_build.py` (erzeugt `locales/*.sh` für clau.sh) und `python3 tools/i18n_check.py` (Vollständigkeit/Platzhalter).
+- Nicht übersetzt: Modell-Prompts, Logdateien, Befehlsnamen. Arabisch wird ohne Rechts-nach-links-Umbruch ausgegeben.

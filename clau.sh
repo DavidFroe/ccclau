@@ -2460,6 +2460,97 @@ choose_mcp_menu() {
   done
 }
 
+# --- i18n: Mehrsprachigkeit ---
+
+I18N_LANG="en"
+declare -A I18N_EN
+declare -A I18N_DE
+
+i18n_load_sh() {
+  local lang="$1"
+  local file="$CLAU_DIR/locales/${lang}.sh"
+  if [[ -f "$file" ]]; then
+    source "$file"
+  fi
+}
+
+i18n_init() {
+  # CLAU_LANG aus Konfiguration oder Umgebung
+  local lang="${CLAU_LANG:-}"
+  [[ -z "$lang" && -r "$HOME/.config/clau/lang" ]] && read -r lang < "$HOME/.config/clau/lang"
+  if [[ -z "$lang" || "$lang" == "auto" ]]; then
+    # Konsole erkennen
+    for var in LC_ALL LC_MESSAGES LANG LANGUAGE; do
+      local val="${!var:-}"
+      if [[ -n "$val" && "$val" != "C" && "$val" != "POSIX" ]]; then
+        lang="${val%%_*}"
+        lang="${lang%%.*}"
+        lang="${lang%%@*}"
+        lang="${lang,,}"
+        break
+      fi
+    done
+  fi
+
+  # Gültige Sprache?
+  local valid="en de es fr pt it nl pl tr ru uk ja ko zh ar hi"
+  if [[ -z "$lang" || ! " $valid " == *" $lang "* ]]; then
+    lang="en"
+  fi
+
+  I18N_LANG="$lang"
+  export CLAU_LANG="$lang"
+  export NANO_LOCALE_DIR="$CLAU_DIR/locales"
+
+  # Alle Kataloge laden (benötigt für t() Fallunterscheidung)
+  for l in en de es fr pt it nl pl tr ru uk ja ko zh ar hi; do
+    i18n_load_sh "$l"
+  done
+}
+
+t() {
+  local key="$1"
+  shift
+  local text=""
+
+  # Gewählte Sprache
+  case "$I18N_LANG" in
+    de) text="${I18N_DE[$key]:-}" ;;
+    en) text="${I18N_EN[$key]:-}" ;;
+    es) text="${I18N_ES[$key]:-}" ;;
+    fr) text="${I18N_FR[$key]:-}" ;;
+    pt) text="${I18N_PT[$key]:-}" ;;
+    it) text="${I18N_IT[$key]:-}" ;;
+    nl) text="${I18N_NL[$key]:-}" ;;
+    pl) text="${I18N_PL[$key]:-}" ;;
+    tr) text="${I18N_TR[$key]:-}" ;;
+    ru) text="${I18N_RU[$key]:-}" ;;
+    uk) text="${I18N_UK[$key]:-}" ;;
+    ja) text="${I18N_JA[$key]:-}" ;;
+    ko) text="${I18N_KO[$key]:-}" ;;
+    zh) text="${I18N_ZH[$key]:-}" ;;
+    ar) text="${I18N_AR[$key]:-}" ;;
+    hi) text="${I18N_HI[$key]:-}" ;;
+  esac
+
+  # Fallback auf Englisch
+  if [[ -z "$text" ]]; then
+    text="${I18N_EN[$key]:-}"
+  fi
+
+  # Fallback auf Schlüsselname
+  if [[ -z "$text" ]]; then
+    text="$key"
+  fi
+
+  # Platzhalter ersetzen
+  if [[ $# -gt 0 ]]; then
+    printf "$text" "$@"
+  else
+    echo "$text"
+  fi
+}
+
 # Skills: Anleitungen, die das Modell bei Bedarf lädt (kein Tool, keine Ausführung)
 choose_skills_menu() {
   while true; do
@@ -5901,27 +5992,27 @@ interactive_start() {
   [[ "${#recent[@]}" -gt 9 ]] && recent=("${recent[@]:0:9}")
 
   echo
-  echo "clau — $(basename "$(pwd)")  [$tag, Harness: $(effective_backend), Benutzer: $QQ_USER]"
+  echo "$(t clau.menu.main.header "$(basename "$(pwd)")" "$tag" "$(effective_backend)" "$QQ_USER")"
   if [[ "${#recent[@]}" -gt 0 ]]; then
-    echo "  Letzte Sessions hier:"
+    echo "$(t clau.menu.main.last_sessions)"
     _session_table 0 1 "${recent[@]}"
-    [[ "${#intmux[@]}" -gt 0 ]] && echo "  ⧉ = läuft in tmux: die Nummer hängt sich direkt an (Loslösen: Strg-b d)"
-    [[ "$nhere" -gt "${#recent[@]}" ]] && echo "   m) mehr …                       (alle $nhere Sessions in diesem Verzeichnis)"
+    [[ "${#intmux[@]}" -gt 0 ]] && echo "$(t clau.menu.main.tmux_hint)"
+    [[ "$nhere" -gt "${#recent[@]}" ]] && echo "$(t clau.menu.main.more_sessions "$nhere")"
   fi
   echo
-  echo "   n) Neue Session                 [Enter]"
-  echo "   s) Weitere Sessions …           (alle hier / alle auf dem System / laufende)"
-  echo "   w) Modell wechseln"
-  echo "   u) Benutzer wechseln            ($QQ_USER; gilt für alle Harnesses)"
-  echo "   x) Tools, MCP, Skills …         (Freigaben für dieses Verzeichnis)"
-  echo "   h) Harness wechseln             ($(effective_backend): Claude Code / nano / opencode / atomic / pi)"
-  echo "   i) Markdown importieren         (neue Session aus Datei)"
+  echo "$(t clau.menu.main.new_session)"
+  echo "$(t clau.menu.main.more_sessions_menu)"
+  echo "$(t clau.menu.main.switch_model)"
+  echo "$(t clau.menu.main.switch_user "$QQ_USER")"
+  echo "$(t clau.menu.main.tools_menu)"
+  echo "$(t clau.menu.main.switch_backend "$(effective_backend)")"
+  echo "$(t clau.menu.main.import_md)"
   local ntm=0; _have tmux && ntm="$( { tmux ls 2>/dev/null || true; } | wc -l)"
-  echo "   t) tmux-Sitzungen …             ($ntm laufen auf diesem Rechner)"
-  echo "   f) Fernsteuerung …              (Telegram/Handy, API)"
-  echo "   e) Einstellungen …              (Harness, Bot, Team, Update)"
-  echo "   q) Beenden"
-  printf "Auswahl [%sn s w u x h i t f e q, Enter=n]: " "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt ${#recent[@]} ]] && echo "m, ")"
+  echo "$(t clau.menu.main.tmux_menu "$ntm")"
+  echo "$(t clau.menu.main.remote_menu)"
+  echo "$(t clau.menu.main.settings)"
+  echo "$(t clau.menu.main.quit)"
+  printf "$(t clau.menu.main.prompt "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt ${#recent[@]} ]] && echo "m, ")n s w u x h i t f e q, Enter=n")"
   local c; read -r c
   case "${c:-n}" in
     [1-9])
@@ -5947,7 +6038,7 @@ interactive_start() {
     f|F) choose_remote_menu; interactive_start ;;
     e|E) choose_settings_menu; interactive_start ;;
     q|Q) exit 0 ;;
-    *) echo "Ungültige Auswahl."; interactive_start ;;
+    *) echo "$(t clau.menu.main.invalid)"; interactive_start ;;
   esac
 }
 
@@ -5955,12 +6046,12 @@ interactive_start() {
 choose_remote_menu() {
   while true; do
     echo
-    echo "Fernsteuerung:"
-    echo "  1) Telegram / Handy …"
-    echo "  2) HTTP-API (clau --api)     : $([[ "${CLAU_API:-0}" == "1" ]] && echo AN || echo aus)  (${CLAU_API_BIND})"
-    echo "  3) API-Token                 : $([[ -n "${CLAU_API_TOKEN:-}" ]] && echo gesetzt || echo "<leer>")"
-    echo "  0) Zurück"
-    printf "Auswahl [0-3]: "
+    echo "$(t clau.menu.remote.header)"
+    echo "$(t clau.menu.remote.telegram)"
+    echo "$(t clau.menu.remote.api "$([[ "${CLAU_API:-0}" == "1" ]] && echo AN || echo aus)" "${CLAU_API_BIND}")"
+    echo "$(t clau.menu.remote.token "$([[ -n "${CLAU_API_TOKEN:-}" ]] && echo gesetzt || echo "<leer>")")"
+    echo "$(t clau.menu.remote.back)"
+    printf "$(t clau.menu.remote.prompt)"
     local c v; read -r c
     case "$c" in
       1) choose_telegram_interactive ;;
@@ -6028,26 +6119,40 @@ print(int(d["enabled"]), d["port"], d["installiert"] or "-", int(d["laeuft"]), d
   done
 }
 
+choose_language_menu() {
+  local codes=(auto en de es fr pt it nl pl tr ru uk ja ko zh ar hi) i=0 c
+  echo
+  for c in "${codes[@]}"; do printf "  %2d) %s\n" "$i" "$c"; ((i++)); done
+  printf "Language [0-%d]: " "$((${#codes[@]}-1))"
+  local n; read -r n
+  [[ "$n" =~ ^[0-9]+$ && "$n" -lt "${#codes[@]}" ]] || return 0
+  mkdir -p "$HOME/.config/clau" && echo "${codes[$n]}" > "$HOME/.config/clau/lang"
+  CLAU_LANG=""; [[ "${codes[$n]}" != "auto" ]] && CLAU_LANG="${codes[$n]}"
+  i18n_init
+}
+
 choose_settings_menu() {
   while true; do
     echo
-    echo "Einstellungen:"
-    echo "  1) Harness                    : $(effective_backend)   (Claude Code / nano (Claude-Code-Nachbau) / opencode / atomic / pi)"
-    echo "  3) Bot-Einstellungen …       (Autonomie, sudo, Effort, Auto-Compact, Timeout)"
-    echo "  4) Team-Modus …              : $(team_on && echo "AN — $(team_set_label)" || echo aus)"
-    echo "  5) Update von GitHub (self-update)"
-    echo "  6) Neue Sessions in tmux     : $([[ "${CLAU_TMUX:-0}" == "1" ]] && echo an || echo aus)   (überleben Terminal-Abstürze)"
-    echo "  7) Claude Code prüfen        (claude doctor, $(claude --version 2>/dev/null | cut -d' ' -f1))"
-    echo "  8) Claude Code aktualisieren (claude update)"
-    echo "  9) Benutzer (Quiteque)       : ${QQ_USER}   (ccclau = normal, master = höchste Priorität)"
-    echo "  g) Gitea (lokaler Git-Server mit Tickets) : $(_gitea_enabled && echo an || echo aus)"
-    echo "  0) Zurück"
-    printf "Auswahl [0-1, 3-9, g]: "
+    echo "$(t clau.menu.settings.header)"
+    echo "$(t clau.menu.settings.backend "$(effective_backend)")"
+    echo "$(t clau.menu.settings.bot)"
+    echo "$(t clau.menu.settings.team "$(team_on && echo "AN — $(team_set_label)" || echo aus)")"
+    echo "$(t clau.menu.settings.update)"
+    echo "$(t clau.menu.settings.tmux "$([[ "${CLAU_TMUX:-0}" == "1" ]] && echo an || echo aus)")"
+    echo "$(t clau.menu.settings.doctor "$(claude --version 2>/dev/null | cut -d' ' -f1)")"
+    echo "$(t clau.menu.settings.update_claude)"
+    echo "$(t clau.menu.settings.user "${QQ_USER}")"
+    echo "$(t clau.menu.settings.gitea "$(_gitea_enabled && echo an || echo aus)")"
+    echo "$(t clau.menu.settings.lang "$I18N_LANG")"
+    echo "$(t clau.menu.settings.back)"
+    printf "$(t clau.menu.settings.prompt)"
     local c; read -r c
     case "$c" in
       9) if [[ "$QQ_USER" == "master" ]]; then CLAU_QQ_USER=ccclau; else CLAU_QQ_USER=master; fi
          QQ_USER="$CLAU_QQ_USER"; save_config ;;
       g|G) choose_gitea_menu ;;
+      l|L) choose_language_menu ;;
       1) choose_backend_interactive ;;
       3) choose_bot_settings ;;
       4) choose_team_settings ;;
@@ -6469,6 +6574,10 @@ parse_args() {
         ACTION="mirror"
         shift
         ;;
+      --lang)
+        CLAU_LANG="${2:-}"; i18n_init
+        shift 2 || shift $#
+        ;;
       --api)
         ACTION="api"
         shift
@@ -6600,6 +6709,7 @@ QUICK_TASK=0
 TG_PUMP_ARGS=("" "" "")
 
 load_config
+i18n_init
 parse_args "$@"
 
 if [[ "${ACTION}" == "tg-pump" ]]; then

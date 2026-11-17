@@ -11,6 +11,8 @@ import threading
 import time
 from pathlib import Path
 
+from nano_claude_code.i18n import _
+
 _TTY = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
@@ -49,21 +51,21 @@ def rule() -> str:
 def print_banner(model: str, provider: str, tools_count: int, skill_count: int = 0,
                  session_title: str = "", resumed: str = "") -> None:
     rows = [
-        (c("nano", BOLD, ACCENT) + c("  ·  terminal coding agent (Claude Code clone)", GREY)),
-        c("model   ", GREY) + c(model, BOLD),
-        c("folder  ", GREY) + _home_short(Path.cwd()),
+        (c("nano", BOLD, ACCENT) + c("  ·  " + _("nano.banner.tagline"), GREY)),
+        c(_("nano.banner.model") + "  ", GREY) + c(model, BOLD),
+        c(_("nano.banner.folder") + " ", GREY) + _home_short(Path.cwd()),
     ]
-    extra = f"{tools_count} tools" + (f" · {skill_count} skills" if skill_count else "")
-    rows.append(c("tools   ", GREY) + extra)
+    extra = f"{tools_count} " + _("nano.banner.tools") + (f" · {skill_count} " + _("nano.banner.skills") if skill_count else "")
+    rows.append(c(_("nano.banner.tools_label") + " ", GREY) + extra)
     if session_title:
-        rows.append(c("session ", GREY) + session_title)
+        rows.append(c(_("nano.banner.session") + " ", GREY) + session_title)
     if resumed:
-        rows.append(c("resumed ", GREY) + c(resumed, AMBER))
+        rows.append(c(_("nano.banner.resumed") + " ", GREY) + c(resumed, AMBER))
     print()
     for r in rows:
         print("  " + r)
     print()
-    print("  " + c("/help for commands · Tab completes · Ctrl+C interrupts · Ctrl+C twice exits", GREY))
+    print("  " + c(_("nano.banner.hint"), GREY))
 
 
 # ── Eingabe ──────────────────────────────────────────────────────────────
@@ -376,9 +378,9 @@ def ask_permission(desc: str, config: dict) -> bool:
     from nano_claude_code.screen import SCREEN
     print()
     print("  " + c("? ", BOLD, AMBER) + c(desc, BOLD))
-    print("    " + c("1", BOLD) + " Yes")
-    print("    " + c("2", BOLD) + " Yes, and don't ask again this session")
-    print("    " + c("3", BOLD) + " No   " + c("(Enter / Esc)", GREY))
+    print("    " + c("1", BOLD) + " " + _("nano.ui.yes"))
+    print("    " + c("2", BOLD) + " " + _("nano.ui.yes_always"))
+    print("    " + c("3", BOLD) + " " + _("nano.ui.no") + "   " + c(_("nano.ui.enter_esc"), GREY))
     if SCREEN.active:
         SCREEN.watch_stop()
         SCREEN.set_state("approval")
@@ -389,13 +391,13 @@ def ask_permission(desc: str, config: dict) -> bool:
                     ok = True; break
                 if k in ("2", "a"):
                     config["permission_mode"] = "accept-all"
-                    print("  " + c("accept-all for this session", GREY))
+                    print("  " + c(_("nano.ui.accept_all"), GREY))
                     ok = True; break
                 if k in ("3", "n", "\n", "\x1b", "\x03"):
                     ok = False; break
         finally:
             SCREEN.watch_start()
-        print("  " + c("› " + ("yes" if ok else "no"), GREY))
+        print("  " + c("› " + (_("nano.ui.yes_short") if ok else _("nano.ui.no_short")), GREY))
         return ok
     try:
         ans = input("  " + c("› ", ACCENT)).strip().lower()
@@ -404,7 +406,7 @@ def ask_permission(desc: str, config: dict) -> bool:
         return False
     if ans in ("2", "a", "always"):
         config["permission_mode"] = "accept-all"
-        print("  " + c("accept-all for this session", GREY))
+        print("  " + c(_("nano.ui.accept_all"), GREY))
         return True
     return ans in ("1", "y", "yes")
 
