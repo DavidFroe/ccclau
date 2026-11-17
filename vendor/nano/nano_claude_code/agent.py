@@ -153,6 +153,50 @@ def _estimate_message_tokens(messages: list[dict]) -> int:
     return total
 
 
+SHRINK_KEEP_RECENT = 16      # so viele letzte Nachrichten bleiben unverändert
+SHRINK_MAX_CHARS = 1500      # ältere Tool-Ergebnisse / Tool-Eingaben / Texte werden darauf gekürzt
+
+
+def _cut(text: str) -> str:
+    if len(text) <= SHRINK_MAX_CHARS:
+        return text
+    return text[:SHRINK_MAX_CHARS - 300] + f"\n[… gekürzt, {len(text)} Zeichen]\n" + text[-250:]
+
+
+def shrink_old_tool_results(messages: list[dict]) -> list[dict]:
+    """Wie Claude Code: große Tool-Ausgaben und Datei-Inhalte in älteren Nachrichten kürzen (die letzten
+    SHRINK_KEEP_RECENT bleiben ganz). Verhindert, dass eine fortgesetzte Sitzung weit über dem Kontextfenster liegt."""
+    cut_at = len(messages) - SHRINK_KEEP_RECENT
+    if cut_at <= 0:
+        return messages
+    out = []
+    for i, m in enumerate(messages):
+        c = m.get("content")
+        if i >= cut_at or not isinstance(c, list):
+            out.append(m)
+            continue
+        blocks = []
+        for b in c:
+            if not isinstance(b, dict):
+                blocks.append(b)
+                continue
+            b = dict(b)
+            t = b.get("type")
+            if t == "tool_result":
+                bc = b.get("content")
+                if isinstance(bc, str):
+                    b["content"] = _cut(bc)
+                elif isinstance(bc, list):
+                    b["content"] = [dict(x, text=_cut(x["text"])) if isinstance(x, dict) and isinstance(x.get("text"), str) else x for x in bc]
+            elif t == "tool_use" and isinstance(b.get("input"), dict):
+                b["input"] = {k: (_cut(v) if isinstance(v, str) else v) for k, v in b["input"].items()}
+            elif t == "text" and m.get("role") == "assistant" and isinstance(b.get("text"), str):
+                b["text"] = _cut(b["text"])
+            blocks.append(b)
+        out.append({**m, "content": blocks})
+    return out
+
+
 def _needs_compaction(messages: list[dict], last_input_tokens: int) -> bool:
     if last_input_tokens > 0:
         return last_input_tokens > int(CONTEXT_WINDOW_TOKENS * COMPACTION_THRESHOLD)
@@ -529,6 +573,7 @@ def run_streaming(
     Features: retry, auto-continuation, Ctrl+C interrupt, prompt caching,
     automatic context compaction.
     """
+    state.messages = shrink_old_tool_results(state.messages)
     # ── Context compaction check (before adding new message) ──
     if _needs_compaction(state.messages, state.last_input_tokens):
         old_count = len(state.messages)

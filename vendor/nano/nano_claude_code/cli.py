@@ -526,12 +526,22 @@ def _blocks(m: dict) -> list[dict]:
     return out
 
 
+_CC_NOISE = ("<command-name>", "<command-message>", "<command-args>", "<local-command-stdout>",
+             "<local-command-stderr>", "<local-command-caveat>")
+
+
+def _is_cc_noise(text: str) -> bool:
+    """Interne Claude-Code-Zeilen (/exit, 'Bye!', Befehls-Markup) aus importierten Sitzungen."""
+    return str(text or "").lstrip().startswith(_CC_NOISE)
+
+
 def _show_recent_history(state: AgentState, n_user: int = 2) -> None:
     """Beim Fortsetzen: die letzten n_user Nutzer-Eingaben samt Antworten anzeigen (gekürzt), damit man den Faden sieht."""
     from nano_claude_code import ui
     msgs = state.messages
     starts = [i for i, m in enumerate(msgs) if m.get("role") == "user"
-              and any(b.get("type") == "text" and str(b.get("text") or "").strip() for b in _blocks(m))]
+              and any(b.get("type") == "text" and str(b.get("text") or "").strip() and not _is_cc_noise(b.get("text"))
+                      for b in _blocks(m))]
     if not starts:
         return
     first = starts[-n_user] if len(starts) >= n_user else starts[0]
@@ -540,6 +550,8 @@ def _show_recent_history(state: AgentState, n_user: int = 2) -> None:
     for m in msgs[first:]:
         for b in _blocks(m):
             t = b.get("type")
+            if m.get("role") == "user" and t == "text" and _is_cc_noise(b.get("text")):
+                continue
             if m.get("role") == "user" and t == "text" and str(b.get("text") or "").strip():
                 print("\n" + ui.c("❯ ", ui.BOLD, ui.ACCENT) + cut(str(b["text"]).strip(), 500))
             elif m.get("role") == "assistant" and t == "text" and str(b.get("text") or "").strip():
@@ -1389,6 +1401,7 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
         )
     else:
         state = AgentState()
+    state.messages = _agent_mod.shrink_old_tool_results(state.messages)
     tools = anthropic_tool_defs()
 
     # Try prompt_toolkit for rich dropdown, fallback to readline
