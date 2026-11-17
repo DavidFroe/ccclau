@@ -1466,6 +1466,7 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
         ctx_used=_ctx_used, ctx_max=_agent_mod.CONTEXT_WINDOW_TOKENS)
     if _screen_on:
         _agent_mod.STATUS_HOOK = SCREEN.set_state
+        _agent_mod.PROGRESS_HOOK = SCREEN.set_progress
         SCREEN.start_ticker()
         print(ui.c("  /help for commands · Tab completes · PgUp scrolls back · Esc interrupts · Ctrl+C twice exits", ui.GREY))
         hist = _load_history()
@@ -1591,6 +1592,8 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
                 SCREEN.watch_start()
             for event in ui.with_spinner(event_iter, spinner, _lab):
                 if isinstance(event, CompactionNotice):
+                    if _screen_on:
+                        SCREEN.set_state("prefill")      # Komprimieren fertig: ab jetzt wartet nano auf das Modell
                     print(_clr(
                         f"\n  ✔ Verlauf komprimiert: {event.old_count} → {event.new_count} Nachrichten",
                         "green",

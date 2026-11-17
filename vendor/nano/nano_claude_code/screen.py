@@ -120,6 +120,7 @@ class Screen:
         self._typed = ""               # angefangener, noch nicht abgeschickter Text
         self.pastes: dict[int, str] = {}   # eingefügte Texte hinter den Platzhaltern
         self._paste_n = 0
+        self._prog = None              # (erledigt, gesamt) für den Ladebalken
         self._ta_pending = b""         # angefangene Einfüge-Sequenz aus der Wartezeit
         self.cmds: list[str] = []      # Befehle (/…, exit), die den Zug beenden und als Nächstes laufen (nicht in der Warteschlange)
         self.live_cmd = None           # von cli gesetzt: führt einen Schrägstrich-Befehl sofort aus → "done" | "defer" | Prompt-Text
@@ -384,7 +385,15 @@ class Screen:
         return off
 
     # ── Statusleiste ─────────────────────────────────────────────────
+    def set_progress(self, done: int, total: int) -> None:
+        """Ladebalken in der Statusleiste (z.B. beim Komprimieren)."""
+        self._prog = (done, max(1, total))
+        if self.active:
+            self.draw_status()
+
     def set_state(self, state: str) -> None:
+        if state != "compact":
+            self._prog = None
         if state != self.state:
             self.state = state
             self.state_t0 = time.monotonic()
@@ -427,6 +436,11 @@ class Screen:
         except Exception:
             pass
         extra = f" {el // 60}:{el % 60:02d}" if el >= 60 else f" {el}s"
+        if s == "compact" and self._prog:
+            d, t = self._prog
+            n = 10
+            f = min(n, d * n // t)
+            extra += " " + c("█" * f, GREEN) + c("░" * (n - f), GREY) + c(f" {d}/{t}", GREY)
         if s in ("reasoning", "streaming") and self.out_chars:
             extra += f" · ↓{_fmt_k(self.out_chars // 4)} tok"
         return c(lab[0], lab[1]) + c(extra, GREY)

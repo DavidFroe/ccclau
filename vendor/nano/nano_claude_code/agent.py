@@ -152,6 +152,7 @@ def _needs_compaction(messages: list[dict], last_input_tokens: int) -> bool:
 
 
 _CC_CONT_MARK = "This session is being continued"
+PROGRESS_HOOK = None   # optional: Funktion (erledigt, gesamt) für einen Ladebalken beim Komprimieren
 STATUS_HOOK = None   # optional: Aufrufer (cli) setzt eine Funktion, die den Zustand "compact" in der Statusleiste anzeigt
 
 
@@ -195,6 +196,22 @@ def _msg_digest(m: dict) -> str:
 
 def _is_plain_user(m: dict) -> bool:
     return m.get("role") == "user" and not any(b.get("type") == "tool_result" for b in _blocks(m.get("content")))
+
+
+def _prog(done: int, total: int) -> None:
+    if PROGRESS_HOOK:
+        try:
+            PROGRESS_HOOK(done, total)
+        except Exception:
+            pass
+
+
+def _compact_model(default: str) -> str:
+    """Modell fürs Komprimieren: NANO_COMPACT_MODEL (QuiteQue-ID wie 50 → owl-50, oder voller Name); leer = natives Modell."""
+    m = (os.environ.get("NANO_COMPACT_MODEL") or "").strip()
+    if not m:
+        return default
+    return f"owl-{m}" if m.isdigit() else m
 
 
 def _summarize(client, model: str, prompt: str) -> str | None:
@@ -251,8 +268,10 @@ def compact_messages(
         old = old[1:]
 
     digests = [_msg_digest(m) for m in old]
-    if os.environ.get("NANO_COMPACT_LLM") != "1":
-        # Standard: ohne Modellaufruf. Neueste Auszüge bis ~35k Zeichen (≈ 10k Token) behalten, Ältere weglassen.
+    _prog(0, 1)
+
+    def ohne_modell() -> list[dict]:
+        # Neueste Auszüge bis ~35k Zeichen (≈ 10k Token) behalten, Ältere weglassen.
         budget, kept = 35_000, []
         for d in reversed(digests):
             if budget - len(d) < 0 and kept:
@@ -265,10 +284,15 @@ def compact_messages(
         if pinned:
             ctx += f"[Continuation note from the earlier session]\n{pinned}\n\n"
         ctx += (f"[Earlier messages, shortened; {omitted} older ones omitted]\n" if omitted else "[Earlier messages, shortened]\n") + "\n".join(kept)
+        _prog(1, 1)
         return [
             {"role": "user", "content": f"[Context from earlier in our conversation]\n{ctx}"},
             {"role": "assistant", "content": "Understood. I have the context from our earlier conversation. Let me continue from where we left off."},
         ] + recent
+
+    if os.environ.get("NANO_COMPACT_LLM") == "0":      # per Menü (clau → Auto-Compact) ausgeschaltet
+        return ohne_modell()
+    cmodel = _compact_model(model)
     # in Blöcke von ~60k Zeichen packen; höchstens 4 Blöcke (die jüngsten), die Fortsetzungszusammenfassung deckt den Anfang ab
     chunks: list[str] = []
     cur = ""
@@ -290,12 +314,13 @@ def compact_messages(
             + (f"Background from the earlier continuation note:\n{pinned[:3000]}\n\n" if pinned and i == 0 else "")
             + f"New part of the conversation:\n{ch}\n\nWrite the updated summary (max ~900 words)."
         )
-        print(f"  [Verlauf wird komprimiert: Block {i + 1}/{len(chunks)} – das dauert einige Minuten]", flush=True)
-        got = _summarize(client, model, prompt)
+        _prog(i, len(chunks))
+        got = _summarize(client, cmodel, prompt)
+        _prog(i + 1, len(chunks))
         if got:
             summary = got
-    if not summary:
-        summary = f"[Compacted {len(old)} earlier messages]"
+    if not summary:                 # Modell nicht erreichbar/leer: wenigstens die Auszüge behalten
+        return ohne_modell()
 
     ctx = ""
     if pinned:

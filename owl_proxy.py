@@ -778,6 +778,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         # 2026-11-09: Denktiefe der lokalen Modelle (Karten-Tor/llama.cpp) per Umgebung drosseln: OWL_REASONING_EFFORT=low|medium|xhigh
         if os.environ.get("OWL_REASONING_EFFORT") and "reasoning_effort" not in oai_payload:
             oai_payload["reasoning_effort"] = os.environ["OWL_REASONING_EFFORT"]
+        # QuiteQue-eigener Kompressor (claw-compactor): kürzt den ausgehenden Prompt vor dem Backend, spart Prefill.
+        # Schlägt er fehl, geht die Anfrage unverändert weiter. Aktiv mit OWL_CLAW_COMPACT=1 (clau → Auto-Compact).
+        if os.environ.get("OWL_CLAW_COMPACT") == "1":
+            oai_payload["compact"] = True
         tools = tools_ant_to_oai(req.get("tools"))
         if tools:
             oai_payload["tools"] = tools

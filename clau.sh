@@ -616,6 +616,7 @@ _start_owl_proxy() {
   OWL_ESC_FILE="$(_usage_dir)/${CLAU_USAGE_SID:-run-$$}.esc.jsonl" OWL_REG_CWD="$PWD" \
   OWL_TRACE="${CLAU_TRACE:-0}" OWL_TRACE_FILE="$(_usage_dir)/${CLAU_USAGE_SID:-run-$$}.trace.jsonl" \
   OWL_PROXY_THREADED="$threaded" OWL_SLOT_LIMITS="$slot_limits" OWL_ROUTES="${CLAU_OWL_ROUTES:-}" \
+  OWL_CLAW_COMPACT="${CLAU_CLAW_COMPACT:-0}" \
   OWL_USAGE_FILE="${CLAU_USAGE_FILE:-}" \
   OWL_PROXY_PORT="$port" OWL_MODEL="$owl_id" OWL_BASE_URL="${OWL_BASE_URL}/v1" OWL_PROXY_USER="$QQ_USER" \
     OWL_PROXY_TIMEOUT="${CLAU_OWL_TIMEOUT:-1800}" OWL_MAX_WAIT="${CLAU_OWL_MAX_WAIT:-}" OWL_CTX_LIMIT="$(owl_context_window "$owl_id")" \
@@ -2312,6 +2313,8 @@ print((u + "/" + d["fork"]) if d.get("fork") and u else "")' "$_gi" 2>/dev/null)
   NANO_MCP_CONFIG="$mcp_file" \
   NANO_TOOLS="$nano_tools" \
   NANO_CONTEXT_WINDOW="${cw:-200000}" \
+  NANO_COMPACT_LLM="${CLAU_COMPACT_LLM:-1}" \
+  NANO_COMPACT_MODEL="${CLAU_COMPACT_MODEL:-}" \
   NANO_API_LABEL="QuiteQue ${OWL_BASE_URL#http://}" \
   NANO_MODEL_LABEL="owl:${owl_id}" \
   NANO_EFFORT_LABEL="${OWL_REASONING_EFFORT:-auto}" \
@@ -2691,6 +2694,9 @@ load_config() {
   : "${CLAU_AUTO_COMPACT_ENABLED:=1}"
   : "${CLAU_AUTO_COMPACT_WINDOW:=}"
   : "${CLAU_AUTO_COMPACT_PCT:=80}"
+  : "${CLAU_COMPACT_LLM:=1}"
+  : "${CLAU_COMPACT_MODEL:=}"
+  : "${CLAU_CLAW_COMPACT:=0}"
   : "${CLAU_DISABLE_TOOLS:=}"
   : "${CLAU_DISABLE_ARTIFACT:=0}"
   : "${CLAU_DISABLE_AGENT_VIEW:=0}"
@@ -2807,6 +2813,9 @@ CLAU_SESSION_NAME="${CLAU_SESSION_NAME:-}"
 CLAU_AUTO_COMPACT_ENABLED="${CLAU_AUTO_COMPACT_ENABLED:-1}"
 CLAU_AUTO_COMPACT_WINDOW="${CLAU_AUTO_COMPACT_WINDOW:-}"
 CLAU_AUTO_COMPACT_PCT="${CLAU_AUTO_COMPACT_PCT:-80}"
+CLAU_COMPACT_LLM="${CLAU_COMPACT_LLM:-1}"
+CLAU_COMPACT_MODEL="${CLAU_COMPACT_MODEL:-}"
+CLAU_CLAW_COMPACT="${CLAU_CLAW_COMPACT:-0}"
 CLAU_DISABLE_TOOLS="${CLAU_DISABLE_TOOLS:-}"
 CLAU_DISABLE_ARTIFACT="${CLAU_DISABLE_ARTIFACT:-0}"
 CLAU_DISABLE_AGENT_VIEW="${CLAU_DISABLE_AGENT_VIEW:-0}"
@@ -3589,8 +3598,11 @@ choose_auto_compact_settings() {
     echo "  1) Auto-Compact        : $enabled_label"
     echo "  2) Festes Token-Limit  : ${CLAU_AUTO_COMPACT_WINDOW:-<prozent-basiert>}"
     echo "  3) Prozent             : ${CLAU_AUTO_COMPACT_PCT:-80}%"
+    echo "  4) nano: Verlauf per Modell zusammenfassen : $([[ "${CLAU_COMPACT_LLM:-1}" == "1" ]] && echo AN || echo "AUS (nur Auszüge, sofort)")"
+    echo "  5) nano: Modell fürs Komprimieren          : ${CLAU_COMPACT_MODEL:-<das normale Modell>}   (QuiteQue-ID, z. B. ein schnelleres)"
+    echo "  6) QuiteQue-Kompressor (claw-compactor) auf jeder Anfrage : $([[ "${CLAU_CLAW_COMPACT:-0}" == "1" ]] && echo "AN  (kürzt den Prompt vor dem Backend, spart Prefill; Claude Code und nano)" || echo "AUS")"
     echo "  0) Zurück"
-    printf "Auswahl [0-3]: "
+    printf "Auswahl [0-6]: "
     read -r choice
     case "${choice:-0}" in
       1)
@@ -3630,6 +3642,27 @@ choose_auto_compact_settings() {
         fi
         save_config
         echo "Prozent: ${CLAU_AUTO_COMPACT_PCT}%"
+        ;;
+      4)
+        if [[ "${CLAU_COMPACT_LLM:-1}" == "1" ]]; then CLAU_COMPACT_LLM="0"; else CLAU_COMPACT_LLM="1"; fi
+        save_config
+        echo "Zusammenfassung per Modell: $([[ "$CLAU_COMPACT_LLM" == "1" ]] && echo AN || echo AUS)"
+        ;;
+      5)
+        printf "QuiteQue-Modell-ID fürs Komprimieren (leer = normales Modell; Liste: GET /v1/models): "
+        read -r val
+        if [[ -z "$val" || "$val" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+          CLAU_COMPACT_MODEL="$val"
+          save_config
+          echo "Komprimier-Modell: ${CLAU_COMPACT_MODEL:-<das normale Modell>}"
+        else
+          echo "Ungültige Eingabe."
+        fi
+        ;;
+      6)
+        if [[ "${CLAU_CLAW_COMPACT:-0}" == "1" ]]; then CLAU_CLAW_COMPACT="0"; else CLAU_CLAW_COMPACT="1"; fi
+        save_config
+        echo "claw-compactor: $([[ "$CLAU_CLAW_COMPACT" == "1" ]] && echo "AN (gilt für neu gestartete Sessions)" || echo AUS)"
         ;;
       0|"") break ;;
       *) echo "Ungültige Auswahl." ;;
