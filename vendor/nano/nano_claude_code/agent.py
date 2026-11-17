@@ -205,7 +205,7 @@ def _needs_compaction(messages: list[dict], last_input_tokens: int) -> bool:
 
 _CC_CONT_MARK = "This session is being continued"
 PROGRESS_HOOK = None   # optional: Funktion (erledigt, gesamt) für einen Ladebalken beim Komprimieren
-USAGE_HOOK = None    # wird nach jedem API-Aufruf gerufen (Summen aktualisiert)
+USAGE_HOOK = None    # wird nach jedem API-Aufruf mit (denk_tokens|None, antwort_tokens|None) gerufen
 STATUS_HOOK = None   # optional: Aufrufer (cli) setzt eine Funktion, die den Zustand "compact" in der Statusleiste anzeigt
 
 
@@ -603,6 +603,7 @@ def run_streaming(
         in_tokens = out_tokens = 0
         cache_creation = cache_read = 0
         final = None
+        reasoning_tokens = None   # vom Backend gemeldete Denk-Tokens dieses Aufrufs
 
         try:
             stream_ctx = _api_call_streaming(
@@ -612,6 +613,13 @@ def run_streaming(
             with stream_ctx as stream:
                 for event in stream:
                     etype = getattr(event, "type", None)
+                    if etype == "message_delta":
+                        _u = getattr(event, "usage", None)
+                        _r = getattr(_u, "reasoning_tokens", None)
+                        if _r is None and getattr(_u, "model_extra", None):
+                            _r = _u.model_extra.get("reasoning_tokens")
+                        if isinstance(_r, (int, float)):
+                            reasoning_tokens = int(_r)
                     if etype == "content_block_delta":
                         delta = event.delta
                         dtype = getattr(delta, "type", None)
@@ -631,7 +639,7 @@ def run_streaming(
                 state.total_output_tokens += out_tokens
                 state.last_input_tokens = in_tokens
                 if USAGE_HOOK:
-                    USAGE_HOOK()
+                    USAGE_HOOK(reasoning_tokens, None if reasoning_tokens is None else max(0, out_tokens - reasoning_tokens))
 
                 for block in final.content:
                     if block.type == "tool_use":

@@ -112,8 +112,10 @@ class Screen:
         self.state_t0 = time.monotonic()
         self.turn_t0: float | None = None    # Beginn des ganzen Zugs (Prefill, Denken, Tools, Antwort): der Zähler läuft durch
         self.out_chars = 0
-        self.live_chars = 0         # Zeichen des laufenden API-Aufrufs, noch nicht in den Summen
-        self.tok_total = None       # Funktion: bisherige Tokens (rein + raus) der Session
+        self.think_tok = 0          # Session-Summe Denk-Tokens aus abgeschlossenen API-Aufrufen
+        self.text_tok = 0           # Session-Summe Antwort-Tokens (inkl. Tool-Aufrufe) aus abgeschlossenen Aufrufen
+        self.think_chars = 0        # Zeichen des laufenden Aufrufs (Live-Schätzung, Zeichen/4)
+        self.text_chars = 0
         self.ctx_used = lambda: 0
         self.ctx_max = 200_000
         self._ticker: threading.Thread | None = None
@@ -410,22 +412,24 @@ class Screen:
         if self.active:
             self.draw_status()
 
-    def add_out(self, n: int) -> None:
+    def add_out(self, n: int, think: bool = False) -> None:
         self.out_chars += n
-        self.live_chars += n
+        if think:
+            self.think_chars += n
+        else:
+            self.text_chars += n
 
-    def call_done(self) -> None:
-        self.live_chars = 0
+    def call_done(self, think=None, text=None) -> None:
+        """API-Aufruf fertig: exakte Werte vom Backend übernehmen (sonst die Live-Schätzung festschreiben)."""
+        self.think_tok += self.think_chars // 4 if think is None else think
+        self.text_tok += self.text_chars // 4 if text is None else text
+        self.think_chars = self.text_chars = 0
         if self.active:
             self.draw_status()
 
     def _tok_label(self) -> str:
-        try:
-            n = int(self.tok_total()) if self.tok_total else 0
-        except Exception:
-            n = 0
-        n += self.live_chars // 4
-        return f" ({_fmt_k(n)})"
+        """Session-Summen der Ausgabe: t = Denken, s = Antwort (laufender Aufruf geschätzt, danach exakt)."""
+        return f" (t:{_fmt_k(self.think_tok + self.think_chars // 4)}|s:{_fmt_k(self.text_tok + self.text_chars // 4)})"
 
     def update_info(self, **kw) -> None:
         self.info.update(kw)
@@ -434,7 +438,7 @@ class Screen:
 
     def _state_label(self) -> str:
         s = self.state
-        el = int(time.monotonic() - (self.turn_t0 or self.state_t0))
+        el = int(time.monotonic() - self.state_t0)     # Fußzeile: nur Zeit im aktuellen Zustand (oben zählt der ganze Zug)
         if s == "idle":
             return c("● idle", GREEN) + c(" · waiting for input", GREY)
         lab = {

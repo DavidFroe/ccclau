@@ -446,9 +446,20 @@ def oai_resp_to_ant(oai_resp, model_name, est_input_tokens=0, skala=1.0):
             # Fällt das Backend ohne usage zurück, lieber die Schätzung als 0 —
             # 0 würde die Kontext-Anzeige der CLI wieder blind machen.
             "input_tokens": int((usage.get("prompt_tokens") or est_input_tokens) * skala),
-            "output_tokens": usage.get("completion_tokens", 0)
+            "output_tokens": usage.get("completion_tokens", 0),
+            **({"reasoning_tokens": _reasoning_tokens(usage)} if _reasoning_tokens(usage) is not None else {}),
         }
     }
+
+
+def _reasoning_tokens(usage):
+    """Denk-Tokens aus der Backend-Usage (QuiteQue: usage.reasoning_tokens bzw. completion_tokens_details); None = unbekannt."""
+    if not isinstance(usage, dict):
+        return None
+    v = usage.get("reasoning_tokens")
+    if v is None:
+        v = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    return int(v) if isinstance(v, (int, float)) else None
 
 
 # ── Streaming-Übersetzer ───────────────────────────────────────────────────────
@@ -473,6 +484,7 @@ class StreamTranslator:
         self.tool_buffers = {}   # oai_index → {id, name, args, block_index}
         self.output_tokens = 0
         self.usage_seen = False
+        self.reasoning_tokens = None   # Denk-Tokens laut Backend (None = nicht gemeldet)
         self.cached_tokens = None
         self.text_closed = False
         self.tools_closed = False
@@ -521,6 +533,9 @@ class StreamTranslator:
             # Echte prompt_tokens ersetzen die Schätzung, sobald sie da sind.
             self.input_tokens = data["usage"].get("prompt_tokens") or self.input_tokens
             self.usage_seen = True
+            _r = _reasoning_tokens(data["usage"])
+            if _r is not None:
+                self.reasoning_tokens = _r
             self.cached_tokens = (data["usage"].get("prompt_tokens_details") or {}).get("cached_tokens")
 
         if not choices:
@@ -723,7 +738,8 @@ class StreamTranslator:
             "delta": {"stop_reason": self.stop_reason or "end_turn",
                       "stop_sequence": None},
             "usage": {"input_tokens": int(self.input_tokens * self.skala),
-                      "output_tokens": self.output_tokens}
+                      "output_tokens": self.output_tokens,
+                      **({"reasoning_tokens": self.reasoning_tokens} if self.reasoning_tokens is not None else {})}
         }))
         out.append(self._evt("message_stop", {"type": "message_stop"}))
         return "".join(out)

@@ -1485,7 +1485,6 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
     if _screen_on:
         _agent_mod.STATUS_HOOK = SCREEN.set_state
         _agent_mod.USAGE_HOOK = SCREEN.call_done
-        SCREEN.tok_total = lambda: state.total_input_tokens + state.total_output_tokens
         _agent_mod.PROGRESS_HOOK = SCREEN.set_progress
         SCREEN.start_ticker()
         print(ui.c("  /help for commands · Tab completes · PgUp scrolls back · Esc interrupts · Ctrl+C twice exits", ui.GREY))
@@ -1624,7 +1623,7 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
                     textout.write(event.text)
                 elif isinstance(event, ThinkingChunk):
                     if _screen_on:
-                        SCREEN.set_state("reasoning"); SCREEN.add_out(len(event.text))
+                        SCREEN.set_state("reasoning"); SCREEN.add_out(len(event.text), think=True)
                     if verbose:
                         if not thinking_started:
                             print(_clr("\n  [thinking]", "dim"))
