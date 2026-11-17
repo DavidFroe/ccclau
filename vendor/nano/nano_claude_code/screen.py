@@ -118,6 +118,9 @@ class Screen:
         self._old_winch = None
         self.queue: list[str] = []     # während der Arbeit eingetippte Nachrichten (Warteschlange)
         self._typed = ""               # angefangener, noch nicht abgeschickter Text
+        self.pastes: dict[int, str] = {}   # eingefügte Texte hinter den Platzhaltern
+        self._paste_n = 0
+        self._ta_pending = b""         # angefangene Einfüge-Sequenz aus der Wartezeit
         self.cmds: list[str] = []      # Befehle (/…, exit), die den Zug beenden und als Nächstes laufen (nicht in der Warteschlange)
         self.live_cmd = None           # von cli gesetzt: führt einen Schrägstrich-Befehl sofort aus → "done" | "defer" | Prompt-Text
         self.hist: list[str] = [""]   # alles, was in die Scroll-Region geschrieben wurde (für PgUp)
@@ -234,6 +237,8 @@ class Screen:
         sys.stdout = _Out(self.real, self.lock, self._record)
         self.active = True
         self._layout(clear=True)
+        self.real.write("\033[?2004h")      # Bracketed Paste: Terminal/tmux markiert eingefügten Text (ESC[200~ … ESC[201~)
+        self.real.flush()
         try:
             self._old_winch = signal.signal(signal.SIGWINCH, lambda *_: self._resize())
         except (ValueError, OSError):
@@ -248,7 +253,7 @@ class Screen:
         self.active = False
         self._tick_stop.set()
         with self.lock:
-            self.real.write(f"\033[r\033[{self.rows};1H\033[0m\033[?25h\n")
+            self.real.write(f"\033[?2004l\033[r\033[{self.rows};1H\033[0m\033[?25h\n")
             self.real.flush()
         sys.stdout = self.real
         if self._old_winch is not None:
@@ -284,6 +289,27 @@ class Screen:
             self._repaint_region()      # nach Resize/Neuzeichnen den Verlauf wiederherstellen (sonst bleibt der Bereich leer)
         if self.queue or self._typed:
             self._draw_typeahead()
+
+    _PASTE_RE = re.compile(r"\[Pasted text #(\d+)(?: \+\d+ lines)?\]")
+
+    def paste_token(self, txt: str) -> str:
+        """Eingefügten Text: kurz = direkt, lang/mehrzeilig = Platzhalter wie in Claude Code (Inhalt wird beim Absenden eingesetzt)."""
+        txt = txt.replace("\r\n", "\n").replace("\r", "\n")
+        if "\n" not in txt and len(txt) <= 200:
+            return txt
+        self._paste_n += 1
+        n = self._paste_n
+        self.pastes[n] = txt
+        lines = txt.count("\n") + 1
+        return f"[Pasted text #{n} +{lines} lines]" if lines > 1 else f"[Pasted text #{n}]"
+
+    def expand_pastes(self, text: str) -> str:
+        def sub(m):
+            return self.pastes.get(int(m.group(1)), m.group(0))
+        out = self._PASTE_RE.sub(sub, text)
+        if not self._PASTE_RE.search(self._typed or ""):
+            self.pastes.clear()
+        return out
 
     def _resize(self) -> None:
         if not self.active:
@@ -627,7 +653,7 @@ class Screen:
                     draw()
                     continue
                 if kind == "text" or kind == "paste":
-                    txt = val.replace("\r\n", "\n").replace("\r", "\n") if kind == "paste" else val
+                    txt = self.paste_token(val) if kind == "paste" else val
                     buf = buf[:pos] + txt + buf[pos:]
                     pos += len(txt)
                     calc_sugg()
@@ -642,7 +668,9 @@ class Screen:
                         raise EOFError
                 elif val == "bs":
                     if pos:
-                        buf = buf[:pos - 1] + buf[pos:]; pos -= 1; calc_sugg()
+                        pm = re.search(r"\[Pasted text #\d+(?: \+\d+ lines)?\]$", buf[:pos])
+                        k = len(pm.group(0)) if pm else 1
+                        buf = buf[:pos - k] + buf[pos:]; pos -= k; calc_sugg()
                 elif val == "delete":
                     buf = buf[:pos] + buf[pos + 1:]; calc_sugg()
                 elif val == "left":
@@ -699,7 +727,7 @@ class Screen:
                 self.real.write(f"\033[{self._geom()[3]};1H\033[2K{c('❯ ', BOLD, ACCENT)}\0338")
                 self.real.flush()
             self.draw_status()
-        return buf
+        return self.expand_pastes(buf)
 
     def _sugg_line(self, sugg, sel) -> str:
         w = self.cols - 4
@@ -767,8 +795,23 @@ class Screen:
         """Tasten aus der Wartezeit verarbeiten. True = Esc (Abbruch) erkannt."""
         if data == b"\x1b":
             return True
-        data = data.replace(b"\x1b[200~", b"").replace(b"\x1b[201~", b"")
+        S, E = b"\x1b[200~", b"\x1b[201~"
+        data = self._ta_pending + data
+        self._ta_pending = b""
+        out = b""
         changed = False
+        while True:
+            i = data.find(S)
+            if i < 0:
+                out += data; break
+            j = data.find(E, i + len(S))
+            if j < 0:                       # Einfügen noch nicht zu Ende: beim nächsten Lesen weiter
+                out += data[:i]; self._ta_pending = data[i:]; break
+            out += data[:i]
+            self._typed += self.paste_token(data[i + len(S):j].decode("utf-8", "replace")); changed = True
+            data = data[j + len(E):]
+        data = out
+
         text = []
         i = 0
         while i < len(data):                      # Escape-Folgen (Pfeile, PgUp, …) überspringen
@@ -785,6 +828,7 @@ class Screen:
                 line = self._typed.strip()
                 self._typed = ""; changed = True
                 if line:
+                    line = self.expand_pastes(line)
                     low = line.lower()
                     is_cmd = line.startswith("/") or low in ("exit", "quit", ":q")
                     if is_cmd and self.live_cmd is not None:
