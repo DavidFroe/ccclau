@@ -122,6 +122,7 @@ class Screen:
         self._tick_stop = threading.Event()
         self._hint = ""          # Vorschlagsleiste (ersetzt kurz die Statusleiste)
         self._old_winch = None
+        self._esc_flush = False        # Esc gedrückt: Warteschlange auf einmal statt einzeln
         self.queue: list[str] = []     # während der Arbeit eingetippte Nachrichten (Warteschlange)
         self._typed = ""               # angefangener, noch nicht abgeschickter Text
         self.pastes: dict[int, str] = {}   # eingefügte Texte hinter den Platzhaltern
@@ -652,9 +653,15 @@ class Screen:
         top, bot, r1, rin, r2, rst = self._geom()
         if self.cmds:        # Befehl, der den Zug beendet hat (z.B. exit, /clear): zuerst ausführen
             return self.cmds.pop(0)
-        if self.queue:       # in der Wartezeit Eingetipptes: alles zusammen als ein Auftrag abarbeiten
-            txt = "\n\n".join(self.queue)
-            self.queue = []
+        flush, self._esc_flush = self._esc_flush, False
+        if self.queue:
+            # Zug normal beendet: Warteschlange Punkt für Punkt, jeder Eintrag ein eigener Zug.
+            # Nach Esc (Abbruch): die ganze Warteschlange auf einmal, als hätte man alles eingegeben und Enter gedrückt.
+            if flush:
+                txt = "\n\n".join(self.queue)
+                self.queue = []
+            else:
+                txt = self.queue.pop(0)
             self._draw_typeahead()
             return txt
         fd, old = self._raw()
@@ -868,6 +875,7 @@ class Screen:
     def _ta_feed(self, data: bytes) -> bool:
         """Tasten aus der Wartezeit verarbeiten. True = Esc (Abbruch) erkannt."""
         if data == b"\x1b":
+            self._esc_flush = True      # Esc: Warteschlange komplett in den nächsten Zug (siehe read_line)
             return True
         S, E = b"\x1b[200~", b"\x1b[201~"
         data = self._ta_pending + data
