@@ -36,6 +36,7 @@ from nano_claude_code.config import (
     HISTORY_FILE,
     MODELS,
     PERMISSION_MODES,
+    SESSIONS_DIR,
     calc_cost,
     ensure_dirs,
     load_config,
@@ -1703,6 +1704,15 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
             model=model,
             title=config.get("_session_title"),
         )
+        if _SNAPSHOT_NAME:
+            try:
+                save_session(
+                    state.messages, filename=_SNAPSHOT_NAME, turn_count=state.turn_count,
+                    total_input_tokens=state.total_input_tokens, total_output_tokens=state.total_output_tokens,
+                    model=model, title=config.get("_session_title"),
+                )
+            except Exception:
+                pass
 
 
 # ── Print mode (non-interactive text) ─────────────────────────────────────
@@ -1812,6 +1822,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 # ── Main entry ────────────────────────────────────────────────────────────
 
+_SNAPSHOT_NAME: str | None = None   # Sitzungs-Stand unter der Claude-Code-ID (komprimiert, inkl. der Arbeit in nano)
+
+
 def _load_resume_session(resume_arg: str) -> dict | None:
     """Load a session for --resume. 'latest' loads the most recent session.
 
@@ -1819,7 +1832,19 @@ def _load_resume_session(resume_arg: str) -> dict | None:
     """
     if resume_arg == "latest":
         return load_latest_session()
-    from nano_claude_code.cc_import import load_cc_session
+    from nano_claude_code.cc_import import load_cc_session, find_cc_session, _UUID
+    global _SNAPSHOT_NAME
+    if _UUID.match(resume_arg):
+        _SNAPSHOT_NAME = f"cc-{resume_arg}.json"
+        snap = SESSIONS_DIR / _SNAPSHOT_NAME
+        src = find_cc_session(resume_arg)
+        # nano-Stand bevorzugen: er ist komprimiert und enthält die Arbeit seit dem Import. Nur wenn das
+        # Claude-Code-Protokoll danach noch geändert wurde (andere Harness), gilt wieder das Protokoll.
+        if snap.exists() and not (src is not None and src.stat().st_mtime > snap.stat().st_mtime + 1):
+            try:
+                return load_session(str(snap))
+            except Exception:
+                pass
     cc = load_cc_session(resume_arg)
     if cc is not None:
         return cc
