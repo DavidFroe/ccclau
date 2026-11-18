@@ -4432,13 +4432,23 @@ _claude_exec_check() {
   if [[ -n "$tgt" && -e "$tgt" && ! -x "$tgt" ]]; then
     local a=""; read -r -p "   Ausführrecht setzen (chmod +x)? [J/n] " a
     if [[ ! "$a" =~ ^[nN] ]]; then
-      chmod +x "$tgt" 2>&1 && "$p" --version >/dev/null 2>&1 && { echo "   ✅ repariert: claude $("$p" --version 2>/dev/null)"; return 0; }
+      chmod +x "$tgt" 2>&1
+      "$p" --version >/dev/null 2>&1 && { echo "   ✅ repariert: claude $("$p" --version 2>/dev/null)"; return 0; }
+      echo "   chmod hat nicht gereicht (Datei evtl. unvollständig: $(stat -c %s "$tgt" 2>/dev/null) Bytes) — Neuinstallation nötig." >&2
     fi
   fi
   if [[ "${CLAU_OFFLINE:-0}" != "1" ]] && command -v npm >/dev/null 2>&1; then
     local a=""; read -r -p "   Claude Code neu installieren (npm install -g @anthropic-ai/claude-code)? [J/n] " a
     if [[ ! "$a" =~ ^[nN] ]]; then
-      npm install -g @anthropic-ai/claude-code && hash -r 2>/dev/null
+      # Überreste eines abgebrochenen Updates (.claude-code-XXXX) lassen npm mit ENOTEMPTY scheitern: erst wegräumen
+      local nr; nr="$(npm root -g 2>/dev/null)"
+      [[ -n "$nr" && -d "$nr/@anthropic-ai" ]] && rm -rf "$nr"/@anthropic-ai/.claude-code-* 2>/dev/null
+      if ! npm install -g @anthropic-ai/claude-code; then
+        echo "   npm-Installation scheiterte — entferne das kaputte Paket und versuche es noch einmal ..." >&2
+        [[ -n "$nr" && -d "$nr/@anthropic-ai/claude-code" ]] && rm -rf "$nr/@anthropic-ai/claude-code" "$nr"/@anthropic-ai/.claude-code-*
+        npm install -g @anthropic-ai/claude-code
+      fi
+      hash -r 2>/dev/null
       p="$(command -v claude 2>/dev/null)"
       [[ -n "$p" ]] && "$p" --version >/dev/null 2>&1 && { echo "   ✅ repariert: claude $("$p" --version 2>/dev/null)"; return 0; }
     fi
