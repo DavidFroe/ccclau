@@ -7,6 +7,7 @@ Features: auto-title generation, manual naming, search by title.
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -88,6 +89,7 @@ def save_session(
         "compactions": META["compactions"],
         "starts": META["starts"],
         "saved_at": datetime.now().isoformat(),
+        "cwd": os.getcwd(),
     }
     path.write_text(json.dumps(data, indent=2, default=str))
 

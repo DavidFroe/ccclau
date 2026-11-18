@@ -4920,12 +4920,14 @@ run_import_md() {
 # (Claude löst --resume gegen den Bucket des Arbeitsordners auf).
 session_action_menu() {
   local mstr cwd sid tokens name model preview epoch
-  IFS=$'\x1f' read -r mstr cwd sid tokens name model preview epoch <<< "$1"
+  local harness
+  IFS=$'\x1f' read -r mstr cwd sid tokens name model preview epoch harness <<< "$1"
   if [[ -d "$cwd" && "$cwd" != "$PWD" ]]; then
     cd "$cwd" || return 1
     CONFIG_FILE=".clau.conf"; CLI_MODEL_OVERRIDE=""; CLI_BACKEND_OVERRIDE=""
     load_config
   fi
+  [[ -n "${2:-}" ]] && CLI_BACKEND_OVERRIDE="$2"     # z.B. nano: Session mit anderem Harness öffnen
   local proj_dir; proj_dir="$(_claude_projects_dir)/$(_project_hash_for)"
   local cur; cur="$(_current_model_spec)"
   echo
@@ -5094,6 +5096,190 @@ choose_session_list() {
 
 choose_session_interactive() { choose_session_list here; }
 
+# Session von pi / atomic / opencode mit dem passenden Harness fortsetzen.
+# $1 = Scan-Zeile. Braucht ein owl-Modell (Modell vorher mit w im Hauptmenü wählen).
+_open_foreign_session() {
+  local mstr cwd sid tokens name model preview epoch harness
+  IFS=$'\x1f' read -r mstr cwd sid tokens name model preview epoch harness <<< "$1"
+  [[ -d "$cwd" ]] && cd "$cwd"
+  CLI_MODEL_OVERRIDE=""; CLI_BACKEND_OVERRIDE=""; CONFIG_FILE=".clau.conf"; load_config
+  local mdl; mdl="$(effective_model)"
+  [[ -n "$mdl" ]] || { ensure_model; mdl="$(effective_model)"; }
+  if ! is_owl_model "$mdl"; then
+    echo "$harness braucht ein owl-Modell — aktuell: ${mdl:-keins}. Im Hauptmenü mit w wählen." ; return 0
+  fi
+  case "$sid" in
+    pi:*|atomic:*)
+      local f="${sid#*:}"
+      CLI_BACKEND_OVERRIDE="${sid%%:*}"
+      _ensure_opencode_runtime || return 0
+      local model_arg
+      if [[ "${sid%%:*}" == pi ]]; then
+        _pi_sync_config; model_arg="$(_pi_model_arg "$mdl")"; _pi_env
+        echo "Setze pi-Session fort ..."; exec "$(_pi_bin)" --model "$model_arg" --session "$f"
+      else
+        _atomic_sync_config; model_arg="$(_atomic_model_arg "$mdl" 2>/dev/null || true)"; _atomic_env
+        echo "Setze atomic-Session fort ..."; exec "$(_atomic_bin)" ${model_arg:+--model "$model_arg"} --session "$f"
+      fi ;;
+    oc:*)
+      CLI_BACKEND_OVERRIDE=opencode
+      _ensure_opencode_runtime || return 0
+      _opencode_sync_config "$mdl"
+      echo "Setze opencode-Session fort ..."
+      exec opencode --model "$(_opencode_model_arg "$mdl")" --session "${sid#oc:}" ;;
+  esac
+}
+
+# tmux-Sitzung ohne zugehörige clau-Session: reinlinken oder beenden
+_tmux_session_action() {
+  local sn="$1" a y
+  echo
+  echo "tmux-Sitzung $sn:"
+  echo "  1) Reinlinken (anhängen)        [Enter]   — loslösen mit Strg-b d"
+  echo "  2) Beenden (kill-session)"
+  echo "  0) Zurück"
+  printf "Auswahl [0-2, Enter=1]: "; read -r a
+  case "${a:-1}" in
+    1) if [[ -n "${TMUX:-}" ]]; then tmux switch-client -t "=$sn"; else tmux attach -t "=$sn" || true; fi ;;
+    2) printf "Sitzung %s wirklich beenden? [j/N]: " "$sn"; read -r y
+       [[ "$y" =~ ^[jJyY] ]] && tmux kill-session -t "=$sn" && echo "✓ Beendet." ;;
+  esac
+}
+
+# Session-Browser (Taste m im Hauptmenü): erst dieses Verzeichnis, dann alle
+# tmux-Sitzungen, dann alle übrigen Sessions des Systems -- seitenweise.
+# Filter: t = nur tmux, m = Modell, h = Harness, a = zurücksetzen.
+# $1 = optional Startfilter "tmux".
+choose_sessions_browser() {
+  local f_tmux=0 f_model="" f_harn="" page=0 psize=10 msg=""
+  [[ "${1:-}" == "tmux" ]] && f_tmux=1
+  local SEP=$'\x1f' l
+  while true; do
+    # --- Daten frisch einlesen (tmux-Zustand ändert sich) ---
+    local here=() all=() tmrows=()
+    while IFS= read -r l; do [[ -n "$l" ]] && here+=("$l"); done < <(_here_sessions_scan)
+    while IFS= read -r l; do [[ -n "$l" ]] && all+=("$l"); done < <(_all_sessions_scan)
+    if _have tmux; then
+      while IFS= read -r l; do [[ -n "$l" ]] && tmrows+=("$l"); done < <(tmux ls -F '#{session_name}|#{session_created}|#{pane_current_path}' 2>/dev/null || true)
+    fi
+    local tmnames=" "; for l in "${tmrows[@]}"; do tmnames+="${l%%|*} "; done
+
+    # --- Gesamtliste mit Gruppen aufbauen ---
+    local items=() grp=() seen=" " sid cwd mstr
+    for l in "${here[@]}"; do
+      IFS=$SEP read -r _ _ sid _ <<< "$l"; seen+="$sid "
+      items+=("$l"); grp+=("Dieses Verzeichnis")
+    done
+    local row sn cre path tl found
+    for row in "${tmrows[@]}"; do
+      IFS='|' read -r sn cre path <<< "$row"
+      found=""
+      if [[ "$sn" == clau-* ]]; then
+        for l in "${all[@]}"; do
+          IFS=$SEP read -r _ _ sid _ <<< "$l"
+          if [[ "${sid:0:8}" == "${sn#clau-}" ]]; then found="$l"; break; fi
+        done
+      fi
+      if [[ -n "$found" ]]; then
+        IFS=$SEP read -r _ _ sid _ <<< "$found"
+        [[ "$seen" == *" $sid "* ]] && continue      # schon in der Verzeichnisliste (⧉)
+        seen+="$sid "; items+=("$found"); grp+=("tmux-Sitzungen")
+      else
+        tl="$(date -d "@$cre" '+%d.%m.%Y %H:%M' 2>/dev/null)${SEP}${path}${SEP}tmux:${sn}${SEP}0${SEP}⧉ ${sn}${SEP}-${SEP}${SEP}${cre}${SEP}tmux"
+        items+=("$tl"); grp+=("tmux-Sitzungen")
+      fi
+    done
+    for l in "${all[@]}"; do
+      IFS=$SEP read -r _ _ sid _ <<< "$l"
+      [[ "$seen" == *" $sid "* ]] && continue
+      seen+="$sid "; items+=("$l"); grp+=("Alle Verzeichnisse")
+    done
+
+    # --- Filter anwenden ---
+    local fi_items=() fi_grp=() i h m hl
+    for i in "${!items[@]}"; do
+      IFS=$SEP read -r _ cwd sid _ _ m _ _ h <<< "${items[$i]}"
+      if [[ "$f_tmux" == 1 ]]; then
+        [[ "$sid" == tmux:* || "$tmnames" == *" clau-${sid:0:8} "* ]] || continue
+      fi
+      if [[ -n "$f_model" ]]; then
+        [[ "${m,,}" == *"${f_model,,}"* ]] || continue
+      fi
+      if [[ -n "$f_harn" ]]; then
+        hl="$(_harness_label "$h")"
+        [[ "${hl,,}" == *"${f_harn,,}"* || "${h,,}" == *"${f_harn,,}"* ]] || continue
+      fi
+      fi_items+=("${items[$i]}"); fi_grp+=("${grp[$i]}")
+    done
+
+    local total="${#fi_items[@]}" pages
+    pages=$(( (total + psize - 1) / psize )); [[ "$pages" -lt 1 ]] && pages=1
+    [[ "$page" -ge "$pages" ]] && page=$((pages-1)); [[ "$page" -lt 0 ]] && page=0
+    local start=$((page*psize)) end=$((page*psize+psize))
+    [[ "$end" -gt "$total" ]] && end=$total
+
+    echo
+    echo "Sessions — Seite $((page+1))/$pages · $total Einträge   Filter: tmux=$([[ $f_tmux == 1 ]] && echo an || echo aus), Modell=${f_model:-alle}, Harness=${f_harn:-alle}"
+    [[ -n "$msg" ]] && { echo "$msg"; msg=""; }
+    if [[ "$total" -eq 0 ]]; then
+      echo "  (nichts gefunden — mit a Filter zurücksetzen)"
+    else
+      # Tabellenkopf einmal, Gruppenüberschriften bei Wechsel; Nummern global
+      local _tb; _tb="$(_session_table 1 "$((start+1))" "${fi_items[$start]}")"
+      echo "${_tb%%$'\n'*}"
+      local lastg="" k
+      for ((k=start; k<end; k++)); do
+        if [[ "${fi_grp[$k]}" != "$lastg" ]]; then lastg="${fi_grp[$k]}"; echo "  ── $lastg ──"; fi
+        _tb="$(_session_table 1 "$((k+1))" "${fi_items[$k]}")"
+        echo "${_tb#*$'\n'}"
+      done
+    fi
+    echo
+    printf "Auswahl [Nr, n=weiter, p=zurück, t=nur tmux, m=Modell, h=Harness, a=Filter weg, q<Nr>=mit ${CLAU_NANO_NAME} öffnen, k=tmux verwalten]: "
+    local c; read -r c
+    case "$c" in
+      "") return 0 ;;
+      n|N) [[ $((page+1)) -lt $pages ]] && page=$((page+1)) || msg="(letzte Seite)" ;;
+      p|P) [[ "$page" -gt 0 ]] && page=$((page-1)) || msg="(erste Seite)" ;;
+      t|T) f_tmux=$((1-f_tmux)); page=0 ;;
+      m|M) printf "Modell-Filter (Teil des Namens, z.B. sonnet, owl:137; leer = alle): "; read -r f_model; page=0 ;;
+      h|H) printf "Harness-Filter (claude, %s, opencode, atomic, pi; leer = alle): " "${CLAU_NANO_NAME}"; read -r f_harn; page=0 ;;
+      a|A) f_tmux=0; f_model=""; f_harn=""; page=0 ;;
+      k|K) choose_tmux_menu ;;
+      [qQ][0-9]*)
+        local qn="${c:1}"
+        if [[ "$qn" -ge 1 && "$qn" -le "$total" ]]; then
+          local qsid; IFS=$SEP read -r _ _ qsid _ <<< "${fi_items[$((qn-1))]}"
+          if [[ "$qsid" == pi:* || "$qsid" == atomic:* || "$qsid" == oc:* ]]; then msg="Gehört schon zu einem anderen Harness — normal mit der Nummer öffnen."
+          elif [[ "$qsid" == tmux:* ]]; then msg="tmux-Sitzung ohne Session-Datei — nicht mit ${CLAU_NANO_NAME} öffnbar."
+          else
+            echo "Hinweis: ${CLAU_NANO_NAME} braucht ein owl-Modell (im Menü mit w wählen); der Verlauf wird übernommen."
+            session_action_menu "${fi_items[$((qn-1))]}" nano
+          fi
+        else msg="Ungültige Nummer."; fi ;;
+      *)
+        if [[ "$c" =~ ^[0-9]+$ && "$c" -ge 1 && "$c" -le "$total" ]]; then
+          local pick="${fi_items[$((c-1))]}" psid
+          IFS=$SEP read -r _ _ psid _ <<< "$pick"
+          if [[ "$psid" == tmux:* ]]; then
+            _tmux_session_action "${psid#tmux:}"
+          elif [[ "$psid" == pi:* || "$psid" == atomic:* || "$psid" == oc:* ]]; then
+            ( _open_foreign_session "$pick" ) || true
+          else
+            local _mn; IFS=$SEP read -r _ cwd _ _ _mn _ <<< "$pick"
+            if [[ -z "${TMUX:-}" ]] && _tmux_running "$psid"; then
+              [[ -d "$cwd" ]] && cd "$cwd"
+              _tmux_wrap resume "$psid" "$_mn" || true
+            fi
+            session_action_menu "$pick"
+          fi
+        else
+          msg="Ungültige Auswahl."
+        fi ;;
+    esac
+  done
+}
+
 # Untermenü "Weitere Sessions"
 choose_sessions_menu() {
   echo
@@ -5114,7 +5300,7 @@ choose_sessions_menu() {
 
 # Session-Scan über ~/.claude/projects (alle Buckets) oder nur einen Bucket ($1).
 # Eine Zeile pro Session, Felder mit \x1f getrennt, neueste zuerst:
-#   mstr cwd sid tokens name model preview epoch
+#   mstr cwd sid tokens name model preview epoch harness
 # name:  clau-Titel > /rename-Titel (custom-title) > KI-Titel (ai-title) > erste Nachricht
 # model: von clau gemerkt (.clau-session-meta.json, z.B. "owl:120")
 #        sonst aus der letzten Antwort abgeleitet ("owl:?" = owl, ID unbekannt)
@@ -5245,18 +5431,23 @@ for bdir in buckets:
         m = meta.get(sid) or {}
         name = clean(titles.get(sid) or custom or ai or preview[:40] or "(leer)")
         sessions.append((mtime, cwd, sid, estimate_tokens(rows), name,
-                         clean(m.get("model") or model), preview))
+                         clean(m.get("model") or model), preview, clean(m.get("engine") or "claude")))
 
 # nano-Sessions (~/.nano_claude/sessions/*.json) nur in der Gesamtliste; sid = Dateiname
 ndir = os.path.expanduser("~/.nano_claude/sessions")
-if not only and os.path.isdir(ndir):
+here_cwd = ""
+if only:   # "nur dieses Verzeichnis": Bucket-Name -> echtes cwd der Nano-Sessions vergleichen
+    here_cwd = os.path.basename(only.rstrip("/"))
+if os.path.isdir(ndir):
     for fn in os.listdir(ndir):
-        if not fn.endswith(".json") or fn.startswith("_"):
+        if not fn.endswith(".json") or fn.startswith("_") or fn == "autosave_latest.json":
             continue
         npath = os.path.join(ndir, fn)
         data = load_json(npath)
         msgs = data.get("messages") or []
         if not msgs:
+            continue
+        if only and (not data.get("cwd") or data["cwd"].replace("/", "-") != here_cwd):
             continue
         preview = ""
         for m in msgs:
@@ -5271,18 +5462,88 @@ if not only and os.path.isdir(ndir):
             nm = os.path.getmtime(npath)
         except Exception:
             continue
-        sessions.append((nm, clean(data.get("cwd") or "(nano)"), fn, tokens, name, "", preview))
+        sessions.append((nm, clean(data.get("cwd") or "(nano)"), fn, tokens, name, "", preview, "nano"))
+
+# pi / atomic (gleiches Dateiformat: <agentdir>/sessions/<cwd>/<zeit>_<id>.jsonl) und opencode (SQLite)
+def _foreign_ok(cwd):
+    return (not only) or (cwd and cwd.replace("/", "-") == os.path.basename(only.rstrip("/")))
+
+home = os.path.expanduser("~")
+data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local/share")
+for label, base in (("pi", os.environ.get("CLAU_PI_HOME") or os.path.join(data_home, "clau/pi")),
+                    ("atomic", os.environ.get("CLAU_ATOMIC_HOME") or os.path.join(data_home, "clau/atomic"))):
+    sdir = os.path.join(base, "agent", "sessions")
+    if not os.path.isdir(sdir):
+        continue
+    for sub in os.listdir(sdir):
+        d1 = os.path.join(sdir, sub)
+        if not os.path.isdir(d1):
+            continue
+        for fn in os.listdir(d1):
+            if not fn.endswith(".jsonl"):
+                continue
+            path = os.path.join(d1, fn)
+            cwd, name, model, preview, chars = "", "", "", "", 0
+            try:
+                with open(path) as f:
+                    for line in f:
+                        try:
+                            d = json.loads(line)
+                        except Exception:
+                            continue
+                        t = d.get("type")
+                        if t == "session":
+                            cwd = d.get("cwd") or cwd
+                        elif t == "model_change" and d.get("modelId"):
+                            model = "owl:" + str(d["modelId"])
+                        elif t == "session_info" and d.get("name"):
+                            name = d["name"]
+                        elif t == "message":
+                            msg = d.get("message") or {}
+                            if msg.get("role") == "system":
+                                continue
+                            chars += len(json.dumps(msg.get("content"), ensure_ascii=False))
+                            if not preview and msg.get("role") == "user":
+                                c = msg.get("content")
+                                tx = c if isinstance(c, str) else first_text({"content": c})
+                                tx = clean(tx)
+                                if tx and not tx.startswith("<"):
+                                    preview = tx[:80]
+                mt = os.path.getmtime(path)
+            except Exception:
+                continue
+            if not _foreign_ok(cwd):
+                continue
+            sessions.append((mt, cwd or "(" + label + ")", label + ":" + path,
+                             int(chars / CHARS_PER_TOKEN) + OVERHEAD_TOKENS if chars else 0,
+                             clean(name or preview[:40] or "(leer)"), model, preview, label))
+
+ocdb = os.path.join(data_home, "opencode", "opencode.db")
+if os.path.isfile(ocdb):
+    try:
+        import sqlite3
+        con = sqlite3.connect("file:" + ocdb + "?mode=ro", uri=True, timeout=2)
+        for sid_, dir_, title_, upd, tin, tout in con.execute(
+                "select id, directory, title, time_updated, tokens_input, tokens_output from session where parent_id is null"):
+            if not _foreign_ok(dir_):
+                continue
+            mt = (upd or 0) / 1000.0 if (upd or 0) > 1e11 else float(upd or 0)
+            sessions.append((mt, dir_ or "(opencode)", "oc:" + sid_, int((tin or 0) + (tout or 0)),
+                             clean(title_ or "(leer)"), "", "", "opencode"))
+        con.close()
+    except Exception:
+        pass
 
 sessions.sort(key=lambda s: s[0], reverse=True)
 scan_json = os.environ.get("CLAU_SCAN_JSON") == "1"
-for mtime, cwd, sid, tokens, name, model, preview in sessions:
+for mtime, cwd, sid, tokens, name, model, preview, harness in sessions:
     mstr = time.strftime("%d.%m.%Y %H:%M", time.localtime(mtime))
     if scan_json:
         print(json.dumps({"mtime": mstr, "epoch": int(mtime), "cwd": cwd, "sid": sid,
-                          "tokens": tokens, "name": name, "model": model, "preview": preview},
+                          "tokens": tokens, "name": name, "model": model, "preview": preview, "harness": harness},
                          ensure_ascii=False))
     else:
-        print(SEP.join([mstr, cwd, sid, str(tokens), name, model, preview, str(int(mtime))]))
+        print(SEP.join([mstr, cwd, sid, str(tokens), name, model, preview, str(int(mtime)), harness]))
 PYEOF
 }
 
@@ -5614,22 +5875,29 @@ _pad() {
 }
 
 # Tabelle der Sessions. $1 = 1 → Ordner-Spalte, $2 = Startnummer, Rest = Scan-Zeilen
+_harness_label() {
+  case "${1:-claude}" in
+    claude|"") echo "Claude" ;;
+    nano) echo "${CLAU_NANO_NAME}" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# Spalten: Nr, Name(26), Harness(8), Modell(11), Zuletzt(9), Tokens(5) [, Ordner]
 _session_table() {
   local show_cwd="$1" i="$2"; shift 2
-  local l mstr cwd sid tokens name model preview epoch tok
-  if [[ "$show_cwd" == "1" ]]; then
-    printf "  %3s  %-28s %-14s %-11s %6s  %s\n" "" "Name" "Modell" "Zuletzt" "Tokens" "Ordner"
-  else
-    printf "  %3s  %-28s %-14s %-11s %6s\n" "" "Name" "Modell" "Zuletzt" "Tokens"
-  fi
+  local l mstr cwd sid tokens name model preview epoch harness tok
+  printf "  %3s  %-26s %-8s %-11s %-9s %5s" "" "Name" "Harness" "Modell" "Zuletzt" "Tok"
+  [[ "$show_cwd" == "1" ]] && printf "  %s" "Ordner"
+  echo
   local tm=""
   _have tmux && tm=" $( { tmux ls -F '#S' 2>/dev/null || true; } | tr '\n' ' ')"
   for l in "$@"; do
-    IFS=$'\x1f' read -r mstr cwd sid tokens name model preview epoch <<< "$l"
+    IFS=$'\x1f' read -r mstr cwd sid tokens name model preview epoch harness <<< "$l"
     if [[ "${tokens:-0}" -ge 1000 ]]; then tok="$(( tokens / 1000 ))k"; else tok="${tokens:-0}"; fi
     [[ "$tm" == *" clau-${sid:0:8} "* ]] && name="⧉ $name"
-    printf "  %3s  %s %s %s %6s" "$i)" "$(_pad "$name" 28)" "$(_pad "$(_model_label "$model")" 14)" \
-      "$(_pad "$(_rel_time "$epoch")" 11)" "$tok"
+    printf "  %3s  %s %s %s %s %5s" "$i)" "$(_pad "$name" 26)" "$(_pad "$(_harness_label "$harness")" 8)" \
+      "$(_pad "$(_model_label "$model")" 11)" "$(_pad "$(_rel_time "$epoch")" 9)" "$tok"
     [[ "$show_cwd" == "1" ]] && printf "  %s" "${cwd/#$HOME/\~}"
     echo
     ((i++))
@@ -6128,22 +6396,19 @@ interactive_start() {
     echo "$(t clau.menu.main.last_sessions)"
     _session_table 0 1 "${recent[@]}"
     [[ "${#intmux[@]}" -gt 0 ]] && echo "$(t clau.menu.main.tmux_hint)"
-    [[ "$nhere" -gt "${#recent[@]}" ]] && echo "$(t clau.menu.main.more_sessions "$nhere")"
   fi
+  echo "$(t clau.menu.main.more_sessions "$nhere")"
   echo
   echo "$(t clau.menu.main.new_session)"
-  echo "$(t clau.menu.main.more_sessions_menu)"
   echo "$(t clau.menu.main.switch_model)"
   echo "$(t clau.menu.main.switch_user "$QQ_USER")"
   echo "$(t clau.menu.main.tools_menu)"
   echo "$(t clau.menu.main.switch_backend "$(effective_backend)")"
   echo "$(t clau.menu.main.import_md)"
-  local ntm=0; _have tmux && ntm="$( { tmux ls 2>/dev/null || true; } | wc -l)"
-  echo "$(t clau.menu.main.tmux_menu "$ntm")"
   echo "$(t clau.menu.main.remote_menu)"
   echo "$(t clau.menu.main.settings)"
   echo "$(t clau.menu.main.quit)"
-  printf "$(t clau.menu.main.prompt "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")$([[ $nhere -gt ${#recent[@]} ]] && echo "m, ")n s w u x h i t f e q, Enter=n")"
+  printf "$(t clau.menu.main.prompt "$([[ ${#recent[@]} -gt 0 ]] && echo "1-${#recent[@]}, ")m n w u x h i f e q, Enter=n")"
   local c; read -r c
   case "${c:-n}" in
     [1-9])
@@ -6158,14 +6423,13 @@ interactive_start() {
       fi
       interactive_start ;;
     n|N) run_new_session_named ;;
-    s|S) choose_sessions_menu; interactive_start ;;
-    m|M) choose_session_list here; interactive_start ;;
+    s|S|m|M) choose_sessions_browser; interactive_start ;;
     w|W) choose_model_interactive; interactive_start ;;
     u|U) choose_user_interactive; interactive_start ;;
     x|X) choose_tools_menu; interactive_start ;;
     h|H) choose_backend_interactive; interactive_start ;;
     i|I) choose_import_md_interactive || interactive_start ;;
-    t|T) choose_tmux_menu; interactive_start ;;
+    t|T) choose_sessions_browser tmux; interactive_start ;;
     f|F) choose_remote_menu; interactive_start ;;
     e|E) choose_settings_menu; interactive_start ;;
     q|Q) exit 0 ;;
