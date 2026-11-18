@@ -35,6 +35,17 @@ CLAU_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 CLAU_NANO_NAME="${CLAU_NANO_NAME:-Qode}"
 CLAU_NANO_VERSION="${CLAU_NANO_VERSION:-0.0.1a}"
 export CLAU_NANO_NAME CLAU_NANO_VERSION
+
+# Release (von Hand hochzählen) + Revision (Anzahl Git-Commits und Kurz-Hash; ohne Git-Checkout "?")
+CLAU_RELEASE="1.0"
+_clau_revision() {
+  local d; d="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+  local n h
+  n="$(git -C "$d" rev-list --count HEAD 2>/dev/null)" || { echo "?"; return; }
+  h="$(git -C "$d" rev-parse --short HEAD 2>/dev/null)"
+  git -C "$d" diff --quiet HEAD -- 2>/dev/null || h+="+"
+  echo "$n ($h)"
+}
 OWL_PROXY_SCRIPT="$CLAU_DIR/owl_proxy.py"
 CC_COMPACT_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc_compact.py"
 WEBSEARCH_MCP_SCRIPT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/websearch_mcp.py"
@@ -2280,10 +2291,11 @@ run_nano_session() {
 
   # --force-context ist internes Flag — nicht an nano weiterleiten
   # --session-id kennt nano nicht (Claude-Code-Option) → samt Wert weglassen
-  local real_args=() skip=0
+  local real_args=() skip=0 _nsid_next=0
   for arg in "$@"; do
+    if [[ "$_nsid_next" -eq 1 ]]; then export NANO_SESSION_ID="$arg"; _nsid_next=0; fi
     if [[ "$skip" -eq 1 ]]; then skip=0; continue; fi
-    [[ "$arg" == "--session-id" ]] && { skip=1; continue; }
+    [[ "$arg" == "--session-id" ]] && { skip=1; _nsid_next=1; continue; }
     [[ "$arg" != "--force-context" ]] && real_args+=("$arg")
   done
 
@@ -5177,7 +5189,8 @@ choose_sessions_browser() {
       if [[ "$sn" == clau-* ]]; then
         for l in "${all[@]}"; do
           IFS=$SEP read -r _ _ sid _ <<< "$l"
-          if [[ "${sid:0:8}" == "${sn#clau-}" ]]; then found="$l"; break; fi
+          local _b8="${sid#cc-}"
+          if [[ "${_b8:0:8}" == "${sn#clau-}" ]]; then found="$l"; break; fi
         done
       fi
       if [[ -n "$found" ]]; then
@@ -5185,7 +5198,11 @@ choose_sessions_browser() {
         [[ "$seen" == *" $sid "* ]] && continue      # schon in der Verzeichnisliste (⧉)
         seen+="$sid "; items+=("$found"); grp+=("tmux-Sitzungen")
       else
-        tl="$(date -d "@$cre" '+%d.%m.%Y %H:%M' 2>/dev/null)${SEP}${path}${SEP}tmux:${sn}${SEP}0${SEP}⧉ ${sn}${SEP}-${SEP}${SEP}${cre}${SEP}tmux"
+        local tnm="" tsh="${XDG_CACHE_HOME:-$HOME/.cache}/clau/tmux/$sn.sh"
+        # Name der Sitzung aus dem tmux-Startskript (auch wenn noch keine Session-Datei existiert)
+        [[ -r "$tsh" ]] && tnm="$( eval "$(sed -n '3p' "$tsh")" 2>/dev/null; printf '%s' "${name:-}" )"
+        [[ -n "$tnm" ]] && tnm="$tnm ($sn)" || tnm="$sn"
+        tl="$(date -d "@$cre" '+%d.%m.%Y %H:%M' 2>/dev/null)${SEP}${path}${SEP}tmux:${sn}${SEP}0${SEP}⧉ ${tnm}${SEP}-${SEP}${SEP}${cre}${SEP}tmux"
         items+=("$tl"); grp+=("tmux-Sitzungen")
       fi
     done
@@ -5200,7 +5217,7 @@ choose_sessions_browser() {
     for i in "${!items[@]}"; do
       IFS=$SEP read -r _ cwd sid _ _ m _ _ h <<< "${items[$i]}"
       if [[ "$f_tmux" == 1 ]]; then
-        [[ "$sid" == tmux:* || "$tmnames" == *" clau-${sid:0:8} "* ]] || continue
+        local _f8="${sid#cc-}"; [[ "$sid" == tmux:* || "$tmnames" == *" clau-${_f8:0:8} "* ]] || continue
       fi
       if [[ -n "$f_model" ]]; then
         [[ "${m,,}" == *"${f_model,,}"* ]] || continue
@@ -5235,10 +5252,10 @@ choose_sessions_browser() {
       done
     fi
     echo
-    printf "Auswahl [Nr, n=weiter, p=zurück, t=nur tmux, m=Modell, h=Harness, a=Filter weg, q<Nr>=mit ${CLAU_NANO_NAME} öffnen, k=tmux verwalten]: "
+    printf "Auswahl [Nr, n=weiter, p=zurück, t=nur tmux, m=Modell, h=Harness, a=Filter weg, q<Nr>=mit ${CLAU_NANO_NAME} öffnen, k=tmux verwalten, 0=Hauptmenü]: "
     local c; read -r c
     case "$c" in
-      "") return 0 ;;
+      ""|0|z|Z) return 0 ;;
       n|N) [[ $((page+1)) -lt $pages ]] && page=$((page+1)) || msg="(letzte Seite)" ;;
       p|P) [[ "$page" -gt 0 ]] && page=$((page-1)) || msg="(erste Seite)" ;;
       t|T) f_tmux=$((1-f_tmux)); page=0 ;;
@@ -5434,6 +5451,7 @@ for bdir in buckets:
                          clean(m.get("model") or model), preview, clean(m.get("engine") or "claude")))
 
 # nano-Sessions (~/.nano_claude/sessions/*.json) nur in der Gesamtliste; sid = Dateiname
+claude_sids = {x[2] for x in sessions}
 ndir = os.path.expanduser("~/.nano_claude/sessions")
 here_cwd = ""
 if only:   # "nur dieses Verzeichnis": Bucket-Name -> echtes cwd der Nano-Sessions vergleichen
@@ -5442,6 +5460,8 @@ if os.path.isdir(ndir):
     for fn in os.listdir(ndir):
         if not fn.endswith(".json") or fn.startswith("_") or fn == "autosave_latest.json":
             continue
+        if fn.startswith("cc-") and fn[3:-5] in claude_sids:
+            continue            # dieselbe Session steht schon als Claude-Eintrag (Harness aus .clau-session-meta)
         npath = os.path.join(ndir, fn)
         data = load_json(npath)
         msgs = data.get("messages") or []
@@ -5895,7 +5915,8 @@ _session_table() {
   for l in "$@"; do
     IFS=$'\x1f' read -r mstr cwd sid tokens name model preview epoch harness <<< "$l"
     if [[ "${tokens:-0}" -ge 1000 ]]; then tok="$(( tokens / 1000 ))k"; else tok="${tokens:-0}"; fi
-    [[ "$tm" == *" clau-${sid:0:8} "* ]] && name="⧉ $name"
+    local _s8="${sid#cc-}"
+    [[ "$tm" == *" clau-${_s8:0:8} "* ]] && name="⧉ $name"
     printf "  %3s  %s %s %s %s %5s" "$i)" "$(_pad "$name" 26)" "$(_pad "$(_harness_label "$harness")" 8)" \
       "$(_pad "$(_model_label "$model")" 11)" "$(_pad "$(_rel_time "$epoch")" 9)" "$tok"
     [[ "$show_cwd" == "1" ]] && printf "  %s" "${cwd/#$HOME/\~}"
@@ -6391,6 +6412,7 @@ interactive_start() {
   [[ "${#recent[@]}" -gt 9 ]] && recent=("${recent[@]:0:9}")
 
   echo
+  echo "clau Release $CLAU_RELEASE · Revision $(_clau_revision)"
   echo "$(t clau.menu.main.header "$(basename "$(pwd)")" "$tag" "$(effective_backend)" "$QQ_USER")"
   if [[ "${#recent[@]}" -gt 0 ]]; then
     echo "$(t clau.menu.main.last_sessions)"

@@ -1882,7 +1882,13 @@ def _load_resume_session(resume_arg: str) -> dict | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _SNAPSHOT_NAME
     args = build_parser().parse_args(argv)
+    # Neue Sitzung von clau mit fester ID: unter cc-<id>.json sichern, damit sie nicht von der nächsten
+    # Sitzung in autosave_latest.json überschrieben wird (beim Fortsetzen setzt _load_resume_session den Namen).
+    _sid_env = os.environ.get("NANO_SESSION_ID", "").strip()
+    if _sid_env and not args.resume and re.fullmatch(r"[0-9a-fA-F-]{36}", _sid_env):
+        _SNAPSHOT_NAME = f"cc-{_sid_env}.json"
 
     if args.version:
         from nano_claude_code import __version__
