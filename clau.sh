@@ -4415,6 +4415,22 @@ _claude_exec_check() {
   err="$("$p" --version 2>&1)" && return 0
   echo "⚠️  claude lässt sich nicht starten: $p" >&2
   [[ -n "$err" ]] && echo "   Fehler: ${err%%$'\n'*}" >&2
+  if [[ "$err" == *"native binary not installed"* ]]; then
+    # npm hat das Paket ohne Postinstall installiert (ignore-scripts / --omit=optional): Postinstall nachholen
+    local pk="" ic=""
+    for pk in "$(dirname "$tgt" 2>/dev/null)/.." "$(dirname "$(dirname "$tgt" 2>/dev/null)")" "$(npm root -g 2>/dev/null)/@anthropic-ai/claude-code"; do
+      [[ -f "$pk/install.cjs" ]] && { ic="$pk/install.cjs"; break; }
+    done
+    echo "   Die native Programmdatei fehlt: das Postinstall-Skript des npm-Pakets ist nicht gelaufen." >&2
+    echo "   (npm ignore-scripts=$(npm config get ignore-scripts 2>/dev/null), omit=$(npm config get omit 2>/dev/null))" >&2
+    if [[ -n "$ic" ]] && command -v node >/dev/null 2>&1; then
+      local a=""; read -r -p "   Postinstall jetzt nachholen (node $ic)? [J/n] " a
+      if [[ ! "$a" =~ ^[nN] ]]; then
+        node "$ic" && hash -r 2>/dev/null
+        "$p" --version >/dev/null 2>&1 && { echo "   ✅ repariert: claude $("$p" --version 2>/dev/null)"; return 0; }
+      fi
+    fi
+  fi
   if [[ -z "$tgt" || ! -e "$tgt" ]]; then
     echo "   Der Link zeigt ins Leere (Ziel fehlt)." >&2
   else
@@ -4443,10 +4459,10 @@ _claude_exec_check() {
       # Überreste eines abgebrochenen Updates (.claude-code-XXXX) lassen npm mit ENOTEMPTY scheitern: erst wegräumen
       local nr; nr="$(npm root -g 2>/dev/null)"
       [[ -n "$nr" && -d "$nr/@anthropic-ai" ]] && rm -rf "$nr"/@anthropic-ai/.claude-code-* 2>/dev/null
-      if ! npm install -g @anthropic-ai/claude-code; then
+      if ! npm install -g --foreground-scripts --ignore-scripts=false --include=optional @anthropic-ai/claude-code; then
         echo "   npm-Installation scheiterte — entferne das kaputte Paket und versuche es noch einmal ..." >&2
         [[ -n "$nr" && -d "$nr/@anthropic-ai/claude-code" ]] && rm -rf "$nr/@anthropic-ai/claude-code" "$nr"/@anthropic-ai/.claude-code-*
-        npm install -g @anthropic-ai/claude-code
+        npm install -g --foreground-scripts --ignore-scripts=false --include=optional @anthropic-ai/claude-code
       fi
       hash -r 2>/dev/null
       p="$(command -v claude 2>/dev/null)"
@@ -4460,9 +4476,10 @@ _claude_exec_check() {
 # claude starten (ersetzt "exec claude"): scheitert schon der Start (126 = nicht ausführbar, 127 = nicht gefunden),
 # wird die Ursache gezeigt und die Reparatur angeboten, danach startet claude erneut. Sonst Rückgabewert von claude.
 _exec_claude() {
-  local rc=0
+  local rc=0 t0=$SECONDS
   claude "$@" || rc=$?       # set -e: Rückgabewert bewusst abfangen
-  if [[ $rc -eq 126 || $rc -eq 127 ]]; then
+  # 126/127: nicht startbar. Exit 1 innerhalb von 3 s: möglicherweise unvollständige Installation (Postinstall fehlt)
+  if [[ $rc -eq 126 || $rc -eq 127 ]] || { [[ $rc -eq 1 ]] && (( SECONDS - t0 < 3 )) && ! claude --version >/dev/null 2>&1; }; then
     echo >&2
     if _claude_exec_check; then
       rc=0; claude "$@" || rc=$?
