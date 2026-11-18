@@ -3,7 +3,7 @@
   "clau.menu.main.import_md": "   i) Markdown importieren         (neue Session aus Datei)",
   "clau.menu.main.invalid": "Ungültige Auswahl.",
   "clau.menu.main.last_sessions": "  Letzte Sessions hier:",
-  "clau.menu.main.more_sessions": "   m) mehr …                       (alle %d Sessions in diesem Verzeichnis)",
+  "clau.menu.main.more_sessions": "   m) Sessions …                   (%d hier · tmux · alle auf dem System; Filter, Blättern)",
   "clau.menu.main.more_sessions_menu": "   s) Weitere Sessions …           (alle hier / alle auf dem System / laufende)",
   "clau.menu.main.new_session": "   n) Neue Session                 [Enter]",
   "clau.menu.main.prompt": "Auswahl [%s]: ",
