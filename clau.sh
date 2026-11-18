@@ -4404,7 +4404,65 @@ _pi_env() {
 # "Auto-update failed · Run claude doctor" kommt von Claude Code, nicht von
 # clau -- meist ist beim Auto-Update das Netz weggebrochen. Beides hier
 # erreichbar, damit man nicht erst eine Shell braucht.
+# Startet die claude-Datei überhaupt? ("Permission denied" nach abgebrochenem npm-Update, noexec-Mount, kaputter Link)
+# Prüft, nennt die Ursache und bietet die Reparatur an. Rückgabe 0 = claude startet.
+_claude_exec_check() {
+  local p tgt err
+  p="$(command -v claude 2>/dev/null)"
+  [[ -z "$p" && -e "${NPM_CONFIG_PREFIX:-$HOME/.npm-global}/bin/claude" ]] && p="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}/bin/claude"
+  [[ -n "$p" ]] || { echo "claude nicht gefunden (PATH und ~/.npm-global/bin geprüft)." >&2; return 1; }
+  tgt="$(readlink -f "$p" 2>/dev/null)"
+  err="$("$p" --version 2>&1)" && return 0
+  echo "⚠️  claude lässt sich nicht starten: $p" >&2
+  [[ -n "$err" ]] && echo "   Fehler: ${err%%$'\n'*}" >&2
+  if [[ -z "$tgt" || ! -e "$tgt" ]]; then
+    echo "   Der Link zeigt ins Leere (Ziel fehlt)." >&2
+  else
+    echo "   Ziel: $tgt   Rechte: $(stat -c '%A %U' "$tgt" 2>/dev/null)" >&2
+    [[ -x "$tgt" ]] || echo "   Das Ziel ist nicht ausführbar (x-Recht fehlt)." >&2
+    local sb="" ip=""; IFS= read -r sb < "$tgt" 2>/dev/null || true
+    if [[ "$sb" == "#!"* ]]; then
+      set -- ${sb#\#!}; ip="$1"; [[ "$ip" == */env ]] && ip="$(command -v "${2:-node}" 2>/dev/null)"
+      if [[ -z "$ip" ]]; then echo "   Der Interpreter aus dem Shebang (${sb#\#!}) wurde nicht gefunden (z. B. node fehlt im PATH)." >&2
+      elif [[ ! -x "$ip" ]]; then echo "   Der Interpreter $ip ist nicht ausführbar." >&2; fi
+    fi
+    local mp; mp="$(findmnt -n -o TARGET,OPTIONS -T "$tgt" 2>/dev/null)"
+    [[ "$mp" == *noexec* ]] && echo "   Das Dateisystem ist mit noexec eingehängt: $mp" >&2
+  fi
+  if [[ -n "$tgt" && -e "$tgt" && ! -x "$tgt" ]]; then
+    local a=""; read -r -p "   Ausführrecht setzen (chmod +x)? [J/n] " a
+    if [[ ! "$a" =~ ^[nN] ]]; then
+      chmod +x "$tgt" 2>&1 && "$p" --version >/dev/null 2>&1 && { echo "   ✅ repariert: claude $("$p" --version 2>/dev/null)"; return 0; }
+    fi
+  fi
+  if [[ "${CLAU_OFFLINE:-0}" != "1" ]] && command -v npm >/dev/null 2>&1; then
+    local a=""; read -r -p "   Claude Code neu installieren (npm install -g @anthropic-ai/claude-code)? [J/n] " a
+    if [[ ! "$a" =~ ^[nN] ]]; then
+      npm install -g @anthropic-ai/claude-code && hash -r 2>/dev/null
+      p="$(command -v claude 2>/dev/null)"
+      [[ -n "$p" ]] && "$p" --version >/dev/null 2>&1 && { echo "   ✅ repariert: claude $("$p" --version 2>/dev/null)"; return 0; }
+    fi
+  fi
+  echo "   Nicht behoben. Von Hand prüfen:  ls -lL $p ; readlink -f $p" >&2
+  return 1
+}
+
+# claude starten (ersetzt "exec claude"): scheitert schon der Start (126 = nicht ausführbar, 127 = nicht gefunden),
+# wird die Ursache gezeigt und die Reparatur angeboten, danach startet claude erneut. Sonst Rückgabewert von claude.
+_exec_claude() {
+  local rc=0
+  claude "$@" || rc=$?       # set -e: Rückgabewert bewusst abfangen
+  if [[ $rc -eq 126 || $rc -eq 127 ]]; then
+    echo >&2
+    if _claude_exec_check; then
+      rc=0; claude "$@" || rc=$?
+    fi
+  fi
+  exit "$rc"
+}
+
 claude_doctor() {
+  _claude_exec_check || return 1
   _have claude || { echo "claude nicht gefunden." >&2; return 1; }
   echo "Claude Code $(claude --version 2>/dev/null) — $(command -v claude)"
   echo "Starte 'claude doctor' (Beenden mit Enter/Esc) ..."
@@ -5645,7 +5703,7 @@ run_resume_picker() {
   _team_cc_args_fill
   # shellcheck disable=SC2086
   _reset_cc_context_env
-  exec claude --resume --model "$(claude_cli_model "$mdl")" $extra "${TEAM_CC_ARGS[@]}"
+  _exec_claude --resume --model "$(claude_cli_model "$mdl")" $extra "${TEAM_CC_ARGS[@]}"
 }
 
 run_saved_session() {
@@ -5673,7 +5731,7 @@ run_saved_session() {
   _team_cc_args_fill
   # shellcheck disable=SC2086
   _reset_cc_context_env
-  exec claude --resume "$CLAU_SESSION_ID" --model "$(claude_cli_model "$mdl")" $extra "${TEAM_CC_ARGS[@]}"
+  _exec_claude --resume "$CLAU_SESSION_ID" --model "$(claude_cli_model "$mdl")" $extra "${TEAM_CC_ARGS[@]}"
 }
 
 run_new_session() {
@@ -5702,7 +5760,7 @@ run_new_session() {
   _team_cc_args_fill
   # shellcheck disable=SC2086
   _reset_cc_context_env
-  exec claude --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}" "${NEW_SESSION_ARGS[@]}" "${TEAM_CC_ARGS[@]}"
+  _exec_claude --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}" "${NEW_SESSION_ARGS[@]}" "${TEAM_CC_ARGS[@]}"
 }
 
 # Setzt eine konkrete Session-ID fort (z.B. nach custom-compact)
@@ -5755,7 +5813,7 @@ run_resume_id() {
   _team_cc_args_fill
   # shellcheck disable=SC2086
   _reset_cc_context_env
-  exec claude --resume "$rid" --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}" "${TEAM_CC_ARGS[@]}"
+  _exec_claude --resume "$rid" --model "$(claude_cli_model "$mdl")" $extra "${api_args[@]}" "${API_PROMPT_ARGS[@]}" "${TEAM_CC_ARGS[@]}"
 }
 
 # Custom-Compact: komprimiert die aktuelle Session extern via QuiteQue (cc_compact.py)
@@ -5953,7 +6011,7 @@ EOF
       apply_tg_hooks
     fi
     _reset_cc_context_env
-    exec claude --model "$(claude_cli_model "${CLAU_MODEL}")"
+    _exec_claude --model "$(claude_cli_model "${CLAU_MODEL}")"
   )
 }
 

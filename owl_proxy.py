@@ -632,7 +632,7 @@ class StreamTranslator:
                 # _stream fragt einmal neu an. Erst wenn auch das leer bleibt, kommt der Hinweis.
                 self.empty_pending = True
                 return "".join(out)
-            if (self.len_retry_ok and finish_reason == "length" and self.thinking_started
+            if (self.len_retry_ok and finish_reason in ("length", "stop") and self.thinking_started
                     and not self.text_started and not self.tool_buffers):
                 # Token-Limit komplett im Denken verbraucht: Denkblock bleibt offen,
                 # _stream fragt einmal mit gedrosselter Denktiefe neu an.
@@ -1002,7 +1002,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 # Denken hat das ganze Token-Limit aufgebraucht: kurz denken, direkt antworten.
                 pl = dict(oai_payload)
                 pl["reasoning_effort"] = "low"
-                hinweis = ("Dein bisheriges Nachdenken hat das gesamte Token-Limit verbraucht, ohne dass eine Antwort entstand. "
+                hinweis = ("Dein bisheriges Nachdenken hat keine Antwort ergeben (Token-Limit verbraucht oder ohne Ausgabe beendet). "
                            "Denke jetzt höchstens kurz nach und liefere SOFORT die Antwort bzw. den nächsten Tool-Aufruf. "
                            "Große Aufgaben in kleine Schritte zerlegen und nur den ersten Schritt ausführen.")
                 # System-Nachrichten nur am Anfang (Chat-Templates lehnen sie sonst ab: "System message must be at the beginning")
@@ -1198,7 +1198,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if tr.len_pending and len_retry_fn is not None:
                     tr.len_pending = False
                     tr.len_retry_ok = False
-                    log(f"  Token-Limit im Denken verbraucht (model={tr.target}) -- einmaliger Retry mit reasoning_effort=low")
+                    log(f"  Nur Denken, keine Antwort (model={tr.target}) -- einmaliger Retry mit reasoning_effort=low")
                     try:
                         owl_resp.close()
                     except Exception:
