@@ -618,7 +618,7 @@ class Screen:
                         yield ("key", name)
                     continue
                 if data[1:2] == b"O" and len(data) >= 3:
-                    name = {b"H": "home", b"F": "end"}.get(data[2:3])
+                    name = {b"H": "home", b"F": "end", b"A": "up", b"B": "down", b"C": "right", b"D": "left"}.get(data[2:3])
                     data = data[3:]
                     if name:
                         yield ("key", name)
