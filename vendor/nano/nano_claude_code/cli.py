@@ -234,13 +234,91 @@ def _cmd_clear(_args: str, state: AgentState, _config: dict) -> bool:
 
 
 def _cmd_model(args: str, _state: AgentState, config: dict) -> bool:
-    if not args.strip():
+    """Modell wählen: öffnet dasselbe Menü wie clau (clau --pick-model). Der Proxy erkennt "owl-<ID>" und
+    leitet die Anfragen ab sofort an dieses Modell; Kontextfenster und Anzeige werden mitgezogen."""
+    import shlex
+    import subprocess
+    import tempfile
+    cmd = os.environ.get("NANO_PICK_MODEL_CMD", "").strip()
+    if not cmd:
         _info(_("nano.msg.model_current", config['model']))
-        _info(_("nano.msg.model_available") + "\n" + "\n".join(f"  {m}" for m in MODELS))
-    else:
-        config["model"] = args.strip()
-        save_config(config)
-        _ok(_("nano.msg.model_set", config['model']))
+        _info("Modellwahl nur über clau (starten mit clau → Qode).")
+        return True
+    out = tempfile.mktemp(prefix="qode-model-")
+    spec = args.strip()
+    if spec and not spec.startswith("owl:") and spec.replace("-", "").isalnum():
+        spec = "owl:" + spec
+    try:
+        subprocess.run(shlex.split(cmd) + [out] + ([spec] if spec else []), check=False)
+        line = open(out, encoding="utf-8").read().strip()
+    except Exception:
+        _info("Modellwahl abgebrochen.")
+        return True
+    finally:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+    chosen, _, ctx = line.partition("\t")
+    if not chosen.startswith("owl:"):
+        _info(f"{chosen or '(nichts)'}: Qode läuft nur mit owl-Modellen — nicht gewechselt.")
+        return True
+    owl_id = chosen[4:]
+    config["model"] = f"owl-{owl_id}"
+    os.environ["NANO_MODEL_LABEL"] = chosen
+    if ctx.strip().isdigit():
+        os.environ["NANO_CONTEXT_WINDOW"] = ctx.strip()
+        try:
+            import nano_claude_code.agent as _ag
+            import nano_claude_code.openai_compat as _oc
+            _ag.CONTEXT_WINDOW_TOKENS = _oc.CONTEXT_WINDOW_TOKENS = int(ctx)
+        except Exception:
+            pass
+    _ok(f"Modell: {chosen}" + (f"  (Kontext {int(ctx)//1000}k)" if ctx.strip().isdigit() else ""))
+    return True
+
+
+def _cmd_compress(args: str, _state: AgentState, _config: dict) -> bool:
+    """Wer komprimiert? harness = Qode selbst (Auto-Compact) · claw = QuiteQue-claw-compactor (Qode nur als
+    Notbremse bei 95 %) · beide. Gilt sofort für diese Sitzung (Proxy-Schalter + Schwelle)."""
+    import json as _json
+    import re as _re
+    import urllib.request
+    modes = {"1": "harness", "2": "claw", "3": "beide", "harness": "harness", "claw": "claw", "beide": "beide"}
+    cur = os.environ.get("NANO_COMPACT_MODE", "harness")
+    arg = args.strip().lower()
+    if arg not in modes:
+        print(f"  Wer komprimiert?  (jetzt: {cur})")
+        print("    1) harness  Qode selbst (integriertes Auto-Compact)")
+        print("    2) claw     QuiteQue claw-compactor kürzt jede Anfrage, Qode nur als Notbremse bei 95 %")
+        print("    3) beide    claw-compactor + Auto-Compact")
+        try:
+            arg = input("  Auswahl [1-3, Enter=abbrechen]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            arg = ""
+        if arg not in modes:
+            return True
+    mode = modes[arg]
+    # Proxy-Schalter über den Steuerport (Token steht in der Registry-Datei des Proxys)
+    port = (_re.search(r":(\d+)", os.environ.get("ANTHROPIC_BASE_URL", "")) or [None, ""])[1]
+    ok = False
+    try:
+        reg = _json.load(open(os.path.expanduser(f"~/.cache/clau/proxies/{port}.json")))
+        rq = urllib.request.Request(f"http://127.0.0.1:{reg['steuerung']}/claw", method="POST",
+                                    data=_json.dumps({"aktiv": mode != "harness"}).encode(),
+                                    headers={"X-Clau-Token": reg["token"], "Content-Type": "application/json"})
+        urllib.request.urlopen(rq, timeout=5).read()
+        ok = True
+    except Exception as e:
+        _info(f"claw-compactor ließ sich nicht umschalten ({e}).")
+    try:
+        import nano_claude_code.agent as _ag
+        pct = 95.0 if mode == "claw" else float(os.environ.get("NANO_COMPACT_PCT_BASE") or 80)
+        _ag.COMPACTION_THRESHOLD = pct / 100
+    except Exception:
+        pass
+    os.environ["NANO_COMPACT_MODE"] = mode
+    _ok(f"Komprimieren: {mode}" + ("" if ok or mode == "harness" else "  (nur Schwelle geändert)"))
     return True
 
 
@@ -1107,6 +1185,7 @@ _COMMANDS: dict[str, Any] = {
     "history": _cmd_history,
     # Model
     "model": _cmd_model,
+    "compress": _cmd_compress,
     "thinking": _cmd_thinking,
     "verbose": _cmd_verbose,
     # Navigation
@@ -1183,7 +1262,8 @@ _CMD_META: dict[str, tuple[str, str]] = {
     "load":        ("Session",    "Load a saved session"),
     "export":      ("Session",    "Export conversation as markdown"),
     "history":     ("Session",    "Print conversation message summary"),
-    "model":       ("Model",      "Show or change the model"),
+    "model":       ("Model",      "Choose model (same menu as clau)"),
+    "compress":    ("Session",    "Who compresses: harness / claw / both"),
     "thinking":    ("Model",      "Toggle extended thinking mode"),
     "verbose":     ("Model",      "Toggle verbose output"),
     "cwd":         ("Navigate",   "Show or change working directory"),

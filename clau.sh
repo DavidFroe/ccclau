@@ -2343,10 +2343,12 @@ print((u + "/" + d["fork"]) if d.get("fork") and u else "")' "$_gi" 2>/dev/null)
   NANO_TOOLS="$nano_tools" \
   NANO_CONTEXT_WINDOW="${cw:-200000}" \
   NANO_COMPACT_LLM="${CLAU_COMPACT_LLM:-1}" \
-  NANO_COMPACT_PCT="$(compact_pct_effektiv)" \
+  NANO_COMPACT_PCT="$(compact_pct_effektiv)" NANO_COMPACT_PCT_BASE="${CLAU_AUTO_COMPACT_PCT:-80}" \
+  NANO_COMPACT_MODE="${CLAU_COMPACT_MODE:-harness}" \
   NANO_COMPACT_MODEL="${CLAU_COMPACT_MODEL:-}" \
   NANO_API_LABEL="QuiteQue ${OWL_BASE_URL#http://}" \
   NANO_MODEL_LABEL="owl:${owl_id}" \
+  NANO_PICK_MODEL_CMD="bash $(printf %q "$(readlink -f "$0")") --pick-model" \
   NANO_EFFORT_LABEL="${OWL_REASONING_EFFORT:-auto}" \
   NANO_APPEND_SYSTEM_PROMPT_FILE="$hint" \
   ANTHROPIC_BASE_URL="http://127.0.0.1:${port}" \
@@ -6847,6 +6849,13 @@ parse_args() {
         echo "Feste Session-ID entfernt."
         exit 0
         ;;
+      --pick-model)
+        # Für Qode (/model): Modellmenü von clau zeigen und die Wahl in eine Datei schreiben:
+        #   --pick-model <Datei> [<owl:ID>]   (mit ID kein Menü, nur Kontextgröße ermitteln)
+        ACTION="pick-model"; PICK_MODEL_FILE="${2:-}"; PICK_MODEL_SPEC="${3:-}"
+        [[ -n "$PICK_MODEL_FILE" ]] || { echo "--pick-model erwartet eine Ausgabedatei" >&2; exit 1; }
+        shift $(( $# >= 3 ? 3 : $# ))
+        ;;
       --gui)
         ACTION="gui"
         shift
@@ -7201,6 +7210,13 @@ case "${ACTION}" in
     ;;
   api-stop)
     api_daemon_stop
+    ;;
+  pick-model)
+    # Nichts dauerhaft ändern: Wahl gilt nur für die laufende Qode-Sitzung
+    save_config() { :; }
+    if [[ -n "$PICK_MODEL_SPEC" ]]; then normalize_model_name "$PICK_MODEL_SPEC"; CLAU_MODEL="$CLI_MODEL_OVERRIDE"; else choose_model_interactive; fi
+    _pm_id="${CLAU_MODEL#owl:}"
+    printf '%s\t%s\n' "$CLAU_MODEL" "$(is_owl_model "$CLAU_MODEL" && session_context_window "$_pm_id")" > "$PICK_MODEL_FILE"
     ;;
   gui)
     if [[ ! -f "$CLAU_GUI_SCRIPT" ]]; then

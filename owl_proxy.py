@@ -97,6 +97,7 @@ def _estimate_input_tokens(payload):
 
 OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.13:7077/v1")
 OWL_MODEL = os.environ.get("OWL_MODEL", "120")
+CLAW_COMPACT = os.environ.get("OWL_CLAW_COMPACT") == "1"   # zur Laufzeit per Steuerport (POST /claw) schaltbar
 OWL_USER = os.environ.get("OWL_PROXY_USER", "ccclau")
 
 # Token-Protokoll je Session: eine JSON-Zeile pro Anfrage (Modell, Ein-/Ausgabe).
@@ -833,7 +834,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             oai_payload["reasoning_effort"] = os.environ["OWL_REASONING_EFFORT"]
         # QuiteQue-eigener Kompressor (claw-compactor): kürzt den ausgehenden Prompt vor dem Backend, spart Prefill.
         # Schlägt er fehl, geht die Anfrage unverändert weiter. Aktiv mit OWL_CLAW_COMPACT=1 (clau → Auto-Compact).
-        if os.environ.get("OWL_CLAW_COMPACT") == "1":
+        if CLAW_COMPACT:
             oai_payload["compact"] = True
         tools = tools_ant_to_oai(req.get("tools"))
         if tools:
@@ -1377,7 +1378,11 @@ class ControlHandler(BaseHTTPRequestHandler):
             return
         try:
             d = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-            if self.path.startswith("/trace"):
+            if self.path.startswith("/claw"):
+                global CLAW_COMPACT
+                CLAW_COMPACT = bool(d.get("aktiv", True))
+                self._send(200, {"claw": CLAW_COMPACT})
+            elif self.path.startswith("/trace"):
                 self._send(200, {"aktiv": AKT.setze(d.get("aktiv", True))} if AKT is not None else {"fehler": "nicht geladen"})
             else:
                 self._send(200, ESC.setze(d))
