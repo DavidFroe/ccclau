@@ -486,6 +486,11 @@ class Screen:
             extra += " " + c("█" * f, GREEN) + c("░" * (n - f), GREY) + c(f" {d}/{t}", GREY)
         return c(lab[0], lab[1]) + c(extra, GREY)
 
+    _STAR = "·✢✳✶✻✽✻✶✳✢"      # pulsierender Stern wie in Claude Code (Punkt → Stern → Punkt)
+
+    def _star(self) -> str:
+        return self._STAR[int(time.monotonic() / 0.15) % len(self._STAR)]
+
     def _spin_text(self) -> str:
         """Arbeitszeile wie in Claude Code: „✻ Grübelt… (12s · ↓1.2k tok · Esc unterbricht)“, leer im Leerlauf."""
         s = self.state
@@ -500,7 +505,7 @@ class Screen:
                 t += f" · ↓{_fmt_k(self.out_chars // 4)} tok"
             if s.startswith("tool:"):
                 w += " (" + s.split(":", 1)[1] + ")"
-            return "  " + c("✻ ", ACCENT) + c(w + "…", ACCENT) + c(f" ({t} · Esc unterbricht)", GREY)
+            return "  " + c(self._star() + " ", ACCENT) + c(w + "…", ACCENT) + c(f" ({t} · Esc unterbricht)", GREY)
         except Exception:
             return ""
 
@@ -570,7 +575,7 @@ class Screen:
         self._tick_stop.clear()
 
         def run():
-            while not self._tick_stop.wait(0.4):
+            while not self._tick_stop.wait(0.15):
                 # Terminalgröße ändert sich oft ohne (rechtzeitiges) SIGWINCH, z.B. tmux beim Anhängen:
                 # dann sitzt die Eingabezeile eine Zeile zu hoch/tief, bis das Layout neu berechnet wird
                 sz = shutil.get_terminal_size((100, 30))
