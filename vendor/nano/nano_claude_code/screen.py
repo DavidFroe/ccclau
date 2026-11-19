@@ -117,6 +117,7 @@ class Screen:
         self.think_chars = 0        # Zeichen des laufenden Aufrufs (Live-Schätzung, Zeichen/4)
         self.text_chars = 0
         self.ctx_used = lambda: 0
+        self.cache = None   # (aus Cache, neu) des letzten Aufrufs; None = unbekannt
         self.ctx_max = 200_000
         self._ticker: threading.Thread | None = None
         self._tick_stop = threading.Event()
@@ -147,7 +148,9 @@ class Screen:
         sess = os.environ.get("NANO_SESSION_NAME", "").strip() or i.get("session") or ""
         folder = i.get("folder", "")
         from nano_claude_code import DISPLAY_NAME, DISPLAY_VERSION
-        l1 = c(DISPLAY_NAME, BOLD, ACCENT) + c(" " + DISPLAY_VERSION + "  ·  PropellerA", GREY)
+        forge_on = os.environ.get("NANO_COMPACT_MODE", "harness") in ("claw", "beide")
+        l1 = (c(DISPLAY_NAME, BOLD, ACCENT) + c(" " + DISPLAY_VERSION + "  ·  ", GREY) + c(i.get("model", "") or "?", BOLD)
+              + c("  ·  forge ", GREY) + (c("on", GREEN, BOLD) if forge_on else c("off", RED)))
         l2 = c("/help", ACCENT) + c(" for help  ·  ", GREY) + c("/tools", ACCENT) + c(" for tools (on/off in clau: menu x)", GREY)
         l3 = c(folder, GREY) + (c("  ·  ", GREY) + sess if sess else "")
         rows = [" " + mascot[0] + "  " + l1, " " + mascot[1] + "  " + l2, " " + mascot[2] + "  " + l3]
@@ -435,9 +438,30 @@ class Screen:
         """Session-Summen der Ausgabe: t = Denken, s = Antwort (laufender Aufruf geschätzt, danach exakt)."""
         return f" (t:{_fmt_k(self.think_tok + self.think_chars // 4)}|s:{_fmt_k(self.text_tok + self.text_chars // 4)})"
 
+    def set_cache(self, cached, total) -> None:
+        """Prompt-Cache des letzten Aufrufs: cached = aus dem Cache bedient, total = gesamte Eingabe."""
+        self.cache = None if cached is None else (int(cached), max(0, int(total) - int(cached)))
+        if self.active:
+            self.draw_status()
+
+    def _cache_label(self) -> str:
+        if self.cache is None:
+            return ""
+        hit, new = self.cache
+        return c(" cache ", GREY) + c(_fmt_k(hit), GREEN) + c("/", GREY) + c(_fmt_k(new), RED)
+
     def update_info(self, **kw) -> None:
         self.info.update(kw)
         if self.active:
+            try:        # Kopfzeile (Modell, forge on/off) nachziehen, wenn sich etwas geändert hat
+                with self.lock:
+                    h0 = self.build_header()[0]
+                    if self.header and h0 != self.header[0]:
+                        self.header[0] = h0
+                        self.real.write(f"\0337\033[1;1H\033[2K{h0}\0338")
+                        self.real.flush()
+            except Exception:
+                pass
             self.draw_status()
 
     def _state_label(self) -> str:
@@ -517,7 +541,7 @@ class Screen:
                 left = ""
                 for with_api, with_mode, with_eff in ((1, 1, 1), (1, 0, 1), (2, 0, 1), (0, 0, 1)):
                     a = api if with_api == 1 else (api.split()[0] if with_api == 2 and api else "")
-                    parts = [c(i.get("model", ""), BOLD) + c(self._tok_label(), GREY), c(a, GREY) if a else "", eff if with_eff else "",
+                    parts = [c(i.get("model", ""), BOLD) + c(self._tok_label(), GREY) + (self._cache_label() if with_eff else ""), c(a, GREY) if a else "", eff if with_eff else "",
                              c(i.get("mode", ""), GREY) if with_mode else ""]
                     dot = c(" · ", GREY)
                     left = " " + parts[0] + (dot + parts[1] if parts[1] else "")

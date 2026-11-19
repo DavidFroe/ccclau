@@ -205,6 +205,7 @@ def _needs_compaction(messages: list[dict], last_input_tokens: int) -> bool:
 
 _CC_CONT_MARK = "This session is being continued"
 PROGRESS_HOOK = None   # optional: Funktion (erledigt, gesamt) für einen Ladebalken beim Komprimieren
+CACHE_HOOK = None    # wird mit (cached_tokens|None, input_tokens) gerufen: Prompt-Cache-Treffer des letzten Aufrufs
 USAGE_HOOK = None    # wird nach jedem API-Aufruf mit (denk_tokens|None, antwort_tokens|None) gerufen
 STATUS_HOOK = None   # optional: Aufrufer (cli) setzt eine Funktion, die den Zustand "compact" in der Statusleiste anzeigt
 
@@ -607,6 +608,7 @@ def run_streaming(
         cache_creation = cache_read = 0
         final = None
         reasoning_tokens = None   # vom Backend gemeldete Denk-Tokens dieses Aufrufs
+        cached_seen = None        # vom Proxy gemeldeter Cache-Treffer (cached_tokens), None = unbekannt
 
         try:
             stream_ctx = _api_call_streaming(
@@ -623,6 +625,11 @@ def run_streaming(
                             _r = _u.model_extra.get("reasoning_tokens")
                         if isinstance(_r, (int, float)):
                             reasoning_tokens = int(_r)
+                        _c = getattr(_u, "cached_tokens", None)
+                        if _c is None and getattr(_u, "model_extra", None):
+                            _c = _u.model_extra.get("cached_tokens")
+                        if isinstance(_c, (int, float)):
+                            cached_seen = int(_c)
                     if etype == "content_block_delta":
                         delta = event.delta
                         dtype = getattr(delta, "type", None)
@@ -641,6 +648,11 @@ def run_streaming(
                 state.total_input_tokens += in_tokens
                 state.total_output_tokens += out_tokens
                 state.last_input_tokens = in_tokens
+                if CACHE_HOOK:
+                    try:
+                        CACHE_HOOK(cached_seen, in_tokens)
+                    except Exception:
+                        pass
                 if USAGE_HOOK:
                     USAGE_HOOK(reasoning_tokens, None if reasoning_tokens is None else max(0, out_tokens - reasoning_tokens))
 

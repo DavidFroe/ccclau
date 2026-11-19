@@ -318,6 +318,11 @@ def _cmd_compress(args: str, _state: AgentState, _config: dict) -> bool:
     except Exception:
         pass
     os.environ["NANO_COMPACT_MODE"] = mode
+    try:
+        from nano_claude_code.screen import SCREEN as _S
+        _S.update_info(forge=mode)
+    except Exception:
+        pass
     _ok(f"Komprimieren: {mode}" + ("" if ok or mode == "harness" else "  (nur Schwelle geändert)"))
     return True
 
@@ -1584,6 +1589,7 @@ def _run_repl(config: dict, resume_state: dict | None = None) -> int:
     if _screen_on:
         _agent_mod.STATUS_HOOK = SCREEN.set_state
         _agent_mod.USAGE_HOOK = SCREEN.call_done
+        _agent_mod.CACHE_HOOK = SCREEN.set_cache
         _agent_mod.PROGRESS_HOOK = SCREEN.set_progress
         SCREEN.start_ticker()
         print(ui.c("  /help for commands · Tab completes · PgUp scrolls back · Esc interrupts · Ctrl+C twice exits", ui.GREY))

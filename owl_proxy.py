@@ -449,8 +449,19 @@ def oai_resp_to_ant(oai_resp, model_name, est_input_tokens=0, skala=1.0):
             "input_tokens": int((usage.get("prompt_tokens") or est_input_tokens) * skala),
             "output_tokens": usage.get("completion_tokens", 0),
             **({"reasoning_tokens": _reasoning_tokens(usage)} if _reasoning_tokens(usage) is not None else {}),
+            **({"cached_tokens": int(_cached_tokens(usage) * skala)} if _cached_tokens(usage) is not None else {}),
         }
     }
+
+
+def _cached_tokens(usage):
+    """Aus dem Prompt-Cache bedienter Teil der Eingabe (prompt_tokens_details.cached_tokens); None = Backend meldet nichts."""
+    if not isinstance(usage, dict):
+        return None
+    v = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+    if v is None:
+        v = usage.get("cached_tokens")
+    return int(v) if isinstance(v, (int, float)) else None
 
 
 def _reasoning_tokens(usage):
@@ -740,7 +751,8 @@ class StreamTranslator:
                       "stop_sequence": None},
             "usage": {"input_tokens": int(self.input_tokens * self.skala),
                       "output_tokens": self.output_tokens,
-                      **({"reasoning_tokens": self.reasoning_tokens} if self.reasoning_tokens is not None else {})}
+                      **({"reasoning_tokens": self.reasoning_tokens} if self.reasoning_tokens is not None else {}),
+                      **({"cached_tokens": int(self.cached_tokens * self.skala)} if isinstance(self.cached_tokens, (int, float)) else {})}
         }))
         out.append(self._evt("message_stop", {"type": "message_stop"}))
         return "".join(out)
