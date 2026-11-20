@@ -1949,6 +1949,12 @@ def _load_resume_session(resume_arg: str) -> dict | None:
                 return load_session(str(snap))
             except Exception:
                 pass
+    # Fortsetzen über den Dateinamen (clau übergibt nano-Sitzungen als "cc-<id>.json" oder "<name>.json"):
+    # trotzdem unter diesem Namen weitersichern, sonst landet der Stand nur in autosave_latest.json,
+    # und die nächste parallel laufende Sitzung überschreibt ihn.
+    _bn = Path(resume_arg).name
+    if _bn.endswith(".json") and _bn not in ("autosave_latest.json", "_latest.json") and "/" not in resume_arg:
+        _SNAPSHOT_NAME = _bn
     cc = load_cc_session(resume_arg)
     if cc is not None:
         return cc
