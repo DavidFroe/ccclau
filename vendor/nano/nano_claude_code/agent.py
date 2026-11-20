@@ -67,6 +67,20 @@ MAX_RETRIES = 5
 RETRY_BASE_DELAY = 1.0
 RETRY_MAX_DELAY = 60.0
 
+# Geduldig bei Serverneustart/Überlast (Nachtläufe): Wartezeit 5, 10, 20, 40, 60, 60 … s, standardmäßig 12 Versuche (~9 min)
+STREAM_RETRY_MAX = int(os.environ.get("NANO_STREAM_RETRIES") or 12)
+# Sackgasse (nur gedacht / Token-Limit im Denken / Stream ohne Antwort): so oft Qode selbst mit kurzer Anweisung nachfasst
+DEAD_END_NUDGES = int(os.environ.get("NANO_DEADEND_NUDGES") or 2)
+_DEAD_END_MARKS = ("nachgedacht", "nach dem nachdenken", "token-limit erreicht", "leere antwort")
+
+
+def _dead_end_text(content) -> bool:
+    """Hat der Proxy statt einer Antwort nur seine Ersatzmeldung geliefert (Modell dachte sich fest)?"""
+    texts = [getattr(b, "text", "") for b in (content or []) if getattr(b, "type", "") == "text"]
+    t = " ".join(texts).strip().lower()
+    return t.startswith("[modell ") and any(k in t for k in _DEAD_END_MARKS)
+
+
 _RETRYABLE_STATUS_CODES = {429, 529, 500, 502, 503, 504}
 
 
@@ -589,6 +603,7 @@ def run_streaming(
 
     cached_system = _build_cached_system(system_prompt) if enable_cache else system_prompt
     stream_retries = 0
+    dead_nudges = 0
 
     while True:
         state.turn_count += 1
@@ -667,12 +682,12 @@ def run_streaming(
         except (anthropic.APIError, httpx.TransportError) as e:
             # Fehler beim Lesen des Streams (503 'Loading model', abgerissene Verbindung):
             # der Retry in _api_call_streaming greift hier nie, weil stream() erst beim Lesen verbindet.
-            if (stream_retries < 3 and (isinstance(e, httpx.TransportError) or _should_retry(e))):
+            if (stream_retries < STREAM_RETRY_MAX and (isinstance(e, httpx.TransportError) or _should_retry(e))):
                 stream_retries += 1
                 state.turn_count -= 1
-                wait = 5 * stream_retries  # 5 s, 10 s, 15 s
+                wait = min(60, 5 * 2 ** (stream_retries - 1))  # 5, 10, 20, 40, 60, 60 … s
                 teil = " – Teilantwort verworfen" if out_started else ""
-                yield TextChunk(f"\n[Verbindung zum Modell gestört ({type(e).__name__}){teil} – Wiederholung {stream_retries}/3 in {wait}s]\n")
+                yield TextChunk(f"\n[Verbindung zum Modell gestört ({type(e).__name__}){teil} – Wiederholung {stream_retries}/{STREAM_RETRY_MAX} in {wait}s]\n")
                 time.sleep(wait)
                 continue
             yield TextChunk(f"\n[API Error: {e}]\n")
@@ -680,6 +695,21 @@ def run_streaming(
         stream_retries = 0
 
         yield TurnDone(in_tokens, out_tokens, cache_creation, cache_read)
+
+        if final and not tool_uses and dead_nudges < DEAD_END_NUDGES and _dead_end_text(final.content):
+            # Sackgasse: Ersatzmeldung wieder aus dem Verlauf nehmen und mit kurzer Anweisung selbst nachfassen
+            dead_nudges += 1
+            state.messages.pop()
+            nudge = ("Dein letztes Nachdenken lieferte keine Antwort. Denke nur kurz nach und führe SOFORT den "
+                     "nächsten kleinen Schritt aus (ein Tool-Aufruf oder eine kurze Antwort).")
+            last = state.messages[-1] if state.messages else None
+            if last and last.get("role") == "user":
+                c = last.get("content")
+                last["content"] = (c + "\n\n" + nudge) if isinstance(c, str) else list(c or []) + [{"type": "text", "text": nudge}]
+            else:
+                state.messages.append({"role": "user", "content": nudge})
+            yield TextChunk(f"\n[Sackgasse – Qode fasst selbst nach ({dead_nudges}/{DEAD_END_NUDGES})]\n")
+            continue
 
         if final and final.stop_reason == "max_tokens" and not tool_uses:
             continuations += 1

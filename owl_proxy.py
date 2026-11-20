@@ -97,6 +97,9 @@ def _estimate_input_tokens(payload):
 
 OWL_BASE = os.environ.get("OWL_BASE_URL", "http://11.0.0.13:7077/v1")
 OWL_MODEL = os.environ.get("OWL_MODEL", "120")
+# Geduld bei Überlast/Serverneustart (429/503/502 "alle Kandidaten"/"Stream-Fehler"): Wartezeit 5, 10, 15 … max. 60 s je Versuch
+UEBERLAST_VERSUCHE = int(os.environ.get("OWL_UEBERLAST_RETRIES") or 10)      # ~6 min insgesamt
+STREAM_ABBRUCH_VERSUCHE = int(os.environ.get("OWL_STREAM_RETRIES") or 6)
 CLAW_COMPACT = os.environ.get("OWL_CLAW_COMPACT") == "1"   # zur Laufzeit per Steuerport (POST /claw) schaltbar
 OWL_USER = os.environ.get("OWL_PROXY_USER", "ccclau")
 
@@ -506,7 +509,7 @@ class StreamTranslator:
         self.empty_pending = False  # leere Antwort erkannt, Retry steht aus
         self.len_retry_ok = False   # Proxy darf einmal neu anfragen, wenn das Token-Limit im Denken verbraucht wurde
         self.len_pending = False
-        self.err_retries_left = 3   # Abbrüche des Backend-Streams ohne Antwort: bis zu 3 Wiederholungen
+        self.err_retries_left = STREAM_ABBRUCH_VERSUCHE   # Abbrüche des Backend-Streams ohne Antwort: Wiederholungen
         self.err_content = False    # Fehlertext kam als normaler Antworttext (QuiteQue)
         self.err_pending = False
         self.fin_seen = False       # finish_reason vom Backend gesehen
@@ -913,7 +916,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # bereits laufenden Stream noch an dessen Timeout. Jeder andere
             # Fehler (auch ein zweites 429/503) geht unverändert durch.
             resp = None
-            for attempt in range(4):
+            for attempt in range(UEBERLAST_VERSUCHE + 1):
                 resp = requests.post(
                     f"{base}/chat/completions",
                     json=oai_payload,
@@ -937,14 +940,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     except Exception:
                         _b = ""
                     _ueberlast = any(k in _b for k in ("ausgelastet", "pool-timeout", "stream-fehler", "alle kandidaten"))
-                if attempt < 3 and _ueberlast:
+                if attempt < UEBERLAST_VERSUCHE and _ueberlast:
                     retry_after = resp.headers.get("Retry-After")
                     try:
-                        backoff = min(float(retry_after), 30.0) if retry_after else 5.0 * (attempt + 1)
+                        backoff = min(float(retry_after), 60.0) if retry_after else min(60.0, 5.0 * (attempt + 1))
                     except ValueError:
-                        backoff = 5.0 * (attempt + 1)
+                        backoff = min(60.0, 5.0 * (attempt + 1))
                     log(f"✗ Backend {resp.status_code} nach {time.monotonic()-t0:.1f}s "
-                        f"-- Retry {attempt+1}/3 in {backoff:.0f}s")
+                        f"-- Retry {attempt+1}/{UEBERLAST_VERSUCHE} in {backoff:.0f}s")
                     resp.close()
                     time.sleep(backoff)
                     continue
@@ -1189,7 +1192,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if tr.err_pending and retry_fn is not None:
                     tr.err_pending = False
                     tr.err_retries_left -= 1
-                    wait = 4 * (3 - tr.err_retries_left)       # 4 s, 8 s, 12 s
+                    wait = min(60, 5 * 2 ** (STREAM_ABBRUCH_VERSUCHE - tr.err_retries_left - 1))       # 5, 10, 20, 40, 60 … s
                     log(f"  Stream-Abbruch (model={tr.target}) -- Wiederholung in {wait}s (noch {tr.err_retries_left})")
                     try:
                         owl_resp.close()
