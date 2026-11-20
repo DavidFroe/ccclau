@@ -24,7 +24,8 @@ a = ap.parse_args()
 
 src_dir = os.path.join(root, enc(a.src)) if a.src else None
 if src_dir is None:
-    hits = [os.path.join(root, d) for d in os.listdir(root) if os.path.exists(os.path.join(root, d, a.sid + ".jsonl"))]
+    hits = [os.path.join(root, d) for d in os.listdir(root)
+            if d != enc(a.to) and os.path.exists(os.path.join(root, d, a.sid + ".jsonl"))]   # Ziel ist nicht die Quelle
     if len(hits) != 1:
         sys.exit(f"Sitzung {a.sid}: {len(hits)} Fundorte, bitte --from angeben" if hits else f"Sitzung {a.sid} nicht gefunden")
     src_dir = hits[0]
