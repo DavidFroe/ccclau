@@ -4963,8 +4963,10 @@ session_action_menu() {
   echo "  0) Zurück"
   printf "Auswahl [0-8, h, w, Enter=1]: "
   local action; read -r action
-  if [[ "$sid" == *.json && ! "${action:-1}" =~ ^([1hHwW])$ ]]; then
-    echo "Für ${CLAU_NANO_NAME}-Sessions geht nur Fortsetzen (Dateien liegen in ~/.nano_claude/sessions)."
+  # 6 (tmux fixieren) ist eine Meta-Einstellung in .clau-session-meta.json und berührt die
+  # Session-Datei nicht → geht auch für ${CLAU_NANO_NAME}-Sessions (run_resume_id hängt sie an).
+  if [[ "$sid" == *.json && ! "${action:-1}" =~ ^([16hHwW])$ ]]; then
+    echo "Für ${CLAU_NANO_NAME}-Sessions geht nur Fortsetzen und tmux fixieren (Dateien liegen in ~/.nano_claude/sessions)."
     return 0
   fi
   case "${action:-1}" in
@@ -5056,6 +5058,7 @@ session_action_menu() {
       else
         _session_tmux_set "$sid" 1; echo "✓ Fixiert: startet ab jetzt immer in tmux ($(_tmux_name "$sid"))."
       fi
+      session_action_menu "$1"
       ;;
     7)
       # Verzeichnis-Werte merken, Überschreibungen der Session laden, Menü bearbeiten, danach Verzeichnis-Werte zurück
