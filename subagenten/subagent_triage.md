@@ -19,6 +19,7 @@ David wirft Bugs und Änderungswünsche frei formuliert in `tracker/INBOX.md`. D
    | Ungetestetes prüfen / Fehler nachstellen | `subagent_tests.md` |
    | README/Hilfetexte | `subagent_doku.md` |
    | Commits, Release, Aufräumen | `subagent_maintainer.md` |
+   | Webrecherche, Programme/Tools installieren, Daten besorgen | `subagent_admin_installer.md` |
    | clau.sh-Menüs, Modellwahl/Routing, Konfiguration, Proxy | `subagent_clau.md` |
    | Rest | `haupt` |
 3. Je Agent einen **Auftrag** schreiben (in `tracker/auftraege/<agent>-<datum>.md`): die zugewiesenen IDs mit Originaltext des Eintrags,

@@ -19,3 +19,4 @@ das macht die Hauptsitzung nach Durchsicht.
 ## Bugtracker
 `tracker/INBOX.md` ← David schreibt frei rein · `tracker/TRACKER.md` ← geordnete Liste · `tracker/auftraege/` ← Aufträge je Agent.
 Ablauf: Triage-Agent sortiert → Aufträge → Subagenten arbeiten → Triage trägt Ergebnis ein → Hauptsitzung committet.
+| `subagent_admin_installer.md` | Webrecherche, Programme/Tools installieren, Daten für ccclau besorgen (dokumentiert in `docs/BESCHAFFT.md`) |
